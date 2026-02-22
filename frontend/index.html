@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PyMentor — Python Learning Agent</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Left Panel -->
+        <div class="left-panel">
+            <h2>PyMentor</h2>
+            <div>
+                <label for="email-input">Your Email</label>
+                <input type="email" id="email-input" placeholder="learner@example.com" value=""
+                       onchange="onEmailChange()">
+            </div>
+            <div class="session-section" id="session-section" style="display:none">
+                <div class="session-header">
+                    <label>Sessions</label>
+                    <button class="new-session-btn" onclick="createNewSession()" title="New Session">+</button>
+                </div>
+                <div class="session-list" id="session-list"></div>
+            </div>
+            <div class="nav-links">
+                <a href="/graph" class="nav-link" target="_blank">Knowledge Graph</a>
+                <a href="/chroma" class="nav-link" target="_blank">Memory Explorer</a>
+            </div>
+            <div class="status-indicator" id="status">Ready</div>
+        </div>
+
+        <!-- Center Panel (Chat) -->
+        <div class="center-panel">
+            <div class="chat-header">Python Learning Assistant</div>
+            <div class="chat-messages" id="chat-messages">
+                <div class="empty-state">
+                    <div class="emoji">&#127891;</div>
+                    Enter your email and start asking Python questions!
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="message-input" placeholder="Ask me anything about Python..."
+                       onkeydown="if(event.key==='Enter') sendMessage()">
+                <button id="send-btn" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+
+        <!-- Right Panel (Knowledge Dashboard) -->
+        <div class="right-panel">
+            <div class="tabs">
+                <div class="tab active" data-tab="progress" onclick="switchTab('progress')">Progress</div>
+                <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
+                <div class="tab" data-tab="quizzes" onclick="switchTab('quizzes')">Quizzes</div>
+                <div class="tab" data-tab="events" onclick="switchTab('events')">Events</div>
+            </div>
+
+            <!-- Progress Tab -->
+            <div class="tab-content active" id="tab-progress">
+                <div class="empty-state" id="progress-empty">
+                    <div class="emoji">&#128218;</div>
+                    Start learning to see your progress here!
+                </div>
+                <div id="progress-content" style="display:none"></div>
+            </div>
+
+            <!-- History Tab -->
+            <div class="tab-content" id="tab-history">
+                <div class="empty-state" id="history-empty">
+                    <div class="emoji">&#128338;</div>
+                    Past conversations will appear here.
+                </div>
+                <div id="history-content" style="display:none"></div>
+            </div>
+
+            <!-- Quizzes Tab -->
+            <div class="tab-content" id="tab-quizzes">
+                <div class="empty-state" id="quizzes-empty">
+                    <div class="emoji">&#9889;</div>
+                    Ask "quiz me!" to test your knowledge.
+                </div>
+                <div id="quizzes-content" style="display:none"></div>
+            </div>
+
+            <!-- Events Tab -->
+            <div class="tab-content" id="tab-events">
+                <div id="events-log"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

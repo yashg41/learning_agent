@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PyMentor — Knowledge Graph</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #1a1b26;
+            --bg2: #24283b;
+            --bg3: #2f3348;
+            --text: #c0caf5;
+            --text2: #a9b1d6;
+            --muted: #565f89;
+            --border: #3b4261;
+            --accent: #7aa2f7;
+        }
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+        }
+        .layout { display: flex; height: 100vh; }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            min-width: 260px;
+            background: var(--bg2);
+            border-right: 1px solid var(--border);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            overflow-y: auto;
+        }
+        .sidebar h2 {
+            font-size: 14px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .sidebar label {
+            font-size: 11px;
+            color: var(--muted);
+            display: block;
+            margin-bottom: 4px;
+        }
+        .sidebar input, .sidebar select {
+            width: 100%;
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 10px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 12px;
+        }
+        .sidebar input:focus, .sidebar select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        /* Legend */
+        .legend { margin-top: 8px; }
+        .legend h3 {
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 3px 0;
+            font-size: 11px;
+            color: var(--text2);
+        }
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        /* Mastery legend */
+        .mastery-legend { margin-top: 14px; }
+        .mastery-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 3px 0;
+            font-size: 11px;
+            color: var(--text2);
+        }
+        .mastery-ring {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            border: 2px solid;
+        }
+        .mastery-ring.not_started { border-color: var(--muted); background: transparent; }
+        .mastery-ring.introduced { border-color: #e0af68; background: rgba(224,175,104,0.2); }
+        .mastery-ring.practiced { border-color: #7aa2f7; background: rgba(122,162,247,0.3); }
+        .mastery-ring.mastered { border-color: #9ece6a; background: rgba(158,206,106,0.5); }
+
+        /* Stats */
+        .stats {
+            margin-top: auto;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            padding: 3px 0;
+        }
+        .stat-label { color: var(--muted); }
+        .stat-value { color: var(--text); font-weight: 600; }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            display: none;
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 11px;
+            max-width: 220px;
+            pointer-events: none;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+        .tooltip .tt-name {
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .tooltip .tt-cat {
+            color: var(--muted);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        .tooltip .tt-mastery {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+        .tooltip .tt-prereqs {
+            color: var(--muted);
+            font-size: 10px;
+            margin-top: 4px;
+        }
+
+        /* Canvas area */
+        .graph-area {
+            flex: 1;
+            position: relative;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        .nav-hint {
+            position: absolute;
+            bottom: 12px;
+            right: 16px;
+            font-size: 10px;
+            color: var(--muted);
+        }
+        a.back-link {
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 11px;
+        }
+        a.back-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="layout">
+        <div class="sidebar">
+            <div>
+                <h2>Knowledge Graph</h2>
+                <a href="/" class="back-link">Back to Chat</a>
+            </div>
+            <div>
+                <label>Email</label>
+                <input type="email" id="email" placeholder="learner@example.com">
+            </div>
+            <div>
+                <button onclick="loadGraph()" style="width:100%;padding:8px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;">Load Graph</button>
+            </div>
+
+            <div class="legend" id="category-legend">
+                <h3>Categories</h3>
+            </div>
+
+            <div class="mastery-legend">
+                <h3>Mastery Levels</h3>
+                <div class="mastery-item"><div class="mastery-ring not_started"></div> Not Started</div>
+                <div class="mastery-item"><div class="mastery-ring introduced"></div> Introduced</div>
+                <div class="mastery-item"><div class="mastery-ring practiced"></div> Practiced</div>
+                <div class="mastery-item"><div class="mastery-ring mastered"></div> Mastered</div>
+            </div>
+
+            <div class="stats" id="stats"></div>
+        </div>
+
+        <div class="graph-area">
+            <canvas id="canvas"></canvas>
+            <div class="tooltip" id="tooltip"></div>
+            <div class="nav-hint">Drag nodes | Scroll to zoom | Drag canvas to pan</div>
+        </div>
+    </div>
+
+<script>
+// =====================================================================
+// Force-Directed Graph Visualization
+// =====================================================================
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const tooltip = document.getElementById("tooltip");
+
+let nodes = [];
+let edges = [];
+let categories = [];
+let dpr = window.devicePixelRatio || 1;
+
+// Physics simulation
+const SIM = {
+    repulsion: 3000,
+    attraction: 0.005,
+    edgeLength: 120,
+    damping: 0.85,
+    centerGravity: 0.01,
+    running: true,
+    iterations: 0,
+};
+
+// View state
+let viewX = 0, viewY = 0, zoom = 1;
+let dragging = null;    // node being dragged
+let panning = false;
+let panStart = { x: 0, y: 0 };
+let hoveredNode = null;
+
+// Mastery colors
+const MASTERY_COLORS = {
+    not_started: { fill: "rgba(86,95,137,0.15)", stroke: "#565f89" },
+    introduced:  { fill: "rgba(224,175,104,0.25)", stroke: "#e0af68" },
+    practiced:   { fill: "rgba(122,162,247,0.35)", stroke: "#7aa2f7" },
+    mastered:    { fill: "rgba(158,206,106,0.5)", stroke: "#9ece6a" },
+};
+
+function resize() {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvas.style.width = rect.width + "px";
+    canvas.style.height = rect.height + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+async function loadGraph() {
+    const email = document.getElementById("email").value.trim();
+    if (!email) return;
+
+    try {
+        const res = await fetch(`/api/graph/${encodeURIComponent(email)}`);
+        if (!res.ok) throw new Error("Failed to load graph");
+        const data = await res.json();
+
+        categories = data.categories;
+        buildCategoryLegend(categories);
+
+        // Initialize nodes with positions
+        const cx = canvas.width / dpr / 2;
+        const cy = canvas.height / dpr / 2;
+        nodes = data.nodes.map((n, i) => {
+            // Arrange by category in a circle initially
+            const catIdx = categories.findIndex(c => c.id === n.category);
+            const angle = (catIdx / categories.length) * Math.PI * 2;
+            const radius = 150 + Math.random() * 100;
+            return {
+                ...n,
+                x: cx + Math.cos(angle) * radius + (Math.random() - 0.5) * 80,
+                y: cy + Math.sin(angle) * radius + (Math.random() - 0.5) * 80,
+                vx: 0, vy: 0,
+                radius: n.mastery === "mastered" ? 20 : n.mastery === "practiced" ? 17 : n.mastery === "introduced" ? 15 : 12,
+            };
+        });
+
+        // Build edge references
+        const nodeMap = {};
+        nodes.forEach(n => nodeMap[n.id] = n);
+        edges = data.edges.map(e => ({
+            source: nodeMap[e.source],
+            target: nodeMap[e.target],
+        })).filter(e => e.source && e.target);
+
+        // Reset view
+        viewX = 0; viewY = 0; zoom = 1;
+        SIM.iterations = 0;
+        SIM.running = true;
+
+        // Show stats
+        updateStats(data);
+
+    } catch (err) {
+        console.error(err);
+    }
+}
+
+function buildCategoryLegend(cats) {
+    const el = document.getElementById("category-legend");
+    let html = "<h3>Categories</h3>";
+    for (const c of cats) {
+        html += `<div class="legend-item"><div class="legend-dot" style="background:${c.color}"></div>${c.name}</div>`;
+    }
+    el.innerHTML = html;
+}
+
+function updateStats(data) {
+    const total = data.nodes.length;
+    const started = data.nodes.filter(n => n.mastery !== "not_started").length;
+    const mastered = data.nodes.filter(n => n.mastery === "mastered").length;
+    const practiced = data.nodes.filter(n => n.mastery === "practiced").length;
+    const introduced = data.nodes.filter(n => n.mastery === "introduced").length;
+
+    const el = document.getElementById("stats");
+    el.innerHTML = `
+        <div class="stat-row"><span class="stat-label">Total Concepts</span><span class="stat-value">${total}</span></div>
+        <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${started}/${total}</span></div>
+        <div class="stat-row"><span class="stat-label">Mastered</span><span class="stat-value" style="color:#9ece6a">${mastered}</span></div>
+        <div class="stat-row"><span class="stat-label">Practiced</span><span class="stat-value" style="color:#7aa2f7">${practiced}</span></div>
+        <div class="stat-row"><span class="stat-label">Introduced</span><span class="stat-value" style="color:#e0af68">${introduced}</span></div>
+    `;
+}
+
+// =====================================================================
+// Physics Simulation
+// =====================================================================
+
+function simulate() {
+    if (!SIM.running || nodes.length === 0) return;
+
+    const cx = canvas.width / dpr / 2;
+    const cy = canvas.height / dpr / 2;
+
+    // Repulsion between all node pairs
+    for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+            const a = nodes[i], b = nodes[j];
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            let force = SIM.repulsion / (dist * dist);
+            let fx = (dx / dist) * force;
+            let fy = (dy / dist) * force;
+            a.vx -= fx; a.vy -= fy;
+            b.vx += fx; b.vy += fy;
+        }
+    }
+
+    // Attraction along edges
+    for (const e of edges) {
+        let dx = e.target.x - e.source.x;
+        let dy = e.target.y - e.source.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        let force = (dist - SIM.edgeLength) * SIM.attraction;
+        let fx = (dx / dist) * force;
+        let fy = (dy / dist) * force;
+        e.source.vx += fx; e.source.vy += fy;
+        e.target.vx -= fx; e.target.vy -= fy;
+    }
+
+    // Center gravity
+    for (const n of nodes) {
+        n.vx += (cx - n.x) * SIM.centerGravity;
+        n.vy += (cy - n.y) * SIM.centerGravity;
+    }
+
+    // Apply velocity
+    for (const n of nodes) {
+        if (n === dragging) continue;
+        n.vx *= SIM.damping;
+        n.vy *= SIM.damping;
+        n.x += n.vx;
+        n.y += n.vy;
+    }
+
+    SIM.iterations++;
+    // Slow down after stabilizing
+    if (SIM.iterations > 300) {
+        SIM.running = false;
+    }
+}
+
+// =====================================================================
+// Rendering
+// =====================================================================
+
+function draw() {
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.save();
+    ctx.translate(w / 2 + viewX, h / 2 + viewY);
+    ctx.scale(zoom, zoom);
+    ctx.translate(-w / 2, -h / 2);
+
+    // Draw edges
+    for (const e of edges) {
+        const srcMastery = e.source.mastery || "not_started";
+        const tgtMastery = e.target.mastery || "not_started";
+        const bothStarted = srcMastery !== "not_started" && tgtMastery !== "not_started";
+
+        ctx.beginPath();
+        ctx.moveTo(e.source.x, e.source.y);
+        ctx.lineTo(e.target.x, e.target.y);
+        ctx.strokeStyle = bothStarted ? "rgba(122,162,247,0.3)" : "rgba(59,66,97,0.5)";
+        ctx.lineWidth = bothStarted ? 1.5 : 0.8;
+        ctx.stroke();
+
+        // Arrow head
+        const dx = e.target.x - e.source.x;
+        const dy = e.target.y - e.source.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const ux = dx / dist, uy = dy / dist;
+        const arrowX = e.target.x - ux * (e.target.radius + 4);
+        const arrowY = e.target.y - uy * (e.target.radius + 4);
+        const arrowSize = 6;
+
+        ctx.beginPath();
+        ctx.moveTo(arrowX, arrowY);
+        ctx.lineTo(arrowX - ux * arrowSize - uy * arrowSize * 0.5, arrowY - uy * arrowSize + ux * arrowSize * 0.5);
+        ctx.lineTo(arrowX - ux * arrowSize + uy * arrowSize * 0.5, arrowY - uy * arrowSize - ux * arrowSize * 0.5);
+        ctx.closePath();
+        ctx.fillStyle = bothStarted ? "rgba(122,162,247,0.4)" : "rgba(59,66,97,0.4)";
+        ctx.fill();
+    }
+
+    // Draw nodes
+    for (const n of nodes) {
+        const mc = MASTERY_COLORS[n.mastery] || MASTERY_COLORS.not_started;
+        const isHovered = n === hoveredNode;
+        const r = isHovered ? n.radius + 3 : n.radius;
+
+        // Outer glow for hovered
+        if (isHovered) {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, r + 4, 0, Math.PI * 2);
+            ctx.fillStyle = `${n.color}22`;
+            ctx.fill();
+        }
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = mc.fill;
+        ctx.fill();
+        ctx.strokeStyle = isHovered ? "#ffffff" : mc.stroke;
+        ctx.lineWidth = isHovered ? 2.5 : 1.8;
+        ctx.stroke();
+
+        // Inner category color dot
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r * 0.4, 0, Math.PI * 2);
+        ctx.fillStyle = n.color;
+        ctx.fill();
+
+        // Label
+        ctx.fillStyle = isHovered ? "#ffffff" : "rgba(192,202,245,0.85)";
+        ctx.font = `${isHovered ? "bold " : ""}${10 / Math.max(zoom, 0.5)}px 'JetBrains Mono', monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(n.name, n.x, n.y + r + 4);
+    }
+
+    ctx.restore();
+}
+
+function loop() {
+    simulate();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// =====================================================================
+// Interaction
+// =====================================================================
+
+function screenToWorld(sx, sy) {
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+    return {
+        x: (sx - w / 2 - viewX) / zoom + w / 2,
+        y: (sy - h / 2 - viewY) / zoom + h / 2,
+    };
+}
+
+function findNodeAt(wx, wy) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        const dx = n.x - wx, dy = n.y - wy;
+        if (dx * dx + dy * dy < (n.radius + 5) * (n.radius + 5)) return n;
+    }
+    return null;
+}
+
+canvas.addEventListener("mousedown", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const { x, y } = screenToWorld(sx, sy);
+    const node = findNodeAt(x, y);
+
+    if (node) {
+        dragging = node;
+        SIM.running = true;
+        SIM.iterations = 0;
+    } else {
+        panning = true;
+        panStart = { x: e.clientX - viewX, y: e.clientY - viewY };
+    }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+
+    if (dragging) {
+        const { x, y } = screenToWorld(sx, sy);
+        dragging.x = x;
+        dragging.y = y;
+        dragging.vx = 0;
+        dragging.vy = 0;
+    } else if (panning) {
+        viewX = e.clientX - panStart.x;
+        viewY = e.clientY - panStart.y;
+    } else {
+        // Hover detection
+        const { x, y } = screenToWorld(sx, sy);
+        const node = findNodeAt(x, y);
+        hoveredNode = node;
+        canvas.style.cursor = node ? "grab" : "default";
+
+        if (node) {
+            const masteryLabel = node.mastery === "not_started" ? "Not Started" :
+                node.mastery.charAt(0).toUpperCase() + node.mastery.slice(1);
+            const masteryColor = MASTERY_COLORS[node.mastery]?.stroke || "#565f89";
+
+            // Find prerequisites
+            const prereqs = edges.filter(e => e.target === node).map(e => e.source.name);
+            const dependents = edges.filter(e => e.source === node).map(e => e.target.name);
+
+            tooltip.style.display = "block";
+            tooltip.style.left = (e.clientX + 14) + "px";
+            tooltip.style.top = (e.clientY - 10) + "px";
+            tooltip.innerHTML = `
+                <div class="tt-name" style="color:${node.color}">${node.name}</div>
+                <div class="tt-cat">${node.category.replace("_", " ")}</div>
+                <div class="tt-mastery" style="color:${masteryColor}">${masteryLabel}</div>
+                ${node.review_count ? `<div style="color:var(--muted)">Reviewed ${node.review_count}x</div>` : ""}
+                ${prereqs.length ? `<div class="tt-prereqs">Requires: ${prereqs.join(", ")}</div>` : '<div class="tt-prereqs">No prerequisites</div>'}
+                ${dependents.length ? `<div class="tt-prereqs">Unlocks: ${dependents.join(", ")}</div>` : ""}
+            `;
+        } else {
+            tooltip.style.display = "none";
+        }
+    }
+});
+
+canvas.addEventListener("mouseup", () => {
+    dragging = null;
+    panning = false;
+});
+
+canvas.addEventListener("mouseleave", () => {
+    dragging = null;
+    panning = false;
+    hoveredNode = null;
+    tooltip.style.display = "none";
+});
+
+canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    zoom = Math.max(0.2, Math.min(3, zoom * delta));
+}, { passive: false });
+
+// =====================================================================
+// Init
+// =====================================================================
+
+window.addEventListener("resize", resize);
+resize();
+loop();
+</script>
+</body>
+</html>

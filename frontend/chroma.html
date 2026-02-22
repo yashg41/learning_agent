@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChromaDB Viewer - PyMentor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg-primary: #1a1b26;
+            --bg-secondary: #24283b;
+            --bg-tertiary: #2f3348;
+            --text-primary: #c0caf5;
+            --text-secondary: #a9b1d6;
+            --text-muted: #565f89;
+            --accent: #7aa2f7;
+            --accent-hover: #89b4fa;
+            --success: #9ece6a;
+            --warning: #e0af68;
+            --error: #f7768e;
+            --border: #3b4261;
+            --cyan: #7dcfff;
+            --magenta: #bb9af7;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        /* Top Bar */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .topbar h1 {
+            font-size: 15px;
+            color: var(--accent);
+            letter-spacing: 1px;
+        }
+
+        .topbar a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 12px;
+        }
+
+        .topbar a:hover { color: var(--accent); }
+
+        /* Stats Bar */
+        .stats-bar {
+            display: flex;
+            gap: 24px;
+            padding: 14px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .stat-chip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+        }
+
+        .stat-chip .label { color: var(--text-muted); }
+        .stat-chip .value { color: var(--text-primary); font-weight: 700; }
+        .stat-chip .value.accent { color: var(--accent); }
+
+        /* Main Layout */
+        .main {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: auto 1fr;
+            gap: 0;
+            height: calc(100vh - 90px);
+        }
+
+        /* Search Panel (spans full width) */
+        .search-panel {
+            grid-column: 1 / -1;
+            padding: 14px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .search-panel input {
+            flex: 1;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 12px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        .search-panel input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .search-panel button {
+            background: var(--accent);
+            color: var(--bg-primary);
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .search-panel button:hover { background: var(--accent-hover); }
+
+        .search-panel select {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 10px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 12px;
+        }
+
+        /* Left: Scatter Plot */
+        .scatter-panel {
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 10px 16px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-secondary);
+        }
+
+        .scatter-container {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        canvas#scatter-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .scatter-empty {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 11px;
+            max-width: 320px;
+            pointer-events: none;
+            z-index: 100;
+            display: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+
+        .tooltip .tt-doc {
+            color: var(--text-secondary);
+            line-height: 1.4;
+            margin-bottom: 4px;
+        }
+
+        .tooltip .tt-meta {
+            color: var(--text-muted);
+            font-size: 10px;
+        }
+
+        .tooltip .tt-topics {
+            margin-top: 4px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+        }
+
+        .tooltip .tt-tag {
+            font-size: 9px;
+            background: rgba(122, 162, 247, 0.15);
+            color: var(--accent);
+            padding: 1px 5px;
+            border-radius: 2px;
+        }
+
+        /* Right: Document List */
+        .docs-panel {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .docs-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        .doc-card {
+            background: var(--bg-tertiary);
+            border: 1px solid transparent;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: border-color 0.15s;
+        }
+
+        .doc-card:hover {
+            border-color: var(--accent);
+        }
+
+        .doc-card.active {
+            border-color: var(--accent);
+            background: rgba(122, 162, 247, 0.08);
+        }
+
+        .doc-card.search-result {
+            border-left: 3px solid var(--success);
+        }
+
+        .doc-id {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .doc-text {
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-bottom: 6px;
+        }
+
+        .doc-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .doc-email {
+            font-size: 10px;
+            color: var(--cyan);
+        }
+
+        .doc-time {
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .doc-similarity {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--success);
+            margin-left: auto;
+        }
+
+        .doc-topics {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+            margin-top: 6px;
+        }
+
+        .doc-tag {
+            font-size: 10px;
+            background: rgba(122, 162, 247, 0.15);
+            color: var(--accent);
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+
+        .docs-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; }
+        }
+
+        .loading-dot {
+            animation: pulse 1.2s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <h1>CHROMADB VIEWER</h1>
+        <a href="/">Back to PyMentor</a>
+    </div>
+
+    <div class="stats-bar" id="stats-bar">
+        <div class="stat-chip"><span class="label">Collection:</span> <span class="value accent" id="stat-collection">--</span></div>
+        <div class="stat-chip"><span class="label">Documents:</span> <span class="value" id="stat-count">--</span></div>
+        <div class="stat-chip"><span class="label">Embeddings:</span> <span class="value" id="stat-dims">--</span></div>
+        <div class="stat-chip"><span class="label">Model:</span> <span class="value" id="stat-model">--</span></div>
+        <div class="stat-chip"><span class="label">Distance:</span> <span class="value" id="stat-distance">--</span></div>
+    </div>
+
+    <div class="main">
+        <div class="search-panel">
+            <input type="text" id="search-input" placeholder="Semantic search across all episodes..." />
+            <select id="email-filter">
+                <option value="">All users</option>
+            </select>
+            <button onclick="doSearch()">Search</button>
+            <button onclick="clearSearch()" style="background: var(--bg-tertiary); color: var(--text-secondary);">Clear</button>
+        </div>
+
+        <div class="scatter-panel">
+            <div class="panel-header">Embedding Space (PCA 2D Projection)</div>
+            <div class="scatter-container">
+                <canvas id="scatter-canvas"></canvas>
+                <div class="scatter-empty" id="scatter-empty">Loading embeddings...</div>
+                <div class="tooltip" id="tooltip"></div>
+            </div>
+        </div>
+
+        <div class="docs-panel">
+            <div class="panel-header">Documents <span id="docs-count" style="font-weight:400; color: var(--text-muted);"></span></div>
+            <div class="docs-list" id="docs-list">
+                <div class="loading"><span class="loading-dot">Loading documents...</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API = "";
+        let allDocs = [];
+        let allPoints = [];
+        let highlightedIdx = -1;
+        let searchResults = null;
+
+        // ===== Data Loading =====
+
+        async function loadStats() {
+            try {
+                const res = await fetch(`${API}/api/chroma/stats`);
+                const data = await res.json();
+                document.getElementById("stat-collection").textContent = data.collection_name;
+                document.getElementById("stat-count").textContent = data.total_documents;
+                document.getElementById("stat-dims").textContent = `${data.embedding_dimensions}d`;
+                document.getElementById("stat-model").textContent = data.embedding_model;
+                document.getElementById("stat-distance").textContent = data.distance_metric;
+            } catch (e) {
+                console.error("Failed to load stats:", e);
+            }
+        }
+
+        async function loadDocuments() {
+            try {
+                const res = await fetch(`${API}/api/chroma/documents`);
+                const data = await res.json();
+                allDocs = data.documents || [];
+                allPoints = data.points_2d || [];
+
+                // Populate email filter
+                const emails = [...new Set(allDocs.map(d => d.email).filter(Boolean))];
+                const select = document.getElementById("email-filter");
+                for (const email of emails) {
+                    const opt = document.createElement("option");
+                    opt.value = email;
+                    opt.textContent = email;
+                    select.appendChild(opt);
+                }
+
+                renderDocs(allDocs);
+                renderScatter();
+            } catch (e) {
+                console.error("Failed to load documents:", e);
+                document.getElementById("docs-list").innerHTML = '<div class="docs-empty">Failed to load documents</div>';
+            }
+        }
+
+        // ===== Search =====
+
+        async function doSearch() {
+            const query = document.getElementById("search-input").value.trim();
+            if (!query) return;
+
+            const email = document.getElementById("email-filter").value;
+            const body = { query };
+            if (email) body.email = email;
+
+            try {
+                const res = await fetch(`${API}/api/chroma/search`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json();
+                searchResults = data.results || [];
+                renderDocs(searchResults.map((r, i) => ({
+                    ...r,
+                    id: `result-${i}`,
+                    _similarity: r.similarity,
+                })));
+
+                // Highlight matching docs in scatter
+                highlightedIdx = -1;
+                renderScatter();
+            } catch (e) {
+                console.error("Search failed:", e);
+            }
+        }
+
+        function clearSearch() {
+            document.getElementById("search-input").value = "";
+            searchResults = null;
+            renderDocs(allDocs);
+            highlightedIdx = -1;
+            renderScatter();
+        }
+
+        document.getElementById("search-input").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") doSearch();
+        });
+
+        // ===== Document List Rendering =====
+
+        function escapeHtml(text) {
+            const div = document.createElement("div");
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function renderDocs(docs) {
+            const container = document.getElementById("docs-list");
+            document.getElementById("docs-count").textContent = `(${docs.length})`;
+
+            if (docs.length === 0) {
+                container.innerHTML = '<div class="docs-empty">No documents found. Start chatting to build episodic memory!</div>';
+                return;
+            }
+
+            let html = "";
+            for (let i = 0; i < docs.length; i++) {
+                const d = docs[i];
+                const ts = d.timestamp ? d.timestamp.substring(0, 19).replace("T", " ") : "";
+                const isSearch = d._similarity !== undefined;
+                html += `
+                    <div class="doc-card${isSearch ? " search-result" : ""}" data-idx="${i}"
+                         onmouseenter="highlightPoint(${i})" onmouseleave="unhighlightPoint()">
+                        <div class="doc-id">${escapeHtml(d.id || "")}</div>
+                        <div class="doc-text">${escapeHtml(d.document)}</div>
+                        <div class="doc-meta">
+                            <span class="doc-email">${escapeHtml(d.email || "")}</span>
+                            <span class="doc-time">${escapeHtml(ts)}</span>
+                            ${isSearch ? `<span class="doc-similarity">${(d._similarity * 100).toFixed(1)}% match</span>` : ""}
+                        </div>
+                        ${d.topics && d.topics.length ? `
+                            <div class="doc-topics">
+                                ${d.topics.map(t => `<span class="doc-tag">${escapeHtml(t)}</span>`).join("")}
+                            </div>
+                        ` : ""}
+                    </div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        // ===== Scatter Plot =====
+
+        function renderScatter() {
+            const canvas = document.getElementById("scatter-canvas");
+            const container = canvas.parentElement;
+            const emptyEl = document.getElementById("scatter-empty");
+
+            if (allPoints.length === 0) {
+                emptyEl.textContent = allDocs.length === 0
+                    ? "No embeddings yet. Start chatting to populate the vector store!"
+                    : "Need at least 2 documents for 2D projection.";
+                emptyEl.style.display = "flex";
+                return;
+            }
+
+            emptyEl.style.display = "none";
+
+            // Size canvas for retina
+            const rect = container.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            canvas.style.width = rect.width + "px";
+            canvas.style.height = rect.height + "px";
+
+            const ctx = canvas.getContext("2d");
+            ctx.scale(dpr, dpr);
+
+            const W = rect.width;
+            const H = rect.height;
+            const pad = 40;
+
+            // Clear
+            ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim();
+            ctx.fillRect(0, 0, W, H);
+
+            // Grid
+            ctx.strokeStyle = "rgba(59, 66, 97, 0.5)";
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= 4; i++) {
+                const x = pad + (W - 2 * pad) * i / 4;
+                const y = pad + (H - 2 * pad) * i / 4;
+                ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, H - pad); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke();
+            }
+
+            // Axes labels
+            ctx.fillStyle = "#565f89";
+            ctx.font = "10px monospace";
+            ctx.textAlign = "center";
+            ctx.fillText("PC1", W / 2, H - 8);
+            ctx.save();
+            ctx.translate(12, H / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText("PC2", 0, 0);
+            ctx.restore();
+
+            // Map points to canvas coords
+            function toCanvas(pt) {
+                return {
+                    cx: pad + (pt.x + 1) / 2 * (W - 2 * pad),
+                    cy: pad + (1 - (pt.y + 1) / 2) * (H - 2 * pad),
+                };
+            }
+
+            // Assign colors by email
+            const emails = [...new Set(allDocs.map(d => d.email))];
+            const palette = ["#7aa2f7", "#9ece6a", "#e0af68", "#f7768e", "#bb9af7", "#7dcfff", "#ff9e64"];
+
+            // Draw points
+            for (let i = 0; i < allPoints.length; i++) {
+                const pt = toCanvas(allPoints[i]);
+                const emailIdx = emails.indexOf(allDocs[i]?.email || "");
+                const color = palette[emailIdx % palette.length] || palette[0];
+
+                const isHighlighted = i === highlightedIdx;
+                const radius = isHighlighted ? 8 : 5;
+
+                // Glow for highlighted
+                if (isHighlighted) {
+                    ctx.shadowColor = color;
+                    ctx.shadowBlur = 12;
+                }
+
+                ctx.beginPath();
+                ctx.arc(pt.cx, pt.cy, radius, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+
+                if (isHighlighted) {
+                    ctx.strokeStyle = "#ffffff";
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+                }
+            }
+
+            // Legend
+            if (emails.length > 0) {
+                const legendX = W - pad - 10;
+                let legendY = pad + 10;
+                ctx.textAlign = "right";
+                ctx.font = "10px monospace";
+                for (let i = 0; i < emails.length; i++) {
+                    const color = palette[i % palette.length];
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(legendX - 4, legendY - 3, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = "#a9b1d6";
+                    ctx.fillText(emails[i], legendX - 14, legendY);
+                    legendY += 16;
+                }
+            }
+        }
+
+        // Hover interactions
+        function highlightPoint(idx) {
+            if (searchResults) return; // Don't highlight during search
+            highlightedIdx = idx;
+            renderScatter();
+            showTooltipForDoc(idx);
+        }
+
+        function unhighlightPoint() {
+            highlightedIdx = -1;
+            renderScatter();
+            document.getElementById("tooltip").style.display = "none";
+        }
+
+        function showTooltipForDoc(idx) {
+            if (idx >= allPoints.length) return;
+            const doc = allDocs[idx];
+            if (!doc) return;
+
+            const canvas = document.getElementById("scatter-canvas");
+            const rect = canvas.parentElement.getBoundingClientRect();
+            const pad = 40;
+            const pt = allPoints[idx];
+            const cx = pad + (pt.x + 1) / 2 * (rect.width - 2 * pad);
+            const cy = pad + (1 - (pt.y + 1) / 2) * (rect.height - 2 * pad);
+
+            const tooltip = document.getElementById("tooltip");
+            const ts = doc.timestamp ? doc.timestamp.substring(0, 19).replace("T", " ") : "";
+            const topicsHtml = doc.topics && doc.topics.length
+                ? `<div class="tt-topics">${doc.topics.map(t => `<span class="tt-tag">${escapeHtml(t)}</span>`).join("")}</div>`
+                : "";
+
+            tooltip.innerHTML = `
+                <div class="tt-doc">${escapeHtml(doc.document.substring(0, 200))}${doc.document.length > 200 ? "..." : ""}</div>
+                <div class="tt-meta">${escapeHtml(doc.email)} &middot; ${escapeHtml(ts)}</div>
+                ${topicsHtml}
+            `;
+
+            // Position tooltip
+            let left = cx + 16;
+            let top = cy - 10;
+            if (left + 330 > rect.width) left = cx - 330;
+            if (top + 120 > rect.height) top = cy - 100;
+
+            tooltip.style.left = left + "px";
+            tooltip.style.top = top + "px";
+            tooltip.style.display = "block";
+        }
+
+        // Canvas mouse move for hover detection
+        document.getElementById("scatter-canvas").addEventListener("mousemove", (e) => {
+            if (allPoints.length === 0) return;
+            const canvas = e.target;
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const pad = 40;
+
+            let closest = -1;
+            let closestDist = Infinity;
+
+            for (let i = 0; i < allPoints.length; i++) {
+                const pt = allPoints[i];
+                const cx = pad + (pt.x + 1) / 2 * (rect.width - 2 * pad);
+                const cy = pad + (1 - (pt.y + 1) / 2) * (rect.height - 2 * pad);
+                const dist = Math.hypot(mx - cx, my - cy);
+                if (dist < closestDist && dist < 20) {
+                    closest = i;
+                    closestDist = dist;
+                }
+            }
+
+            if (closest !== highlightedIdx) {
+                highlightedIdx = closest;
+                renderScatter();
+                if (closest >= 0) {
+                    showTooltipForDoc(closest);
+                    // Highlight corresponding doc card
+                    document.querySelectorAll(".doc-card").forEach(c => c.classList.remove("active"));
+                    const card = document.querySelector(`.doc-card[data-idx="${closest}"]`);
+                    if (card) {
+                        card.classList.add("active");
+                        card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+                    }
+                } else {
+                    document.getElementById("tooltip").style.display = "none";
+                    document.querySelectorAll(".doc-card").forEach(c => c.classList.remove("active"));
+                }
+            }
+        });
+
+        document.getElementById("scatter-canvas").addEventListener("mouseleave", () => {
+            highlightedIdx = -1;
+            renderScatter();
+            document.getElementById("tooltip").style.display = "none";
+            document.querySelectorAll(".doc-card").forEach(c => c.classList.remove("active"));
+        });
+
+        // Handle resize
+        window.addEventListener("resize", () => renderScatter());
+
+        // ===== Init =====
+        loadStats();
+        loadDocuments();
+    </script>
+</body>
+</html>
