@@ -1,6 +1,6 @@
-# PyMentor — Python Learning Agent with Three-Tiered Memory
+# PyMentor — Python &amp; Quantum Learning Agent with Three-Tiered Memory
 
-A long-term Python learning agent that remembers everything across sessions. Built with Claude Agent SDK, ChromaDB, and FastAPI.
+A long-term tutoring agent that remembers everything across sessions. Teaches Python and the topics that build on it: classical ML, deep learning, LLMs, MLOps, and **quantum computing with Qiskit**. Comes with an in-browser code runner so learners can execute Python (and Qiskit circuits) without leaving the chat. Built with Claude Agent SDK, ChromaDB, and FastAPI.
 
 ## Architecture
 
@@ -37,9 +37,22 @@ Open **http://localhost:8001** in your browser.
 
 | URL | Description |
 |-----|-------------|
-| `/` | Main chat interface with knowledge dashboard and session picker |
-| `/graph` | Interactive knowledge graph — force-directed visualization of 35 Python concepts with mastery overlay |
+| `/` | Main chat interface with knowledge dashboard, session picker, and split-screen **Code Runner** (toggle via the `>_ Run Code` button in the chat header) |
+| `/graph` | Interactive knowledge graph — force-directed visualization of all curriculum concepts (Python + ML + DL + LLM + MLOps + Quantum) with mastery overlay |
 | `/chroma` | ChromaDB vector database viewer and visualizer |
+
+### Code Runner
+
+Click `>_ Run Code` in the chat header to split the chat pane and reveal a notebook-style code runner.
+
+- Code runs in a **per-user virtualenv** at `data/users/<email>/venv/`. The first run for a new user takes ~30-60s while pip installs `qiskit`, `qiskit-aer`, `numpy`, and `matplotlib`. Subsequent cells run immediately.
+- Each cell runs as a fresh Python process — variables do **not** persist between cells.
+- 15-second wall-clock timeout per cell; stdout/stderr capped at ~50KB.
+- "Send to chat" copies a cell's code (and output, if any) into the chat input wrapped in fenced code blocks. The agent only sees code/output that you explicitly send.
+- "Reset venv" wipes and recreates the venv if a package install gets corrupted.
+- Cells are persisted in `localStorage` per email — they survive page reloads.
+
+**Security:** code runs as a subprocess on the server with no jail or container. Do not expose this to untrusted users.
 
 ## Project Structure
 
@@ -312,7 +325,7 @@ An interactive force-directed graph of the 35-concept Python curriculum. Access 
 **Features:**
 - **Force-directed layout** — Nodes repel each other, edges pull connected concepts together, auto-stabilizes
 - **Mastery overlay** — Node size and style reflect the user's mastery level (not started / introduced / practiced / mastered)
-- **Category coloring** — 9 categories each with a distinct color (fundamentals, control flow, data structures, functions, OOP, error handling, file I/O, modules, advanced)
+- **Category coloring** — 11 categories each with a distinct color (fundamentals, control flow, data structures, functions, OOP, error handling, file I/O, modules, testing, data processing, advanced)
 - **Prerequisite edges** — Arrows show which concepts must be learned before others
 - **Interactive** — Drag nodes, scroll to zoom, pan the canvas, hover for detailed tooltips
 - **Sidebar** — Email input, category legend, mastery legend, and stats summary
@@ -367,18 +380,20 @@ Three-column layout with session management:
 
 ## Curriculum Graph
 
-35 Python concepts with prerequisite chains. The `suggest_next_topics` tool traverses this graph to find concepts whose prerequisites are all met but which haven't been covered yet.
+55 Python concepts with prerequisite chains. The `suggest_next_topics` tool traverses this graph to find concepts whose prerequisites are all met but which haven't been covered yet.
 
 ```
-fundamentals:     variables, data_types, operators, string_formatting, input_output
-control_flow:     if_else, for_loops, while_loops, match_statement
-data_structures:  lists, tuples, dictionaries, sets, list_comprehensions
-functions:        functions_basic, functions_args, scope, lambda_functions, closures, decorators
-oop:              classes_basic, inheritance, dunder_methods
-error_handling:   error_handling, custom_exceptions
-file_io:          file_reading, file_writing, context_managers
-modules:          modules_imports, packages, virtual_environments
-advanced:         generators, iterators, async_await, type_hints
+fundamentals:      variables, data_types, operators, string_methods, string_formatting, input_output, comments_docstrings
+control_flow:      if_else, for_loops, while_loops, match_statement, recursion
+data_structures:   lists, tuples, dictionaries, sets, list_comprehensions, dict_comprehensions, named_tuples, enums
+functions:         functions_basic, functions_args, scope, lambda_functions, closures, decorators, functools
+oop:               classes_basic, inheritance, dunder_methods, properties, abstract_classes, dataclasses, protocols
+error_handling:    error_handling, custom_exceptions
+file_io:           file_reading, file_writing, context_managers, json_csv
+modules:           modules_imports, packages, virtual_environments
+testing:           unit_testing, debugging, mocking
+data_processing:   regex, collections_module, datetime_module
+advanced:          generators, iterators, async_await, type_hints, metaclasses, concurrency
 ```
 
 ---

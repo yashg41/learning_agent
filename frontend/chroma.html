@@ -315,6 +315,79 @@
             font-size: 13px;
         }
 
+        /* Collection Toggle */
+        .collection-toggle {
+            display: flex;
+            gap: 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .collection-toggle button {
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            border: none;
+            padding: 6px 14px;
+            font-family: inherit;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .collection-toggle button:not(:last-child) {
+            border-right: 1px solid var(--border);
+        }
+
+        .collection-toggle button.active {
+            background: var(--accent);
+            color: var(--bg-primary);
+        }
+
+        .collection-toggle button:hover:not(.active) {
+            color: var(--text-primary);
+        }
+
+        /* Exchange card styles */
+        .doc-card.exchange-card {
+            border-left: 2px solid var(--magenta);
+        }
+
+        .doc-user-msg {
+            font-size: 11px;
+            color: var(--cyan);
+            margin-bottom: 4px;
+            font-style: italic;
+        }
+
+        .doc-raw-toggle {
+            font-size: 10px;
+            color: var(--accent);
+            cursor: pointer;
+            margin-top: 6px;
+            user-select: none;
+        }
+
+        .doc-raw-toggle:hover { text-decoration: underline; }
+
+        .doc-raw-exchange {
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-top: 6px;
+            padding: 8px;
+            background: var(--bg-primary);
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            display: none;
+        }
+
+        .doc-raw-exchange.visible { display: block; }
+
         /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -348,9 +421,12 @@
     </div>
 
     <div class="stats-bar" id="stats-bar">
-        <div class="stat-chip"><span class="label">Collection:</span> <span class="value accent" id="stat-collection">--</span></div>
-        <div class="stat-chip"><span class="label">Documents:</span> <span class="value" id="stat-count">--</span></div>
-        <div class="stat-chip"><span class="label">Embeddings:</span> <span class="value" id="stat-dims">--</span></div>
+        <div class="collection-toggle">
+            <button class="active" onclick="switchCollection('conversations')">Summaries</button>
+            <button onclick="switchCollection('exchanges')">Exchanges</button>
+        </div>
+        <div class="stat-chip"><span class="label">Summaries:</span> <span class="value accent" id="stat-summaries">--</span></div>
+        <div class="stat-chip"><span class="label">Exchanges:</span> <span class="value accent" id="stat-exchanges">--</span></div>
         <div class="stat-chip"><span class="label">Model:</span> <span class="value" id="stat-model">--</span></div>
         <div class="stat-chip"><span class="label">Distance:</span> <span class="value" id="stat-distance">--</span></div>
     </div>
@@ -388,6 +464,26 @@
         let allPoints = [];
         let highlightedIdx = -1;
         let searchResults = null;
+        let currentCollection = "conversations"; // "conversations" or "exchanges"
+
+        // ===== Collection Toggle =====
+
+        function switchCollection(col) {
+            currentCollection = col;
+            // Update toggle buttons
+            document.querySelectorAll(".collection-toggle button").forEach(btn => {
+                btn.classList.toggle("active",
+                    (col === "conversations" && btn.textContent === "Summaries") ||
+                    (col === "exchanges" && btn.textContent === "Exchanges")
+                );
+            });
+            // Update search placeholder
+            document.getElementById("search-input").placeholder = col === "exchanges"
+                ? "Semantic search across all exchanges..."
+                : "Semantic search across all summaries...";
+            clearSearch();
+            loadDocuments();
+        }
 
         // ===== Data Loading =====
 
@@ -395,9 +491,9 @@
             try {
                 const res = await fetch(`${API}/api/chroma/stats`);
                 const data = await res.json();
-                document.getElementById("stat-collection").textContent = data.collection_name;
-                document.getElementById("stat-count").textContent = data.total_documents;
-                document.getElementById("stat-dims").textContent = `${data.embedding_dimensions}d`;
+                const cols = data.collections || {};
+                document.getElementById("stat-summaries").textContent = cols.conversations?.total_documents ?? 0;
+                document.getElementById("stat-exchanges").textContent = cols.conversation_exchanges?.total_documents ?? 0;
                 document.getElementById("stat-model").textContent = data.embedding_model;
                 document.getElementById("stat-distance").textContent = data.distance_metric;
             } catch (e) {
@@ -407,7 +503,8 @@
 
         async function loadDocuments() {
             try {
-                const res = await fetch(`${API}/api/chroma/documents`);
+                document.getElementById("docs-list").innerHTML = '<div class="loading"><span class="loading-dot">Loading documents...</span></div>';
+                const res = await fetch(`${API}/api/chroma/documents?collection=${currentCollection}`);
                 const data = await res.json();
                 allDocs = data.documents || [];
                 allPoints = data.points_2d || [];
@@ -415,6 +512,8 @@
                 // Populate email filter
                 const emails = [...new Set(allDocs.map(d => d.email).filter(Boolean))];
                 const select = document.getElementById("email-filter");
+                // Clear existing options except "All users"
+                select.innerHTML = '<option value="">All users</option>';
                 for (const email of emails) {
                     const opt = document.createElement("option");
                     opt.value = email;
@@ -496,24 +595,45 @@
                 const d = docs[i];
                 const ts = d.timestamp ? d.timestamp.substring(0, 19).replace("T", " ") : "";
                 const isSearch = d._similarity !== undefined;
+                const isExchange = d.raw_exchange !== undefined;
+
                 html += `
-                    <div class="doc-card${isSearch ? " search-result" : ""}" data-idx="${i}"
+                    <div class="doc-card${isSearch ? " search-result" : ""}${isExchange ? " exchange-card" : ""}" data-idx="${i}"
                          onmouseenter="highlightPoint(${i})" onmouseleave="unhighlightPoint()">
-                        <div class="doc-id">${escapeHtml(d.id || "")}</div>
-                        <div class="doc-text">${escapeHtml(d.document)}</div>
+                        <div class="doc-id">${escapeHtml(d.id || "")}</div>`;
+
+                if (isExchange && d.user_message) {
+                    html += `<div class="doc-user-msg">User: ${escapeHtml(d.user_message)}</div>`;
+                }
+
+                html += `<div class="doc-text">${escapeHtml(d.document)}</div>
                         <div class="doc-meta">
                             <span class="doc-email">${escapeHtml(d.email || "")}</span>
                             <span class="doc-time">${escapeHtml(ts)}</span>
+                            ${isExchange ? `<span class="doc-time">#${d.exchange_index || 0}</span>` : ""}
                             ${isSearch ? `<span class="doc-similarity">${(d._similarity * 100).toFixed(1)}% match</span>` : ""}
-                        </div>
-                        ${d.topics && d.topics.length ? `
-                            <div class="doc-topics">
+                        </div>`;
+
+                if (d.topics && d.topics.length) {
+                    html += `<div class="doc-topics">
                                 ${d.topics.map(t => `<span class="doc-tag">${escapeHtml(t)}</span>`).join("")}
-                            </div>
-                        ` : ""}
-                    </div>`;
+                             </div>`;
+                }
+
+                if (isExchange && d.raw_exchange) {
+                    html += `<div class="doc-raw-toggle" onclick="toggleRawExchange(this)">Show full exchange</div>
+                             <div class="doc-raw-exchange">${escapeHtml(d.raw_exchange)}</div>`;
+                }
+
+                html += `</div>`;
             }
             container.innerHTML = html;
+        }
+
+        function toggleRawExchange(el) {
+            const raw = el.nextElementSibling;
+            const visible = raw.classList.toggle("visible");
+            el.textContent = visible ? "Hide full exchange" : "Show full exchange";
         }
 
         // ===== Scatter Plot =====

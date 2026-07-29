@@ -18,10 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 def _get_claude_project_dir() -> str:
-    """Get the .claude project directory path for this app."""
-    app_root = os.path.dirname(os.path.dirname(__file__))
-    base_path = os.path.realpath(app_root)
-    project_slug = re.sub(r"[^a-zA-Z0-9\-]", "-", base_path)
+    """Get the .claude project directory path for this app.
+
+    Must match the slug the bundled CLI derives from `options.cwd`
+    (see backend.agent.PROJECT_ROOT). The CLI replaces every non-alnum
+    char — including underscore — with a dash.
+    """
+    from backend.agent import PROJECT_ROOT
+    project_slug = re.sub(r"[^a-zA-Z0-9\-]", "-", PROJECT_ROOT)
     if project_slug.startswith("-"):
         project_slug = project_slug[1:]
     return os.path.join(str(Path.home()), ".claude", "projects", f"-{project_slug}")
@@ -35,10 +39,18 @@ def session_exists_in_claude(session_id: str) -> bool:
 
 
 def session_exists_in_memory(email: str, session_id: str) -> bool:
-    """Check if a session has conversation data in our local data/ folder."""
-    session_dir = get_session_dir(email, session_id)
-    conv_path = os.path.join(session_dir, "conversation.json")
-    return os.path.isfile(conv_path)
+    """Check if a session has conversation data in our local data/ folder.
+
+    Probes the path directly rather than via get_session_dir, which creates
+    the directory as a side effect — asking whether a session exists should
+    not bring it into existence.
+    """
+    from backend.memory import USERS_DIR, _safe_email
+
+    session_dir = os.path.join(USERS_DIR, _safe_email(email), "sessions", session_id)
+    return os.path.isfile(os.path.join(session_dir, "conversation.jsonl")) or os.path.isfile(
+        os.path.join(session_dir, "conversation.json")
+    )
 
 
 def read_compact_summary(session_id: str) -> tuple[str, str] | None:
@@ -105,17 +117,16 @@ async def replay_from_memory(email: str, session_id: str, system_prompt: str | N
     """
     from backend.agent import run_agent_internal
 
-    safe = _safe_email(email)
-    session_dir = get_session_dir(email, session_id)
-    conv_path = os.path.join(session_dir, "conversation.json")
+    from backend.memory import read_turns
 
-    if not os.path.isfile(conv_path):
+    safe = _safe_email(email)
+
+    if not session_exists_in_memory(email, session_id):
         raise FileNotFoundError(f"No local memory found for user {email} session {session_id}")
 
-    with open(conv_path) as f:
-        data = json.load(f)
-
-    all_turns = data.get("turns", [])
+    # read_turns applies supersede markers, so an edited-away message is never
+    # replayed back into the model's context.
+    all_turns = read_turns(email, session_id)
     user_messages = [t for t in all_turns if t.get("type") == "user"]
 
     if not user_messages:

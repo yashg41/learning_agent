@@ -207,8 +207,15 @@ body {
     color: var(--success);
 }
 
-/* Center Panel (Chat) */
+/* Center Panel (Chat + optional Notebook side-by-side) */
 .center-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    min-width: 0;
+}
+
+.chat-pane {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -222,6 +229,166 @@ body {
     font-size: 14px;
     font-weight: 600;
     color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.header-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.header-btn:hover {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+}
+
+/* Notebook pane */
+.notebook-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border-left: 1px solid var(--border);
+    background: var(--bg-primary);
+}
+
+.notebook-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.notebook-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-left: 6px;
+}
+
+.notebook-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.cells {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.cell {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cell-toolbar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.cell-toolbar .cell-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+.cell-textarea {
+    width: 100%;
+    min-height: 80px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+}
+
+.cell-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.cell-output {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    overflow-x: auto;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.cell-output.error {
+    border-color: var(--error);
+    color: var(--error);
+}
+
+.cell-output.empty {
+    display: none;
+}
+
+.cell-status {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.cell-status.running {
+    color: var(--warning);
+}
+
+.cell-status.ok {
+    color: var(--success);
+}
+
+.cell-status.fail {
+    color: var(--error);
+}
+
+/* Positioning context for the floating jump-to-latest button. Carries the
+   flex sizing that .chat-messages used to own. */
+.chat-scroll-wrap {
+    flex: 1;
+    position: relative;
+    display: flex;
+    min-height: 0;
 }
 
 .chat-messages {
@@ -231,6 +398,44 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
+}
+
+/* Shown only while streaming and scrolled away from the bottom, so the view
+   is never yanked out from under someone who is still reading. */
+.scroll-bottom-btn {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%) translateY(6px);
+    padding: 6px 14px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s, transform 0.15s;
+    z-index: 5;
+}
+
+.scroll-bottom-btn.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+}
+
+.scroll-bottom-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* While tokens are streaming the bubble holds raw text rather than parsed
+   markdown, so preserve its newlines and indentation. */
+.message.assistant.streaming {
+    white-space: pre-wrap;
 }
 
 .message {
@@ -256,6 +461,66 @@ body {
     color: var(--text-primary);
     border-bottom-left-radius: 4px;
     white-space: normal;
+}
+
+/* Thinking indicator — shown in the message flow while waiting for the
+   model's first token. Mirrors .message.assistant so it reads as a pending
+   assistant turn rather than a separate widget. */
+.thinking-indicator {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border-bottom-left-radius: 4px;
+    background: var(--bg-tertiary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.thinking-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.thinking-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: thinking-bounce 1.4s infinite ease-in-out both;
+}
+
+/* Stagger the three dots into a travelling wave. */
+.thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+.thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0s; }
+
+@keyframes thinking-bounce {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+    40%           { transform: scale(1);   opacity: 1; }
+}
+
+.thinking-label {
+    color: var(--text-muted);
+}
+
+/* Elapsed seconds — the signal that separates "working" from "hung". */
+.thinking-elapsed {
+    color: var(--text-muted);
+    font-size: 11px;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .thinking-dots span {
+        animation: none;
+        opacity: 0.7;
+    }
 }
 
 /* Markdown elements inside assistant messages */
@@ -420,7 +685,7 @@ body {
     gap: 10px;
 }
 
-.chat-input-area input {
+.chat-input-area textarea {
     flex: 1;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
@@ -429,9 +694,13 @@ body {
     color: var(--text-primary);
     font-family: inherit;
     font-size: 13px;
+    resize: none;
+    max-height: 150px;
+    overflow-y: auto;
+    line-height: 1.4;
 }
 
-.chat-input-area input:focus {
+.chat-input-area textarea:focus {
     outline: none;
     border-color: var(--accent);
 }
@@ -793,4 +1062,380 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
+}
+
+/* =====================================================================
+   Preferences Tab
+===================================================================== */
+.prefs-section {
+    margin-bottom: 14px;
+}
+.prefs-section label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted, #565f89);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+#prefs-aspect {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg2, #24283b);
+    color: var(--text, #c0caf5);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 12px;
+}
+#prefs-aspect:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.prefs-global {
+    background: var(--bg, #1a1b26);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 11px;
+    color: var(--text2, #a9b1d6);
+    white-space: pre-wrap;
+    max-height: 160px;
+    overflow-y: auto;
+    margin: 0;
+}
+#prefs-user {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg2, #24283b);
+    color: var(--text, #c0caf5);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 12px;
+    resize: vertical;
+    min-height: 120px;
+}
+#prefs-user:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.prefs-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+}
+#prefs-save-btn {
+    padding: 8px 16px;
+    background: var(--accent);
+    color: var(--bg, #1a1b26);
+    border: none;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+#prefs-save-btn:hover {
+    background: var(--accent-hover, #89b4fa);
+}
+#prefs-save-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.prefs-status {
+    font-size: 11px;
+}
+
+/* =====================================================================
+   Side chat — a floating, draggable window for tangential questions.
+   Runs its own conversation concurrently with the main chat, so nothing
+   here may depend on main-chat state.
+   ===================================================================== */
+
+.side-chat {
+    position: fixed;
+    /* Default berth: bottom-right, clear of the composer. JS overrides
+       left/top once the window is dragged. */
+    right: 24px;
+    bottom: 24px;
+    width: 420px;
+    height: 520px;
+    min-width: 300px;
+    min-height: 240px;
+    display: none;
+    flex-direction: column;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    /* Nothing else in the app rises above z-index 5. */
+    z-index: 100;
+    overflow: hidden;
+}
+
+.side-chat.open {
+    display: flex;
+}
+
+.side-chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px 8px 14px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+    cursor: grab;
+    user-select: none;
+}
+
+.side-chat-header:active {
+    cursor: grabbing;
+}
+
+.side-chat-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.side-chat-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.side-chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.side-chat-hint {
+    font-size: 12px;
+    padding: 12px;
+}
+
+.side-chat-input-area {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+}
+
+.side-chat-input-area textarea {
+    flex: 1;
+    resize: none;
+    max-height: 120px;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.side-chat-input-area textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.side-chat-input-area button {
+    padding: 8px 14px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--bg-primary);
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.side-chat-input-area button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Resize grip, bottom-right. */
+.side-chat-resize {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    background: linear-gradient(
+        135deg,
+        transparent 0 50%,
+        var(--border) 50% 60%,
+        transparent 60% 70%,
+        var(--border) 70% 80%,
+        transparent 80%
+    );
+}
+
+/* The ⤴ button that opens a side chat from an assistant message. */
+.side-chat-launch {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+    padding: 2px 8px;
+    font-family: inherit;
+    font-size: 10px;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.message.assistant:hover .side-chat-launch,
+.side-chat-launch:focus {
+    opacity: 1;
+}
+
+.side-chat-launch:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+/* Summary card folded back into the main chat when a side chat ends. */
+.side-summary-card {
+    align-self: flex-start;
+    max-width: 85%;
+    padding: 10px 14px;
+    border-left: 2px solid var(--accent);
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.side-summary-card .side-summary-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.side-summary-card .side-summary-topic {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.side-summary-card .side-summary-body {
+    margin-top: 6px;
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+
+/* Edit affordance on stored user messages. Hidden until hover so the
+   transcript stays clean. */
+.message.user {
+    position: relative;
+}
+
+.msg-edit-btn {
+    position: absolute;
+    left: -26px;
+    top: 6px;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.message.user:hover .msg-edit-btn,
+.msg-edit-btn:focus {
+    opacity: 1;
+}
+
+.msg-edit-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.message.user.editing {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    width: 100%;
+    max-width: 100%;
+}
+
+.msg-edit-input {
+    width: 100%;
+    min-height: 34px;
+    max-height: 200px;
+    resize: none;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+}
+
+.msg-edit-input:focus {
+    outline: none;
+}
+
+.msg-edit-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.msg-edit-actions button {
+    padding: 5px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.msg-edit-actions button:first-child {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-primary);
+    font-weight: 600;
+}
+
+.msg-edit-actions button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.msg-edit-actions button:first-child:hover {
+    background: var(--accent-hover);
+    color: var(--bg-primary);
 }

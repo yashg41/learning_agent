@@ -7,7 +7,7 @@ _ENV_FILE = os.path.join(_APP_ROOT, ".env")
 
 class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
-    MODEL_NAME: str = "claude-sonnet-4-20250514"
+    MODEL_NAME: str = "claude-haiku-4-5-20251001"
 
     DATA_DIR: str = os.path.join(_APP_ROOT, "data")
     CHROMA_DIR: str = os.path.join(_APP_ROOT, "data", "chroma")
