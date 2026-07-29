@@ -1,8 +1,34 @@
+# Virtualenvs
 venv/
 .venv/
+
+# Python
 __pycache__/
 *.pyc
-.env
-data/
 *.egg-info/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Runtime learner data (JSON/JSONL written by the app at runtime)
+data/
+data_backup_*/
+
+# Per-user feedback overrides (written at runtime, keyed by learner email)
+feedback/users/
+
+# Local Claude Code config (machine-specific)
+.claude/
+
+# Stray serialized data — runtime state must never be committed.
+# Config files that legitimately need these extensions are re-included below.
+*.json
+*.jsonl
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# OS cruft
 .DS_Store

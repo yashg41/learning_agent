@@ -5,16 +5,27 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import asyncio
 import json
+import logging
 import os
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api")
+
+# How long the SSE generator waits for an event before emitting a heartbeat.
+KEEPALIVE_SECONDS = 15
 
 
 class ChatRequest(BaseModel):
     message: str
     email: str
     session_id: str | None = None
+    # Branch off another session, inheriting its context. Set by side-chats
+    # and edit-branches on their first turn only.
+    fork_from: str | None = None
+    # Side-chats must not steal the user's active-session pointer.
+    set_active: bool = True
 
 
 # --- Chat Endpoints ---
@@ -37,6 +48,8 @@ async def chat_stream(body: ChatRequest):
                 email=body.email,
                 on_event=on_event,
                 session_id=body.session_id,
+                fork_from=body.fork_from,
+                set_active=body.set_active,
             )
         except Exception as e:
             await event_queue.put({"type": "error", "content": str(e)})
@@ -47,7 +60,17 @@ async def chat_stream(body: ChatRequest):
 
     async def event_generator():
         while True:
-            event = await event_queue.get()
+            # Bounded wait so a slow turn can't leave the socket silent. A
+            # quiet stream is indistinguishable from a dead one to both the
+            # browser and any intermediate proxy, so emit an SSE comment
+            # frame as a heartbeat. The frontend parser only accepts lines
+            # starting with "data: ", so comments are ignored client-side.
+            try:
+                event = await asyncio.wait_for(event_queue.get(), timeout=KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+
             yield f"data: {json.dumps(event)}\n\n"
             if event.get("type") == "done":
                 break
@@ -55,7 +78,13 @@ async def chat_stream(body: ChatRequest):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disable proxy buffering (nginx and friends), which would
+            # otherwise hold deltas back and defeat token-level streaming.
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -87,6 +116,43 @@ async def chat(body: ChatRequest):
         "email": body.email,
         "events": events,
     }
+
+
+# --- Code Runner Endpoints ---
+
+
+class RunCodeRequest(BaseModel):
+    email: str
+    code: str
+    timeout: float | None = None
+
+
+class ResetVenvRequest(BaseModel):
+    email: str
+
+
+@router.post("/code/run")
+async def code_run(body: RunCodeRequest):
+    """Run a code cell in the user's per-user venv. Returns stdout/stderr."""
+    from backend.sandbox import run_code, DEFAULT_TIMEOUT_SEC
+
+    timeout = body.timeout if (body.timeout and 0 < body.timeout <= 60) else DEFAULT_TIMEOUT_SEC
+    try:
+        return await run_code(body.email, body.code, timeout=timeout)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"runner failed: {e}")
+
+
+@router.post("/code/reset_venv")
+async def code_reset_venv(body: ResetVenvRequest):
+    """Wipe and recreate the user's venv. Useful when an install gets corrupted."""
+    from backend.sandbox import reset_venv
+
+    try:
+        await reset_venv(body.email)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"reset failed: {e}")
 
 
 # --- Knowledge & Quiz Endpoints ---
@@ -121,25 +187,24 @@ async def get_knowledge_graph(email: str):
     Returns nodes (concepts) and edges (prerequisites) for graph visualization.
     """
     from backend.agent import _get_user_data_dir
-    from backend.knowledge import KnowledgeStore, CURRICULUM_GRAPH
+    from backend.knowledge import (
+        KnowledgeStore, CURRICULUM_GRAPH, CATEGORY_COLORS, TRACK_COLORS, category_label,
+    )
 
     user_dir = _get_user_data_dir(email)
     store = KnowledgeStore(user_dir)
     data = store.load_knowledge()
     user_concepts = data.get("concepts", {})
 
-    # Category colors for grouping
-    category_colors = {
-        "fundamentals": "#7aa2f7",
-        "control_flow": "#e0af68",
-        "data_structures": "#9ece6a",
-        "functions": "#bb9af7",
-        "oop": "#f7768e",
-        "error_handling": "#ff9e64",
-        "file_io": "#73daca",
-        "modules": "#2ac3de",
-        "advanced": "#c0caf5",
-    }
+    # Build a reverse map: for each concept, which tracks rely on it as a prereq?
+    # Bridge concepts (e.g. numpy_basics) feed multiple downstream tracks and get
+    # a multi-color pie ring in the frontend.
+    feeds: dict[str, set[str]] = {cid: set() for cid in CURRICULUM_GRAPH}
+    for cid, info in CURRICULUM_GRAPH.items():
+        own_track = info.get("track", "python")
+        for prereq in info["prereqs"]:
+            if prereq in feeds:
+                feeds[prereq].add(own_track)
 
     nodes = []
     edges = []
@@ -147,14 +212,19 @@ async def get_knowledge_graph(email: str):
     for concept_id, info in CURRICULUM_GRAPH.items():
         user_data = user_concepts.get(concept_id, {})
         mastery = user_data.get("mastery", "not_started")
+        own_track = info.get("track", "python")
+        feeds_tracks = sorted(feeds[concept_id] | {own_track})
         nodes.append({
             "id": concept_id,
             "name": info["name"],
             "category": info["category"],
-            "color": category_colors.get(info["category"], "#565f89"),
+            "track": own_track,
+            "color": CATEGORY_COLORS.get(info["category"], "#565f89"),
             "mastery": mastery,
             "review_count": user_data.get("review_count", 0),
             "last_reviewed": user_data.get("last_reviewed", ""),
+            "feeds_tracks": feeds_tracks,
+            "is_bridge": len(feeds_tracks) >= 2,
         })
         for prereq in info["prereqs"]:
             edges.append({"source": prereq, "target": concept_id})
@@ -163,9 +233,10 @@ async def get_knowledge_graph(email: str):
         "nodes": nodes,
         "edges": edges,
         "categories": [
-            {"id": cat, "name": cat.replace("_", " ").title(), "color": color}
-            for cat, color in category_colors.items()
+            {"id": cat, "name": category_label(cat), "color": color}
+            for cat, color in CATEGORY_COLORS.items()
         ],
+        "track_colors": TRACK_COLORS,
         "profile": data.get("profile", {}),
     }
 
@@ -221,6 +292,18 @@ class SessionRenameRequest(BaseModel):
     name: str
 
 
+class EndSideChatRequest(BaseModel):
+    """Close a side chat and fold what was learned back into the parent."""
+    parent_session_id: str
+    topic: str = ""
+
+
+class BranchRequest(BaseModel):
+    """Rewrite history from a turn onward with an edited message."""
+    turn_index: int
+    message: str
+
+
 @router.get("/sessions/{email}")
 async def list_sessions(email: str):
     """List all sessions for a user."""
@@ -261,6 +344,230 @@ async def activate_session(email: str, session_id: str):
     if not set_active_session(email, session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"active_session": session_id}
+
+
+@router.get("/sessions/{email}/{session_id}/history")
+async def get_session_history(email: str, session_id: str):
+    """Get the conversation history for a session."""
+    from backend.memory import read_turns
+
+    # read_turns is the single source of truth: it migrates legacy sessions and
+    # strips superseded turns, so edited-away content never reaches the client.
+    return {"turns": read_turns(email, session_id), "session_id": session_id}
+
+
+@router.post("/sessions/{email}/{session_id}/branch")
+async def branch_session(email: str, session_id: str, body: BranchRequest):
+    """Rewrite a conversation from `turn_index` onward with an edited message.
+
+    The model cannot un-remember, so a new session is built that never saw the
+    original wording: replay the surviving prefix into a fresh session, then
+    send the edited message. The old session is left intact and switchable.
+
+    Returns the new session id; the caller then streams into it as normal.
+    """
+    from backend.agent import _get_episodic, _get_user_data_dir, run_agent_internal
+    from backend.knowledge import KnowledgeStore
+    from backend.memory import (
+        get_user_sessions,
+        read_turns,
+        save_user_session,
+        supersede_from,
+    )
+    from backend.prompts import build_system_prompt
+
+    turns = read_turns(email, session_id)
+    if not turns:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    prefix = [t for t in turns if t.get("index", 0) < body.turn_index]
+    if not any(t.get("type") == "user" for t in prefix):
+        # Editing the very first message: nothing to carry over, so the branch
+        # is simply a fresh conversation.
+        prefix = []
+
+    # Rebuild the surviving context as a single bootstrap prompt. This is the
+    # same prompt-stuffing strategy replay_from_memory uses.
+    user_data_dir = _get_user_data_dir(email)
+    knowledge_state = KnowledgeStore(user_data_dir).format_for_system_prompt()
+    recent = _get_episodic().format_for_system_prompt(email, n=5)
+    system_prompt = build_system_prompt(knowledge_state, recent)
+
+    new_session_id = None
+    if prefix:
+        lines = []
+        for t in prefix:
+            if t.get("type") == "user" and t.get("content"):
+                lines.append(f"User: {t['content']}")
+            elif t.get("type") == "assistant_message" and t.get("content"):
+                lines.append(f"Tutor: {t['content']}")
+        transcript = "\n\n".join(lines[-40:])  # cap: only recent context matters
+        bootstrap = (
+            "Here is our conversation so far. Acknowledge it in one short line "
+            "and wait for the learner's next message — do not re-teach it.\n\n"
+            f"{transcript}"
+        )
+        new_session_id = await run_agent_internal(
+            prompt=bootstrap,
+            system_prompt=system_prompt,
+            user_data_dir=user_data_dir,
+            email=email,
+        )
+
+    # Retract the edited turn and everything it led to. Applied to the ORIGINAL
+    # session only if we are rewriting in place; here the original is preserved
+    # as its own branch, and the tombstone goes on the new session's copy.
+    name = next(
+        (s.get("name") for s in get_user_sessions(email) if s["session_id"] == session_id),
+        "Session",
+    )
+    if new_session_id:
+        save_user_session(
+            email,
+            new_session_id,
+            name=f"{name} (edited)",
+            set_active=True,
+            kind="branch",
+            parent_session_id=session_id,
+        )
+        # The branch's own transcript starts after the bootstrap, so hide the
+        # scaffolding turn from the UI.
+        supersede_from(email, new_session_id, from_index=1, reason="branch_bootstrap")
+    else:
+        # Editing the first message leaves no prefix to replay, so there is no
+        # bootstrap turn and hence no session yet. The caller streams with
+        # session_id=None, which creates a fresh session on its first turn —
+        # exactly the desired "start over with different wording".
+        logger.info(f"Branch from turn {body.turn_index} has no prefix — caller starts fresh")
+
+    return {
+        "session_id": new_session_id,
+        "parent_session_id": session_id,
+        "turn_index": body.turn_index,
+        "message": body.message,
+    }
+
+
+@router.post("/sessions/{email}/{session_id}/end-side")
+async def end_side_chat(email: str, session_id: str, body: EndSideChatRequest):
+    """Summarize a side chat, fold it into its parent, and record the learning.
+
+    Three effects, all reusing existing machinery:
+      1. a summary turn appended to the parent's transcript
+      2. an episode saved to ChromaDB (episodic memory is keyed by email, so a
+         side chat's learning is searchable from any session)
+      3. concepts promoted in the knowledge graph
+    """
+    import json as _json
+
+    from backend.agent import _get_episodic, _get_user_data_dir, run_agent_internal
+    from backend.knowledge import CURRICULUM_GRAPH, KnowledgeStore
+    from backend.memory import append_turn_to_session, read_turns
+
+    turns = read_turns(email, session_id)
+    exchanges = [
+        t for t in turns if t.get("type") in ("user", "assistant_message") and t.get("content")
+    ]
+    if not exchanges:
+        raise HTTPException(status_code=404, detail="Side chat has no conversation to summarize")
+
+    transcript = "\n\n".join(
+        f"{'User' if t['type'] == 'user' else 'Tutor'}: {t['content']}" for t in exchanges
+    )
+
+    known = ", ".join(sorted(CURRICULUM_GRAPH.keys()))
+    ask = (
+        "Summarize this tutoring side-conversation for the learner's record.\n"
+        "Reply with ONLY a JSON object, no prose or code fences:\n"
+        '{"summary": "2-3 sentences, what was asked and understood",\n'
+        ' "topics": ["short", "tags"],\n'
+        ' "concepts": [{"concept_id": "<id from the list below, or a new snake_case id>",\n'
+        '               "name": "Human Readable", "mastery": "introduced|practiced|mastered"}]}\n'
+        "Only include concepts genuinely covered. Prefer existing ids:\n"
+        f"{known}\n\n"
+        f"--- transcript ---\n{transcript}"
+    )
+
+    # No user_data_dir: this is a one-shot summarizer, so it gets no memory
+    # tools and cannot write anything on its own.
+    #
+    # run_agent_internal returns the session id, not the reply — the text only
+    # arrives through on_event, so collect it there.
+    chunks: list[str] = []
+
+    async def collect(event: dict):
+        if event.get("type") == "assistant_message" and event.get("content"):
+            chunks.append(event["content"])
+
+    await run_agent_internal(
+        prompt=ask,
+        system_prompt="You output only valid JSON.",
+        on_event=collect,
+    )
+    raw = "".join(chunks)
+
+    parsed = {}
+    if raw:
+        text = raw.strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                parsed = _json.loads(text[start:end + 1])
+            except Exception:
+                logger.warning("Side-chat summary was not valid JSON; falling back")
+
+    summary = parsed.get("summary") or f"Side discussion about {body.topic or 'a related topic'}."
+    topics = parsed.get("topics") or ([body.topic] if body.topic else [])
+    concepts = parsed.get("concepts") or []
+
+    # 1. Fold a summary card into the parent conversation.
+    append_turn_to_session(email, body.parent_session_id, {
+        "type": "side_chat_summary",
+        "content": summary,
+        "side_session_id": session_id,
+        "topic": body.topic,
+        "topics": topics,
+    })
+
+    # 2. Episodic memory — searchable from any session.
+    episode_id = None
+    try:
+        episode_id = _get_episodic().save_episode(
+            email=email, summary=summary, topics=topics, session_id=session_id,
+        )
+    except Exception as e:
+        logger.error(f"Side-chat episode save failed: {e}", exc_info=True)
+
+    # 3. Knowledge graph — the learning counts even though it happened aside.
+    store = KnowledgeStore(_get_user_data_dir(email))
+    updated = []
+    for c in concepts:
+        cid = (c.get("concept_id") or "").strip()
+        if not cid:
+            continue
+        known_concept = CURRICULUM_GRAPH.get(cid, {})
+        try:
+            store.upsert_concept(
+                concept_id=cid,
+                name=c.get("name") or known_concept.get("name", cid),
+                category=known_concept.get("category", "side_topics"),
+                mastery=c.get("mastery", "introduced"),
+                prerequisites=known_concept.get("prereqs", []),
+                notes=f"Learned in a side chat about {body.topic}" if body.topic else "Learned in a side chat",
+            )
+            updated.append(cid)
+        except Exception as e:
+            logger.error(f"upsert_concept failed for {cid}: {e}", exc_info=True)
+
+    return {
+        "status": "ok",
+        "summary": summary,
+        "topics": topics,
+        "concepts_updated": updated,
+        "episode_id": episode_id,
+        "side_session_id": session_id,
+        "parent_session_id": body.parent_session_id,
+    }
 
 
 # --- ChromaDB Visualization Endpoints ---
@@ -304,26 +611,39 @@ async def chroma_stats():
     from backend.agent import _get_episodic
 
     episodic = _get_episodic()
-    col = episodic._conversations
-    count = col.count()
-    metadata = col.metadata or {}
+
+    summaries_col = episodic._conversations
+    exchanges_col = episodic._exchanges
 
     return {
-        "collection_name": col.name,
-        "total_documents": count,
-        "distance_metric": metadata.get("hnsw:space", "unknown"),
+        "collections": {
+            "conversations": {
+                "total_documents": summaries_col.count(),
+                "description": "High-level session summaries (agent-saved)",
+            },
+            "conversation_exchanges": {
+                "total_documents": exchanges_col.count(),
+                "description": "Detailed user+assistant exchanges (auto-saved)",
+            },
+        },
+        "total_documents": summaries_col.count() + exchanges_col.count(),
+        "distance_metric": "cosine",
         "embedding_model": "all-MiniLM-L6-v2",
         "embedding_dimensions": 384,
     }
 
 
 @router.get("/chroma/documents")
-async def chroma_documents(email: str | None = None, limit: int = 100):
-    """Get all documents from ChromaDB with their embeddings projected to 2D."""
+async def chroma_documents(email: str | None = None, limit: int = 100, collection: str = "conversations"):
+    """Get all documents from ChromaDB with their embeddings projected to 2D.
+
+    Args:
+        collection: 'conversations' (summaries) or 'exchanges' (detailed exchanges)
+    """
     from backend.agent import _get_episodic
 
     episodic = _get_episodic()
-    col = episodic._conversations
+    col = episodic._exchanges if collection == "exchanges" else episodic._conversations
     count = col.count()
 
     if count == 0:
@@ -343,14 +663,20 @@ async def chroma_documents(email: str | None = None, limit: int = 100):
     for i in range(len(results["ids"])):
         meta = results["metadatas"][i] or {}
         topics = meta.get("topics", "").split(",") if meta.get("topics") else []
-        docs.append({
+        doc_entry = {
             "id": results["ids"][i],
             "document": results["documents"][i] or "",
             "email": meta.get("user_email", ""),
             "timestamp": meta.get("timestamp", ""),
             "topics": [t for t in topics if t],
             "session_id": meta.get("session_id", ""),
-        })
+        }
+        # Include exchange-specific fields when viewing exchanges
+        if collection == "exchanges":
+            doc_entry["user_message"] = meta.get("user_message", "")
+            doc_entry["raw_exchange"] = meta.get("raw_exchange", "")
+            doc_entry["exchange_index"] = meta.get("exchange_index", 0)
+        docs.append(doc_entry)
         if results["embeddings"] is not None and len(results["embeddings"]) > i:
             emb = results["embeddings"][i]
             if emb is not None and len(emb) > 0:
@@ -359,7 +685,7 @@ async def chroma_documents(email: str | None = None, limit: int = 100):
     # Project to 2D
     points_2d = _pca_2d(embeddings) if embeddings else []
 
-    return {"documents": docs, "points_2d": points_2d, "count": len(docs)}
+    return {"documents": docs, "points_2d": points_2d, "count": len(docs), "collection": collection}
 
 
 class SearchRequest(BaseModel):
@@ -408,3 +734,75 @@ async def chroma_search(body: SearchRequest):
             })
 
     return {"results": items, "query": body.query}
+
+
+@router.post("/chroma/backfill/{email}")
+async def backfill_exchanges(email: str):
+    """Backfill all existing session transcripts into the exchanges collection.
+
+    Scans all sessions for a user and indexes any exchanges not yet in ChromaDB.
+    Safe to run multiple times — uses deterministic IDs for deduplication.
+    """
+    from backend.agent import _get_episodic
+    from backend.memory import get_user_sessions, read_turns
+
+    episodic = _get_episodic()
+    sessions = get_user_sessions(email)
+    total_saved = 0
+
+    for session_info in sessions:
+        sid = session_info.get("session_id", "")
+        if not sid:
+            continue
+
+        # Superseded turns are excluded, so edited-away content stays out of
+        # episodic memory too.
+        turns = read_turns(email, sid)
+        if not turns:
+            continue
+
+        saved = episodic.backfill_exchanges(email, sid, turns)
+        total_saved += saved
+
+    return {
+        "status": "ok",
+        "sessions_scanned": len(sessions),
+        "exchanges_saved": total_saved,
+    }
+
+
+# --- Feedback Endpoints ---
+
+
+class FeedbackBody(BaseModel):
+    content: str
+
+
+@router.get("/feedback/aspects")
+async def list_feedback_aspects():
+    """List the fixed set of aspect names the Preferences UI can edit."""
+    from backend.feedback import ASPECTS
+    return {"aspects": list(ASPECTS)}
+
+
+@router.get("/feedback/{email}/{aspect}")
+async def get_feedback_files(email: str, aspect: str):
+    """Return both layers for an aspect: global (read-only) + user (editable)."""
+    from backend.feedback import ASPECTS, load_global_feedback, load_user_feedback
+    if aspect not in ASPECTS:
+        raise HTTPException(status_code=400, detail=f"Unknown aspect {aspect!r}")
+    return {
+        "aspect": aspect,
+        "global": load_global_feedback(aspect),
+        "user": load_user_feedback(email, aspect),
+    }
+
+
+@router.put("/feedback/{email}/{aspect}")
+async def save_feedback_file(email: str, aspect: str, body: FeedbackBody):
+    """Persist the learner's per-aspect feedback file."""
+    from backend.feedback import ASPECTS, save_user_feedback
+    if aspect not in ASPECTS:
+        raise HTTPException(status_code=400, detail=f"Unknown aspect {aspect!r}")
+    save_user_feedback(email, aspect, body.content)
+    return {"ok": True}

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PyMentor — Python Learning Agent</title>
+    <title>PyMentor — Python &amp; Quantum Learning Agent</title>
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -30,19 +30,41 @@
             <div class="status-indicator" id="status">Ready</div>
         </div>
 
-        <!-- Center Panel (Chat) -->
-        <div class="center-panel">
-            <div class="chat-header">Python Learning Assistant</div>
-            <div class="chat-messages" id="chat-messages">
-                <div class="empty-state">
-                    <div class="emoji">&#127891;</div>
-                    Enter your email and start asking Python questions!
+        <!-- Center Panel (Chat + optional Notebook) -->
+        <div class="center-panel" id="center-panel">
+            <div class="chat-pane" id="chat-pane">
+                <div class="chat-header">
+                    <span>Python &amp; Quantum Assistant</span>
+                    <button id="run-code-btn" class="header-btn" onclick="toggleNotebook()" title="Open code runner">&gt;_ Run Code</button>
+                </div>
+                <div class="chat-scroll-wrap">
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="empty-state">
+                            <div class="emoji">&#127891;</div>
+                            Enter your email and start asking Python or quantum-computing questions!
+                        </div>
+                    </div>
+                    <button id="scroll-bottom-btn" class="scroll-bottom-btn" onclick="scrollChatToBottom()"
+                            title="Jump to latest">&#8595; Latest</button>
+                </div>
+                <div class="chat-input-area">
+                    <textarea id="message-input" placeholder="Ask me anything about Python or Qiskit..." rows="1"
+                             onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMessage(); }"></textarea>
+                    <button id="send-btn" onclick="sendMessage()">Send</button>
                 </div>
             </div>
-            <div class="chat-input-area">
-                <input type="text" id="message-input" placeholder="Ask me anything about Python..."
-                       onkeydown="if(event.key==='Enter') sendMessage()">
-                <button id="send-btn" onclick="sendMessage()">Send</button>
+
+            <!-- Notebook pane (hidden by default; toggled by Run Code button) -->
+            <div class="notebook-pane" id="notebook-pane" style="display:none">
+                <div class="notebook-header">
+                    <span>Code Runner <span class="notebook-sub">(per-user venv · qiskit installed)</span></span>
+                    <div class="notebook-actions">
+                        <button class="header-btn" onclick="addCell()" title="Add a new cell">+ Cell</button>
+                        <button class="header-btn" onclick="resetVenv()" title="Wipe and recreate this user's venv">Reset venv</button>
+                        <button class="header-btn" onclick="toggleNotebook()" title="Hide code runner">&times;</button>
+                    </div>
+                </div>
+                <div class="cells" id="cells"></div>
             </div>
         </div>
 
@@ -52,6 +74,7 @@
                 <div class="tab active" data-tab="progress" onclick="switchTab('progress')">Progress</div>
                 <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
                 <div class="tab" data-tab="quizzes" onclick="switchTab('quizzes')">Quizzes</div>
+                <div class="tab" data-tab="preferences" onclick="switchTab('preferences')">Preferences</div>
                 <div class="tab" data-tab="events" onclick="switchTab('events')">Events</div>
             </div>
 
@@ -82,6 +105,32 @@
                 <div id="quizzes-content" style="display:none"></div>
             </div>
 
+            <!-- Preferences Tab -->
+            <div class="tab-content" id="tab-preferences">
+                <div class="empty-state" id="preferences-empty">
+                    <div class="emoji">&#128221;</div>
+                    Enter your email to edit your learning preferences.
+                </div>
+                <div id="preferences-content" style="display:none">
+                    <div class="prefs-section">
+                        <label for="prefs-aspect">Aspect</label>
+                        <select id="prefs-aspect" onchange="loadPreferences()"></select>
+                    </div>
+                    <div class="prefs-section">
+                        <label>Global (read-only — set by admin)</label>
+                        <pre class="prefs-global" id="prefs-global">Loading...</pre>
+                    </div>
+                    <div class="prefs-section">
+                        <label for="prefs-user">Your rules (markdown)</label>
+                        <textarea id="prefs-user" rows="10" placeholder="- Add your own rules, one per line..."></textarea>
+                    </div>
+                    <div class="prefs-actions">
+                        <button id="prefs-save-btn" onclick="savePreferences()">Save</button>
+                        <span class="prefs-status" id="prefs-status"></span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Events Tab -->
             <div class="tab-content" id="tab-events">
                 <div id="events-log"></div>
@@ -89,6 +138,33 @@
         </div>
     </div>
 
+    <!-- Side-chat: a floating, draggable conversation for tangents. Mounted
+         outside .container so position:fixed escapes the three-column flex
+         layout. Hidden until opened. -->
+    <div class="side-chat" id="side-chat">
+        <div class="side-chat-header" id="side-chat-header">
+            <span class="side-chat-title" id="side-chat-title">Side chat</span>
+            <div class="side-chat-actions">
+                <button class="header-btn" id="side-chat-end" onclick="endSideChat()"
+                        title="Summarize into the main chat and close">End &amp; summarize</button>
+                <button class="header-btn" id="side-chat-close" onclick="closeSideChat()"
+                        title="Hide (keeps the conversation)">&times;</button>
+            </div>
+        </div>
+        <div class="side-chat-messages" id="side-chat-messages">
+            <div class="empty-state side-chat-hint">
+                Ask about a tangent here — the main chat stays clean.
+            </div>
+        </div>
+        <div class="side-chat-input-area">
+            <textarea id="side-chat-input" rows="1" placeholder="Ask about this topic…"
+                      onkeydown="if(event.key==='Enter' &amp;&amp; !event.shiftKey){ event.preventDefault(); sendSideMessage(); }"></textarea>
+            <button id="side-chat-send" onclick="sendSideMessage()">Send</button>
+        </div>
+        <div class="side-chat-resize" id="side-chat-resize" title="Resize"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 """MCP tool definitions for the Python Learning Agent.
 
-8 tools across Tier 2 (episodic) and Tier 3 (semantic) memory:
+11 tools across memory, curriculum, quiz, and feedback systems:
 
 Episodic (ChromaDB):
-  - search_past_conversations: Semantic search over past discussion summaries
+  - search_past_conversations: Semantic search over past exchanges + summaries
   - save_conversation_summary: Store a conversation summary with metadata
 
 Semantic (JSON knowledge graph):
@@ -13,16 +13,24 @@ Semantic (JSON knowledge graph):
   - get_quiz_topics: Get best concepts to quiz on
   - record_quiz_result: Save quiz results + promote mastery
   - update_learner_profile: Update learner level/preferences/notes
+
+Quiz + feedback:
+  - generate_quiz_question: Validate + shuffle options server-side, return
+    to agent so chat-text A/B/C/D positions are uniformly randomized.
+  - get_feedback: Read aspect-scoped guidance (global + user-specific)
+    before performing quiz / suggest / explain actions.
 """
 
 import json
 import logging
 import os
+import random
 from datetime import datetime, timezone
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from backend.episodic import EpisodicMemory
+from backend.feedback import ASPECTS as FEEDBACK_ASPECTS, load_feedback
 from backend.knowledge import KnowledgeStore
 
 logger = logging.getLogger(__name__)
@@ -46,9 +54,12 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
 
     @tool(
         "search_past_conversations",
-        "Search past conversation summaries by semantic similarity. "
+        "Search past conversations by semantic similarity. "
+        "Returns DETAILED content from past sessions including specific code examples, "
+        "quiz questions, explanations, and full user+assistant exchanges. "
         "Use this to recall what was discussed in previous sessions — "
-        "e.g., 'what did we cover about list comprehensions?' or "
+        "e.g., 'what quiz questions did we cover?', "
+        "'what code examples did we write for list comprehensions?', "
         "'when did we discuss error handling?'",
         {
             "type": "object",
@@ -70,19 +81,24 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             query = args["query"]
             n = min(args.get("n_results", 5), 20)
 
-            # Extract email from the user_data_dir path
             email = _email_from_dir(user_data_dir)
-            results = episodic.search_episodes(email, query, n_results=n)
 
-            if not results:
+            # Search both collections: detailed exchanges + high-level summaries
+            exchange_results = episodic.search_exchanges(email, query, n_results=n)
+            summary_results = episodic.search_episodes(email, query, n_results=min(n, 3))
+
+            if not exchange_results and not summary_results:
                 return _text_result(json.dumps({
-                    "results": [],
+                    "detailed_exchanges": [],
+                    "summaries": [],
                     "message": "No past conversations found matching your query.",
                 }))
 
             return _text_result(json.dumps({
-                "results": results,
-                "count": len(results),
+                "detailed_exchanges": exchange_results,
+                "summaries": summary_results,
+                "exchange_count": len(exchange_results),
+                "summary_count": len(summary_results),
             }, default=str))
         except Exception as e:
             logger.error(f"search_past_conversations error: {e}", exc_info=True)
@@ -224,7 +240,15 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
                 },
                 "category": {
                     "type": "string",
-                    "description": "Category: fundamentals, control_flow, data_structures, functions, oop, error_handling, file_io, modules, advanced",
+                    "description": (
+                        "Category of the concept. Pick the one that fits best. "
+                        "Python: fundamentals, control_flow, data_structures, functions, oop, "
+                        "error_handling, file_io, modules, testing, data_processing, advanced. "
+                        "ML: ml_core, ml_supervised, ml_unsupervised, ml_eval. "
+                        "Deep learning: dl_basics, dl_architectures. "
+                        "LLM / RAG: llm_core, llm_rag. "
+                        "MLOps: ops_serving, ops_monitoring."
+                    ),
                 },
                 "mastery": {
                     "type": "string",
@@ -456,6 +480,123 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             return _error_result(f"Error updating profile: {e}")
 
     # =====================================================================
+    # Quiz + Feedback Tools
+    # =====================================================================
+
+    @tool(
+        "generate_quiz_question",
+        "Generate ONE quiz question with options shuffled server-side so the "
+        "correct answer lands at a uniformly random position (not always A). "
+        "Call this for EVERY quiz question — one call per question. "
+        "Validation: exactly 4 options, all non-empty, all distinct, "
+        "correct_index in 0..3. The tool returns shuffled_options and the "
+        "new correct_letter — you MUST render the question in chat using "
+        "shuffled_options in order as A/B/C/D and remember correct_letter "
+        "to grade the learner's answer.",
+        {
+            "type": "object",
+            "properties": {
+                "concept_id": {
+                    "type": "string",
+                    "description": "Concept ID this question tests (e.g., 'list_comprehensions')",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "The question text",
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exactly 4 answer options, all distinct",
+                },
+                "correct_index": {
+                    "type": "integer",
+                    "description": "Index (0..3) of the correct option in the input list",
+                },
+                "explanation": {
+                    "type": "string",
+                    "description": "Short explanation shown after the learner answers",
+                },
+            },
+            "required": ["concept_id", "question", "options", "correct_index"],
+        },
+    )
+    async def generate_quiz_question_tool(args):
+        try:
+            options = args.get("options") or []
+            correct_index = args.get("correct_index")
+
+            if len(options) != 4:
+                return _error_result(
+                    f"options must contain exactly 4 entries, got {len(options)}"
+                )
+            cleaned = [(o or "").strip() for o in options]
+            if any(not o for o in cleaned):
+                return _error_result("all options must be non-empty after trimming")
+            if len(set(cleaned)) != 4:
+                return _error_result("options must be distinct (no duplicates)")
+            if not isinstance(correct_index, int) or correct_index not in range(4):
+                return _error_result(
+                    f"correct_index must be an integer in 0..3, got {correct_index!r}"
+                )
+
+            correct_text = cleaned[correct_index]
+            shuffled = cleaned[:]
+            random.shuffle(shuffled)
+            new_correct_index = shuffled.index(correct_text)
+            correct_letter = "ABCD"[new_correct_index]
+
+            return _text_result(json.dumps({
+                "concept_id": args["concept_id"],
+                "question": args["question"],
+                "shuffled_options": shuffled,
+                "correct_index": new_correct_index,
+                "correct_letter": correct_letter,
+                "explanation": args.get("explanation", ""),
+            }, default=str))
+        except Exception as e:
+            logger.error(f"generate_quiz_question error: {e}", exc_info=True)
+            return _error_result(f"Error generating quiz question: {e}")
+
+    @tool(
+        "get_feedback",
+        "Read aspect-scoped guidance set by the admin and the learner. "
+        "Call this BEFORE performing a relevant action: "
+        "'quiz' before each quiz question, 'suggest_topic' before suggesting "
+        "next topics, 'explain' before explaining a new concept, 'general' "
+        "at the start of a new conversation. Returns concatenated global + "
+        "learner-specific guidance as markdown.",
+        {
+            "type": "object",
+            "properties": {
+                "aspect": {
+                    "type": "string",
+                    "enum": list(FEEDBACK_ASPECTS),
+                    "description": "Which aspect of behavior to load guidance for",
+                },
+            },
+            "required": ["aspect"],
+        },
+    )
+    async def get_feedback_tool(args):
+        try:
+            aspect = args.get("aspect", "")
+            if aspect not in FEEDBACK_ASPECTS:
+                return _error_result(
+                    f"unknown aspect {aspect!r}; must be one of {list(FEEDBACK_ASPECTS)}"
+                )
+            email = _email_from_dir(user_data_dir)
+            text = load_feedback(aspect, email=email)
+            return _text_result(json.dumps({
+                "aspect": aspect,
+                "guidance": text,
+                "has_content": bool(text.strip()),
+            }, default=str))
+        except Exception as e:
+            logger.error(f"get_feedback error: {e}", exc_info=True)
+            return _error_result(f"Error loading feedback: {e}")
+
+    # =====================================================================
     # Create MCP Server
     # =====================================================================
 
@@ -472,6 +613,8 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             get_quiz_topics_tool,
             record_quiz_result_tool,
             update_learner_profile_tool,
+            generate_quiz_question_tool,
+            get_feedback_tool,
         ],
     )
 

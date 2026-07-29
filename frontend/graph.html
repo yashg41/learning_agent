@@ -201,6 +201,23 @@
                 <button onclick="loadGraph()" style="width:100%;padding:8px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;">Load Graph</button>
             </div>
 
+            <div class="legend">
+                <h3>Tracks</h3>
+                <div class="legend-item"><div class="legend-dot" style="background:#7aa2f7"></div>Python</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#f5a623"></div>ML / Data Science</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#56b6c2"></div>Deep Learning</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#c678dd"></div>LLM / RAG</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#98c379"></div>MLOps</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#ff1f8f"></div>Quantum / Qiskit</div>
+            </div>
+
+            <div class="legend">
+                <h3>Bridge Concepts</h3>
+                <div style="font-size:11px;color:var(--text2);line-height:1.45">
+                    A multi-color ring means this concept is a foundation for <em>several</em> tracks. Hover to see which.
+                </div>
+            </div>
+
             <div class="legend" id="category-legend">
                 <h3>Categories</h3>
             </div>
@@ -235,6 +252,7 @@ const tooltip = document.getElementById("tooltip");
 let nodes = [];
 let edges = [];
 let categories = [];
+let trackColors = {};
 let dpr = window.devicePixelRatio || 1;
 
 // Physics simulation
@@ -243,10 +261,30 @@ const SIM = {
     attraction: 0.005,
     edgeLength: 120,
     damping: 0.85,
-    centerGravity: 0.01,
+    centerGravity: 0.001,    // near-zero so tracks don't collapse into the middle
+    clusterGravity: 0.022,   // per-track anchor pull; gentle so bridges don't oscillate
+    crossTrackAttractionMultiplier: 0.3,  // cross-track edges tug bridges only weakly
     running: true,
     iterations: 0,
 };
+
+// Track anchor layout — offsets are fractions of the canvas half-dimension,
+// so clusters scale with window size and never clip off-screen.
+// Python sits in the middle; ML/DL/LLM/Ops/Quantum fan out around it.
+const TRACK_LAYOUT = {
+    python:    { fx:  0.00, fy:  0.00 },
+    ml:        { fx: -0.70, fy: -0.45 },
+    dl:        { fx:  0.70, fy: -0.45 },
+    llm:       { fx: -0.65, fy:  0.55 },
+    ops:       { fx:  0.65, fy:  0.55 },
+    quantum:   { fx:  0.00, fy:  0.85 },  // bottom-center, well clear of LLM/Ops
+    sysdesign: { fx:  0.00, fy: -0.85 },  // top-center, opposite Quantum
+};
+
+function trackAnchor(track, cx, cy) {
+    const t = TRACK_LAYOUT[track] || TRACK_LAYOUT.python;
+    return { x: cx + t.fx * cx, y: cy + t.fy * cy };
+}
 
 // View state
 let viewX = 0, viewY = 0, zoom = 1;
@@ -282,20 +320,18 @@ async function loadGraph() {
         const data = await res.json();
 
         categories = data.categories;
+        trackColors = data.track_colors || {};
         buildCategoryLegend(categories);
 
-        // Initialize nodes with positions
+        // Initialize nodes at their track anchor so clusters form immediately
         const cx = canvas.width / dpr / 2;
         const cy = canvas.height / dpr / 2;
-        nodes = data.nodes.map((n, i) => {
-            // Arrange by category in a circle initially
-            const catIdx = categories.findIndex(c => c.id === n.category);
-            const angle = (catIdx / categories.length) * Math.PI * 2;
-            const radius = 150 + Math.random() * 100;
+        nodes = data.nodes.map((n) => {
+            const anchor = trackAnchor(n.track || "python", cx, cy);
             return {
                 ...n,
-                x: cx + Math.cos(angle) * radius + (Math.random() - 0.5) * 80,
-                y: cy + Math.sin(angle) * radius + (Math.random() - 0.5) * 80,
+                x: anchor.x + (Math.random() - 0.5) * 80,
+                y: anchor.y + (Math.random() - 0.5) * 80,
                 vx: 0, vy: 0,
                 radius: n.mastery === "mastered" ? 20 : n.mastery === "practiced" ? 17 : n.mastery === "introduced" ? 15 : 12,
             };
@@ -373,22 +409,34 @@ function simulate() {
         }
     }
 
-    // Attraction along edges
+    // Attraction along edges. Cross-track prereq edges are dialed down so
+    // bridge concepts (e.g. numpy_basics, classes_basic) stay anchored to
+    // their own cluster rather than being yanked into the middle.
     for (const e of edges) {
         let dx = e.target.x - e.source.x;
         let dy = e.target.y - e.source.y;
         let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        let force = (dist - SIM.edgeLength) * SIM.attraction;
+        const sameTrack = e.source.track === e.target.track;
+        const mult = sameTrack ? 1 : SIM.crossTrackAttractionMultiplier;
+        let force = (dist - SIM.edgeLength) * SIM.attraction * mult;
         let fx = (dx / dist) * force;
         let fy = (dy / dist) * force;
         e.source.vx += fx; e.source.vy += fy;
         e.target.vx -= fx; e.target.vy -= fy;
     }
 
-    // Center gravity
+    // Center gravity (weak — keeps the whole graph from drifting off-screen)
     for (const n of nodes) {
         n.vx += (cx - n.x) * SIM.centerGravity;
         n.vy += (cy - n.y) * SIM.centerGravity;
+    }
+
+    // Cluster gravity — pull each node toward its track's anchor.
+    // This is what creates the visual separation between python/ml/dl/llm/ops.
+    for (const n of nodes) {
+        const anchor = trackAnchor(n.track || "python", cx, cy);
+        n.vx += (anchor.x - n.x) * SIM.clusterGravity;
+        n.vy += (anchor.y - n.y) * SIM.clusterGravity;
     }
 
     // Apply velocity
@@ -401,8 +449,8 @@ function simulate() {
     }
 
     SIM.iterations++;
-    // Slow down after stabilizing
-    if (SIM.iterations > 300) {
+    // Slow down after stabilizing — bumped up for cluster convergence
+    if (SIM.iterations > 500) {
         SIM.running = false;
     }
 }
@@ -466,14 +514,45 @@ function draw() {
             ctx.fill();
         }
 
-        // Node circle
+        // Node fill (mastery encoding stays unchanged — translucent disc).
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         ctx.fillStyle = mc.fill;
         ctx.fill();
-        ctx.strokeStyle = isHovered ? "#ffffff" : mc.stroke;
-        ctx.lineWidth = isHovered ? 2.5 : 1.8;
-        ctx.stroke();
+
+        // Outer ring. For "bridge" concepts (used by 2+ tracks) draw a pie
+        // ring with one arc per track; otherwise a solid mastery-colored ring.
+        const ringWidth = isHovered ? 2.5 : 1.8;
+        if (n.is_bridge && Array.isArray(n.feeds_tracks) && n.feeds_tracks.length >= 2) {
+            const slices = n.feeds_tracks;
+            const step = (Math.PI * 2) / slices.length;
+            // Start at -π/2 so the first slice begins at 12 o'clock — gives a
+            // predictable layout regardless of track count.
+            let start = -Math.PI / 2;
+            ctx.lineWidth = ringWidth;
+            for (const t of slices) {
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, r, start, start + step);
+                ctx.strokeStyle = isHovered ? "#ffffff" : (trackColors[t] || mc.stroke);
+                if (!isHovered) ctx.strokeStyle = trackColors[t] || mc.stroke;
+                ctx.stroke();
+                start += step;
+            }
+            // White outline overlay when hovered so the node still pops
+            if (isHovered) {
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, r + 1.5, 0, Math.PI * 2);
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        } else {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+            ctx.strokeStyle = isHovered ? "#ffffff" : mc.stroke;
+            ctx.lineWidth = ringWidth;
+            ctx.stroke();
+        }
 
         // Inner category color dot
         ctx.beginPath();
@@ -568,6 +647,17 @@ canvas.addEventListener("mousemove", (e) => {
             tooltip.style.display = "block";
             tooltip.style.left = (e.clientX + 14) + "px";
             tooltip.style.top = (e.clientY - 10) + "px";
+            // Bridge concepts feed >=2 tracks. Show those tracks in their own
+            // colors so the student can read the pie ring at a glance.
+            let foundationLine = "";
+            if (node.is_bridge && Array.isArray(node.feeds_tracks) && node.feeds_tracks.length >= 2) {
+                const labelMap = { python: "Python", ml: "ML", dl: "Deep Learning", llm: "LLM/RAG", ops: "MLOps", quantum: "Quantum", sysdesign: "System Design" };
+                const chips = node.feeds_tracks.map(t =>
+                    `<span style="color:${trackColors[t] || "#c0caf5"};font-weight:600">${labelMap[t] || t}</span>`
+                ).join(", ");
+                foundationLine = `<div class="tt-prereqs" style="margin-top:6px">Foundation for: ${chips}</div>`;
+            }
+
             tooltip.innerHTML = `
                 <div class="tt-name" style="color:${node.color}">${node.name}</div>
                 <div class="tt-cat">${node.category.replace("_", " ")}</div>
@@ -575,6 +665,7 @@ canvas.addEventListener("mousemove", (e) => {
                 ${node.review_count ? `<div style="color:var(--muted)">Reviewed ${node.review_count}x</div>` : ""}
                 ${prereqs.length ? `<div class="tt-prereqs">Requires: ${prereqs.join(", ")}</div>` : '<div class="tt-prereqs">No prerequisites</div>'}
                 ${dependents.length ? `<div class="tt-prereqs">Unlocks: ${dependents.join(", ")}</div>` : ""}
+                ${foundationLine}
             `;
         } else {
             tooltip.style.display = "none";

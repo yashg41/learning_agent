@@ -1,8 +1,19 @@
 """Conversation turn persistence — saves raw conversation data per user.
 
 Supports multiple sessions per user. Session-specific data (conversation,
-metadata, summary, turns) lives in data/users/<email>/sessions/<session_id>/.
+metadata, summary) lives in data/users/<email>/sessions/<session_id>/.
 Shared data (knowledge, quizzes) stays at the user level.
+
+Turns are stored in `conversation.jsonl` — one JSON object per line, appended.
+The previous format re-serialized the entire history on every turn (plus a
+numbered file per turn under turns/), which cost O(history) per write and lost
+turns when two writers raced. Appending is constant-time and crash-safe.
+
+Legacy sessions are converted on first read; see `_ensure_jsonl`.
+
+Editing is modelled as a tombstone rather than a rewrite: a `supersede` line
+retracts an earlier turn, and `read_turns` rebuilds the surviving history.
+Every reader must go through `read_turns`, or retracted turns leak back out.
 """
 
 import os
@@ -19,6 +30,124 @@ USERS_DIR = os.path.join(settings.DATA_DIR, "users")
 def _safe_email(email: str) -> str:
     """Sanitize email for use as directory name."""
     return re.sub(r"[^\w@.\-]", "_", email.lower().strip())
+
+
+def _conversation_paths(session_dir: str) -> tuple[str, str]:
+    """Return (jsonl_path, legacy_json_path) for a session directory."""
+    return (
+        os.path.join(session_dir, "conversation.jsonl"),
+        os.path.join(session_dir, "conversation.json"),
+    )
+
+
+def _ensure_jsonl(session_dir: str) -> str:
+    """Convert a legacy conversation.json to conversation.jsonl, once.
+
+    Returns the jsonl path. The old file is kept as conversation.json.bak so a
+    bad conversion is recoverable. No-op when the jsonl already exists or the
+    session is brand new.
+    """
+    jsonl_path, legacy_path = _conversation_paths(session_dir)
+    if os.path.exists(jsonl_path) or not os.path.isfile(legacy_path):
+        return jsonl_path
+
+    with open(legacy_path) as f:
+        data = json.load(f)
+
+    # Write to a temp file and rename, so an interrupted conversion can't leave
+    # a half-written jsonl that would later be mistaken for complete.
+    tmp_path = jsonl_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        for turn in data.get("turns", []):
+            f.write(json.dumps(turn, default=str) + "\n")
+    os.replace(tmp_path, jsonl_path)
+    os.replace(legacy_path, legacy_path + ".bak")
+    return jsonl_path
+
+
+def _read_raw_lines(jsonl_path: str) -> list[dict]:
+    """Read every line, skipping blanks and unparseable ones.
+
+    A truncated final line (power loss mid-append) shouldn't make the whole
+    session unreadable, so bad lines are dropped rather than raised.
+    """
+    if not os.path.isfile(jsonl_path):
+        return []
+    records = []
+    with open(jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def _apply_supersedes(records: list[dict]) -> list[dict]:
+    """Resolve tombstones into the surviving history.
+
+    A {"type": "supersede", "from_index": N} line retracts turn N and every
+    turn after it — the edit point and everything it led to. Turns appended
+    after the marker are the replacement.
+    """
+    turns: list[dict] = []
+    for rec in records:
+        if rec.get("type") == "supersede":
+            cutoff = rec.get("from_index")
+            if cutoff is not None:
+                turns = [t for t in turns if t.get("index", 0) < cutoff]
+            continue
+        turns.append(rec)
+    return turns
+
+
+def read_turns(email: str, session_id: str) -> list[dict]:
+    """The single source of truth for a session's visible history.
+
+    Applies legacy migration and supersede resolution. Every caller — the
+    history API, replay, backfill — must use this, or superseded turns leak
+    back into the UI.
+    """
+    session_dir = get_session_dir(email, session_id)
+    jsonl_path = _ensure_jsonl(session_dir)
+    return _apply_supersedes(_read_raw_lines(jsonl_path))
+
+
+def append_turn_to_session(email: str, session_id: str, turn: dict) -> dict:
+    """Append one turn to a session that isn't currently being streamed into.
+
+    Used to fold a side-chat summary into its parent. Assigns the next index
+    without disturbing the session's metadata (model, system_prompt), which a
+    fresh MemoryStore would otherwise blank.
+    """
+    session_dir = get_session_dir(email, session_id)
+    jsonl_path = _ensure_jsonl(session_dir)
+
+    existing = _apply_supersedes(_read_raw_lines(jsonl_path))
+    record = dict(turn)
+    record["index"] = max((t.get("index", 0) for t in existing), default=0) + 1
+    record.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+    return record
+
+
+def supersede_from(email: str, session_id: str, from_index: int, reason: str = "edit") -> None:
+    """Retract turn `from_index` and everything after it."""
+    session_dir = get_session_dir(email, session_id)
+    jsonl_path = _ensure_jsonl(session_dir)
+    marker = {
+        "type": "supersede",
+        "from_index": from_index,
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(marker) + "\n")
 
 
 def _read_user_json(email: str) -> dict:
@@ -91,14 +220,10 @@ def _migrate_user_json(safe_email: str, old_data: dict) -> dict:
 
 
 def _session_name_from_conversation(session_dir: str) -> str:
-    """Extract a session name from the first user message in conversation.json."""
-    conv_path = os.path.join(session_dir, "conversation.json")
-    if not os.path.isfile(conv_path):
-        return "Untitled Session"
+    """Extract a session name from the first user message in the transcript."""
     try:
-        with open(conv_path) as f:
-            data = json.load(f)
-        for turn in data.get("turns", []):
+        turns = _apply_supersedes(_read_raw_lines(_ensure_jsonl(session_dir)))
+        for turn in turns:
             if turn.get("type") == "user" and turn.get("content"):
                 return turn["content"][:40].strip()
     except Exception:
@@ -123,10 +248,24 @@ def get_active_session(email: str) -> str | None:
     return data.get("active_session")
 
 
-def save_user_session(email: str, session_id: str, name: str = ""):
-    """Add a session to the user's sessions list and set it as active.
+def save_user_session(
+    email: str,
+    session_id: str,
+    name: str = "",
+    set_active: bool = True,
+    kind: str = "",
+    parent_session_id: str = "",
+):
+    """Add a session to the user's sessions list.
 
     If the session already exists, updates its last_active timestamp.
+
+    set_active: whether this becomes the user's active session. Side-chats and
+        branches pass False — a background conversation must not steal the
+        pointer that determines which chat the user returns to.
+    kind: "main" (default), "side_chat", or "branch" — lets the sidebar nest
+        or filter derived sessions instead of listing them flat.
+    parent_session_id: the session this one was forked from, if any.
     """
     safe = _safe_email(email)
     user_dir = os.path.join(USERS_DIR, safe)
@@ -153,19 +292,63 @@ def save_user_session(email: str, session_id: str, name: str = ""):
         existing["last_active"] = now
         if name:
             existing["name"] = name
+        if kind:
+            existing["kind"] = kind
+        if parent_session_id:
+            existing["parent_session_id"] = parent_session_id
     else:
-        sessions.append({
+        entry = {
             "session_id": session_id,
             "name": name or "New Session",
             "created_at": now,
             "last_active": now,
-        })
+        }
+        if kind:
+            entry["kind"] = kind
+        if parent_session_id:
+            entry["parent_session_id"] = parent_session_id
+        sessions.append(entry)
 
     data["sessions"] = sessions
-    data["active_session"] = session_id
+    if set_active:
+        data["active_session"] = session_id
 
     with open(user_path, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def replace_session_id(email: str, old_session_id: str, new_session_id: str):
+    """Replace a session's ID in user.json (e.g., when SDK assigns a new ID).
+
+    Preserves the session's name and created_at but updates its ID and last_active.
+    Also moves the session directory if it exists.
+    """
+    safe = _safe_email(email)
+    user_dir = os.path.join(USERS_DIR, safe)
+    user_path = os.path.join(user_dir, "user.json")
+    data = _read_user_json(email)
+    if not data:
+        return
+
+    sessions = data.get("sessions", [])
+    for s in sessions:
+        if s["session_id"] == old_session_id:
+            s["session_id"] = new_session_id
+            s["last_active"] = datetime.now(timezone.utc).isoformat()
+            break
+
+    if data.get("active_session") == old_session_id:
+        data["active_session"] = new_session_id
+
+    data["sessions"] = sessions
+    with open(user_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    # Move session data directory if it exists
+    old_dir = os.path.join(user_dir, "sessions", old_session_id)
+    new_dir = os.path.join(user_dir, "sessions", new_session_id)
+    if os.path.isdir(old_dir) and not os.path.isdir(new_dir):
+        shutil.move(old_dir, new_dir)
 
 
 def set_active_session(email: str, session_id: str) -> bool:
@@ -274,19 +457,18 @@ class MemoryStore:
         self.session_id = session_id
         self.user_dir = os.path.join(USERS_DIR, safe)
         self.session_dir = os.path.join(self.user_dir, "sessions", session_id)
-        self.turns_dir = os.path.join(self.session_dir, "turns")
         self.turn_counter = 0
         self.turns: list[dict] = []
 
-        os.makedirs(self.turns_dir, exist_ok=True)
+        os.makedirs(self.session_dir, exist_ok=True)
 
-        # Load existing state if resuming
-        conv_path = os.path.join(self.session_dir, "conversation.json")
-        if os.path.exists(conv_path):
-            with open(conv_path) as f:
-                data = json.load(f)
-                self.turns = data.get("turns", [])
-                self.turn_counter = len(self.turns)
+        # Load existing state if resuming (migrating the legacy format if this
+        # session predates jsonl). turn_counter continues from the highest
+        # surviving index rather than len(), so indices stay unique after an
+        # edit has retracted a tail.
+        self.jsonl_path = _ensure_jsonl(self.session_dir)
+        self.turns = _apply_supersedes(_read_raw_lines(self.jsonl_path))
+        self.turn_counter = max((t.get("index", 0) for t in self.turns), default=0)
 
         self._write_metadata(model, system_prompt)
 
@@ -305,30 +487,11 @@ class MemoryStore:
         turn["timestamp"] = datetime.now(timezone.utc).isoformat()
         self.turns.append(turn)
 
-        filename = self._turn_filename(turn)
-        with open(os.path.join(self.turns_dir, filename), "w") as f:
-            json.dump(turn, f, indent=2, default=str)
+        # One append — no full-history rewrite, no per-turn file.
+        with open(self.jsonl_path, "a") as f:
+            f.write(json.dumps(turn, default=str) + "\n")
 
-        self._write_conversation()
         self._update_metadata()
-
-    def _turn_filename(self, turn: dict) -> str:
-        idx = str(turn["index"]).zfill(3)
-        t = turn.get("type", "unknown")
-        suffix = ""
-        if t == "tool_call" and "tool_name" in turn:
-            safe_name = re.sub(r"[^\w]", "_", turn["tool_name"])
-            suffix = f"_{safe_name}"
-        return f"{idx}_{t}{suffix}.json"
-
-    def _write_conversation(self):
-        path = os.path.join(self.session_dir, "conversation.json")
-        with open(path, "w") as f:
-            json.dump({
-                "email": self.email,
-                "session_id": self.session_id,
-                "turns": self.turns,
-            }, f, indent=2, default=str)
 
     def _write_metadata(self, model: str = "", system_prompt: str | None = None):
         path = os.path.join(self.session_dir, "metadata.json")
