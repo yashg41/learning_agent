@@ -3,14 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PyMentor — Python &amp; Quantum Learning Agent</title>
+    <title>PyMentor — your learning agent</title>
+    <!-- Shared design tokens, then the curriculum palette derived per theme
+         in backend/knowledge.py, then this page's own rules. Order matters:
+         styles.css consumes the variables these two define. -->
+    <link rel="stylesheet" href="/static/tokens.css">
+    <link rel="stylesheet" href="/api/palette.css">
     <link rel="stylesheet" href="/static/styles.css">
+    <script>
+        // Applied before first paint so the page never flashes the wrong theme.
+        // ?theme= wins (useful for screenshots), then the saved choice, then
+        // whatever the OS prefers.
+        (function () {
+            var forced = new URLSearchParams(location.search).get('theme');
+            var saved = null;
+            try { saved = localStorage.getItem('pymentor:theme'); } catch (e) {}
+            var prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
+            var t = (forced === 'light' || forced === 'dark') ? forced
+                  : saved || (prefersLight ? 'light' : 'dark');
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
 </head>
 <body>
+    <!-- Top bar: identity and cross-view navigation, so the graph and memory
+         explorer read as parts of one product rather than stray links. -->
+    <div class="topbar">
+        <div class="brand"><span class="brand-mark">P</span> PyMentor</div>
+        <nav class="topnav">
+            <a href="/" class="topnav-link active">Chat</a>
+            <a href="/graph" class="topnav-link">Knowledge Graph</a>
+            <a href="/chroma" class="topnav-link">Memory</a>
+        </nav>
+        <div class="topbar-right">
+            <div class="learner-chip" id="learner-chip" onclick="focusEmail()"
+                 title="Switch learner">
+                <span class="avatar" id="learner-avatar">?</span>
+                <span class="learner-email" id="learner-email">Set your email</span>
+            </div>
+        </div>
+    </div>
+
     <div class="container">
         <!-- Left Panel -->
         <div class="left-panel">
-            <h2>PyMentor</h2>
             <div>
                 <label for="email-input">Your Email</label>
                 <input type="email" id="email-input" placeholder="learner@example.com" value=""
@@ -23,10 +59,6 @@
                 </div>
                 <div class="session-list" id="session-list"></div>
             </div>
-            <div class="nav-links">
-                <a href="/graph" class="nav-link" target="_blank">Knowledge Graph</a>
-                <a href="/chroma" class="nav-link" target="_blank">Memory Explorer</a>
-            </div>
             <div class="status-indicator" id="status">Ready</div>
         </div>
 
@@ -34,21 +66,57 @@
         <div class="center-panel" id="center-panel">
             <div class="chat-pane" id="chat-pane">
                 <div class="chat-header">
-                    <span>Python &amp; Quantum Assistant</span>
-                    <button id="run-code-btn" class="header-btn" onclick="toggleNotebook()" title="Open code runner">&gt;_ Run Code</button>
+                    <button class="rail-toggle" id="toggle-left" onclick="toggleRail('left')"
+                            title="Hide sidebar (⌘\)">⊟</button>
+                    <!-- Shows the current session, not a static app name:
+                         "PyMentor" is already in the top bar, and the old
+                         "Python & Quantum" label was stale — the curriculum
+                         now spans seven tracks. -->
+                    <span class="chat-title" id="chat-title">New session</span>
+                    <div class="chat-header-actions">
+                        <button id="theme-btn" class="header-btn" onclick="toggleTheme()"
+                                title="Switch theme">◐ Light</button>
+                        <button id="focus-btn" class="header-btn" onclick="toggleFocus()"
+                                title="Focus mode — hide both rails (⌘.)">⛶ Focus</button>
+                        <button id="run-code-btn" class="header-btn" onclick="toggleNotebook()"
+                                title="Open code runner">&gt;_ Run Code</button>
+                        <button class="rail-toggle" id="toggle-right" onclick="toggleRail('right')"
+                                title="Hide panel (⌘])">⊟</button>
+                    </div>
                 </div>
                 <div class="chat-scroll-wrap">
                     <div class="chat-messages" id="chat-messages">
-                        <div class="empty-state">
-                            <div class="emoji">&#127891;</div>
-                            Enter your email and start asking Python or quantum-computing questions!
+                        <!-- Teaches what the tutor can do instead of filling
+                             the column with an emoji. The starters double as
+                             the entry point people otherwise never find. -->
+                        <div class="empty-state empty-teach">
+                            <h2>What would you like to learn?</h2>
+                            <p>I remember what we cover, track your mastery, and pick up where we left off.</p>
+                            <div class="starters">
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--track-python)"></span>
+                                    Explain Python decorators with a real example
+                                </button>
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--track-sysdesign)"></span>
+                                    How do read replicas cause stale reads?
+                                </button>
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--track-quantum)"></span>
+                                    Build a Bell state in Qiskit, step by step
+                                </button>
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--warning)"></span>
+                                    Quiz me on what I've learned so far
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <button id="scroll-bottom-btn" class="scroll-bottom-btn" onclick="scrollChatToBottom()"
                             title="Jump to latest">&#8595; Latest</button>
                 </div>
                 <div class="chat-input-area">
-                    <textarea id="message-input" placeholder="Ask me anything about Python or Qiskit..." rows="1"
+                    <textarea id="message-input" placeholder="Ask anything — or type &quot;quiz me&quot; to test what you know…" rows="1"
                              onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMessage(); }"></textarea>
                     <button id="send-btn" onclick="sendMessage()">Send</button>
                 </div>

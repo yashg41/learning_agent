@@ -1,0 +1,241 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --line: #2a2f3a;
+  --text: #e8eaed;
+  --muted: #9aa3b2;
+  --accent: #4f8cff;
+  --ok: #3ecf8e;
+  --warn: #f5a524;
+  --danger: #f04747;
+  --radius: 12px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f0f2f5;
+    --line: #dfe3e9;
+    --text: #14171c;
+    --muted: #5f6875;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* The `hidden` attribute is honoured by the UA stylesheet as [hidden]
+   { display: none }, which any class rule that sets `display` will beat on
+   specificity. Restate it here with !important so `hidden` always wins —
+   otherwise elements like .qrpanel (display: flex) stay visible when hidden. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  padding: 20px;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap { max-width: 900px; margin: 0 auto; }
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+
+h1 { font-size: 19px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted); flex-shrink: 0;
+}
+.dot.live { background: var(--ok); }
+.dot.poll { background: var(--warn); }
+
+.status { color: var(--muted); font-size: 13px; margin-right: auto; }
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 14px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+button:hover { border-color: var(--accent); }
+button:active { transform: translateY(1px); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.ghost { background: transparent; }
+button.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+.banner {
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.banner.warn { border-color: var(--warn); }
+.banner strong { color: var(--warn); }
+.banner code {
+  background: var(--panel-2); padding: 1px 6px;
+  border-radius: 5px; font-size: 13px;
+}
+
+/* Laptop drop surface */
+.dropbox {
+  border: 2px dashed var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  padding: 34px 22px;
+  text-align: center;
+  transition: border-color .15s, background .15s;
+  margin-bottom: 18px;
+  cursor: text;
+}
+.dropbox:focus-within, .dropbox.hot {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+.dropbox h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.dropbox p { margin: 4px 0; color: var(--muted); font-size: 13.5px; }
+.dropbox kbd {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 6px;
+  padding: 2px 7px; font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dropbox textarea {
+  position: absolute; opacity: 0; width: 1px; height: 1px;
+  pointer-events: none;
+}
+
+/* QR panel — pinned above everything else. It's what you need to connect at
+   the start of a session, so it must not scroll away behind pasted items. */
+.qrpanel {
+  display: flex; gap: 18px; align-items: center;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 16px; margin-bottom: 18px;
+  position: sticky; top: 12px; z-index: 20;
+  /* Opaque: items scroll underneath, and a translucent panel would let them
+     show through the rounded corners. */
+  box-shadow: 0 6px 20px -12px rgba(0, 0, 0, .55);
+}
+.qrpanel img {
+  width: 148px; height: 148px; border-radius: 8px;
+  background: #fff; flex-shrink: 0;
+}
+.qrpanel .qrtext { min-width: 0; }
+.qrpanel h3 { margin: 0 0 6px; font-size: 15px; }
+.qrpanel p { margin: 0 0 10px; color: var(--muted); font-size: 13.5px; }
+.qrpanel input {
+  width: 100%; font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+}
+
+/* Tablet send box */
+.sendbox {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px; margin-bottom: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.sendrow { display: flex; gap: 8px; }
+.sendrow button { flex: 1; padding: 12px; font-size: 15px; }
+.sendbox textarea {
+  width: 100%; resize: vertical; min-height: 48px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 9px;
+  padding: 10px 12px; font: inherit;
+  /* 16px minimum stops iOS Safari zooming the page on focus. */
+  font-size: 16px;
+}
+.sendbox textarea:focus { outline: none; border-color: var(--accent); }
+
+/* Items */
+.items { display: flex; flex-direction: column; gap: 12px; }
+
+.item {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  animation: rise .18s ease-out;
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.item .meta {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--muted); font-size: 12.5px; margin-bottom: 9px;
+  flex-wrap: wrap;
+}
+.item .meta .spacer { margin-left: auto; }
+
+.item img.shot {
+  max-width: 100%; border-radius: 8px; display: block;
+  background: var(--panel-2); cursor: pointer;
+}
+
+.item pre {
+  margin: 0; padding: 11px 12px;
+  background: var(--panel-2); border-radius: 8px;
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow: auto;
+}
+
+/* Text items are a real textarea so the OS Copy menu works on them. */
+.item .textitem {
+  display: block; width: 100%; resize: vertical;
+  margin: 0; padding: 11px 12px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  /* 16px keeps iOS Safari from zooming the page when this gains focus. */
+  font: 16px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-height: 300px;
+  -webkit-user-select: text; user-select: text;
+}
+.item .textitem:focus { outline: none; border-color: var(--accent); }
+
+.actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.actions button { padding: 7px 12px; font-size: 13.5px; }
+
+.hint { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+
+.empty {
+  text-align: center; color: var(--muted);
+  padding: 40px 20px; font-size: 14px;
+}
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px;
+  transform: translateX(-50%) translateY(12px);
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 16px; font-size: 14px;
+  opacity: 0; pointer-events: none; transition: all .18s;
+  z-index: 50; max-width: 90vw; text-align: center;
+}
+.toast.show { opacity: 1; transform: translateX(-50%); }
+.toast.err { border-color: var(--danger); }
+
+/* Tablet: bigger tap targets */
+body.tablet .actions button { padding: 11px 16px; font-size: 15px; }
+body.tablet .item { padding: 14px; }
+
+@media (max-width: 640px) {
+  body { padding: 14px; }
+  .qrpanel { flex-direction: column; align-items: flex-start; }
+}

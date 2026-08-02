@@ -366,6 +366,59 @@ def set_active_session(email: str, session_id: str) -> bool:
     return True
 
 
+def delete_session(email: str, session_id: str) -> bool:
+    """Remove a session from the registry and delete its transcript.
+
+    Returns True if it existed. If the deleted session was active, the
+    pointer moves to the most recently active survivor so the user isn't
+    left pointing at nothing.
+
+    The SDK's own transcript under ~/.claude/projects/ is left alone — it is
+    not ours to remove, and an orphaned .jsonl there is harmless.
+    """
+    data = _read_user_json(email)
+    sessions = data.get("sessions", [])
+    remaining = [s for s in sessions if s["session_id"] != session_id]
+    if len(remaining) == len(sessions):
+        return False
+
+    data["sessions"] = remaining
+    if data.get("active_session") == session_id:
+        data["active_session"] = (
+            max(remaining, key=lambda s: s.get("last_active", ""))["session_id"]
+            if remaining else None
+        )
+
+    safe = _safe_email(email)
+    with open(os.path.join(USERS_DIR, safe, "user.json"), "w") as f:
+        json.dump(data, f, indent=2)
+
+    session_dir = os.path.join(USERS_DIR, safe, "sessions", session_id)
+    if os.path.isdir(session_dir):
+        shutil.rmtree(session_dir, ignore_errors=True)
+    return True
+
+
+def prune_empty_sessions(email: str) -> list[str]:
+    """Drop sessions that were created but never used.
+
+    Clicking "+" registers a session before any message is sent, so an
+    abandoned click leaves a permanent empty row in the sidebar. Returns the
+    ids removed. Never touches the active session — the user may be about to
+    type into it.
+    """
+    active = get_active_session(email)
+    removed = []
+    for s in list(get_user_sessions(email)):
+        sid = s["session_id"]
+        if sid == active:
+            continue
+        if not read_turns(email, sid):
+            if delete_session(email, sid):
+                removed.append(sid)
+    return removed
+
+
 def rename_session(email: str, session_id: str, name: str) -> bool:
     """Rename a session. Returns True if found."""
     data = _read_user_json(email)

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dropzone — laptop</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:,">
+</head>
+<body data-role="laptop">
+<div class="wrap">
+
+  <header>
+    <span class="dot" id="dot"></span>
+    <h1>Dropzone</h1>
+    <span class="status" id="status">connecting…</span>
+    <button class="ghost danger" id="clear">Clear all</button>
+  </header>
+
+  <!-- Connect panel stays pinned above the drop area: it is what you need at
+       the start of a session, and it must not scroll away behind items. -->
+  <div class="qrpanel" id="qrpanel" hidden>
+    <img id="qrimg" alt="QR code linking to the tablet page">
+    <div class="qrtext">
+      <h3>Open this on your tablet</h3>
+      <p id="qrnote">Scan once per session. The link includes the access token.</p>
+      <input id="tunnelurl" readonly>
+    </div>
+  </div>
+
+  <div class="banner" id="tunnelhint" hidden>
+    <strong>No https tunnel.</strong>
+    The QR above works over your local Wi-Fi — images and text transfer fine,
+    and you can save them on the tablet. One-tap <em>copy</em> needs an
+    <code>https://</code> address, since browsers disable clipboard access on
+    plain <code>http://</code>. If the tunnel failed, your network is probably
+    blocking outbound port 7844.
+  </div>
+
+  <div class="dropbox" id="dropbox" tabindex="0">
+    <textarea id="sink" aria-hidden="true"></textarea>
+    <h2>Paste here</h2>
+    <p>Screenshot to clipboard with <kbd>⌘ ⌃ ⇧ 4</kbd>, then press <kbd>⌘ V</kbd> here.</p>
+    <p>Text and dragged-in files work too. Nothing leaves this machine unless you paste it.</p>
+  </div>
+
+  <div class="items" id="items"></div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<!-- All behaviour lives in app.js. The page's CSP sets script-src 'self',
+     which blocks inline <script> blocks outright — code placed here would
+     silently never run. -->
+<script src="/app.js"></script>
+</body>
+</html>

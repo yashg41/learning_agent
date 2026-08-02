@@ -6,6 +6,95 @@ let currentSessionId = null;
 let isStreaming = false;
 
 // =====================================================================
+// Theme
+//
+// The initial theme is set inline in index.html <head> so there is no
+// flash before first paint; this only handles switching afterwards.
+// =====================================================================
+
+/**
+ * @param {string} t  "light" | "dark"
+ * @param {boolean} persist  false when merely syncing the button to the theme
+ *   index.html already applied — otherwise following the OS preference would
+ *   silently harden into an explicit saved choice.
+ */
+function applyTheme(t, persist = true) {
+    document.documentElement.setAttribute("data-theme", t);
+    const btn = document.getElementById("theme-btn");
+    if (btn) {
+        btn.textContent = t === "light" ? "◑ Dark" : "◐ Light";
+        btn.title = t === "light" ? "Switch to dark" : "Switch to light";
+    }
+    if (persist) {
+        try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
+    }
+}
+
+function toggleTheme() {
+    const cur = document.documentElement.getAttribute("data-theme") || "dark";
+    applyTheme(cur === "dark" ? "light" : "dark");
+}
+
+// =====================================================================
+// Rails
+//
+// Either side panel can collapse so the conversation gets the whole
+// screen. The choice persists — someone who works focused stays focused.
+// =====================================================================
+
+const RAIL_SELECTOR = { left: ".left-panel", right: ".right-panel" };
+
+function toggleRail(side, force) {
+    const rail = document.querySelector(RAIL_SELECTOR[side]);
+    if (!rail) return;
+
+    const willCollapse = force !== undefined
+        ? force
+        : !rail.classList.contains("collapsed");
+
+    rail.classList.toggle("collapsed", willCollapse);
+
+    const btn = document.getElementById("toggle-" + side);
+    if (btn) {
+        btn.classList.toggle("is-collapsed", willCollapse);
+        btn.textContent = willCollapse ? "⊞" : "⊟";
+        btn.title = (willCollapse ? "Show " : "Hide ")
+            + (side === "left" ? "sidebar (⌘\\)" : "panel (⌘])");
+    }
+    try { localStorage.setItem("pymentor:rail-" + side, willCollapse ? "1" : "0"); } catch (e) {}
+    syncFocusBtn();
+}
+
+/** Both rails at once — one keystroke to a distraction-free screen. */
+function toggleFocus() {
+    const anyOpen = ["left", "right"].some(s => {
+        const el = document.querySelector(RAIL_SELECTOR[s]);
+        return el && !el.classList.contains("collapsed");
+    });
+    toggleRail("left", anyOpen);
+    toggleRail("right", anyOpen);
+}
+
+function syncFocusBtn() {
+    const bothHidden = ["left", "right"].every(s => {
+        const el = document.querySelector(RAIL_SELECTOR[s]);
+        return el && el.classList.contains("collapsed");
+    });
+    const btn = document.getElementById("focus-btn");
+    if (btn) btn.textContent = bothHidden ? "⛶ Exit focus" : "⛶ Focus";
+    document.querySelector(".container").classList.toggle("focused", bothHidden);
+}
+
+function initRails() {
+    ["left", "right"].forEach(side => {
+        let v = null;
+        try { v = localStorage.getItem("pymentor:rail-" + side); } catch (e) {}
+        if (v === "1") toggleRail(side, true);
+    });
+    syncFocusBtn();
+}
+
+// =====================================================================
 // Markdown Renderer (delegates to marked.js loaded in index.html)
 // =====================================================================
 
@@ -44,10 +133,51 @@ async function onEmailChange() {
     const email = getEmail();
     if (!email) {
         document.getElementById("session-section").style.display = "none";
+        updateLearnerChip("");
         return;
     }
     currentEmail = email;
+    // Persist identity: without this every refresh drops it and blanks every
+    // panel, even though the notebook already used localStorage for cells.
+    try { localStorage.setItem("pymentor:email", email); } catch (e) {}
+    updateLearnerChip(email);
+    // Clear out sessions that were created by "+" and never used. Done here
+    // rather than in loadSessions, which also runs after every turn.
+    await pruneEmptySessions(email);
     await loadSessions(email);
+}
+
+/** Reflect the current learner in the top bar. */
+function updateLearnerChip(email) {
+    const avatar = document.getElementById("learner-avatar");
+    const label = document.getElementById("learner-email");
+    if (!avatar || !label) return;
+    avatar.textContent = email ? email[0] : "?";
+    label.textContent = email || "Set your email";
+}
+
+/** Clicking the chip jumps to the email field so it can be changed. */
+function focusEmail() {
+    const el = document.getElementById("email-input");
+    if (!el) return;
+    // Reveal the rail first if the user has it collapsed.
+    const rail = document.querySelector(".left-panel");
+    if (rail && rail.classList.contains("collapsed")) toggleRail("left", false);
+    el.focus();
+    el.select();
+}
+
+/** Send one of the empty-state starter prompts. */
+function useStarter(btn) {
+    const input = document.getElementById("message-input");
+    input.value = btn.textContent.trim();
+    autoResizeInput(input);
+    if (!getEmail()) {
+        // No identity yet — the message would fail, so ask for it first.
+        focusEmail();
+        return;
+    }
+    sendMessage();
 }
 
 async function loadSessions(email) {
@@ -64,9 +194,10 @@ async function loadSessions(email) {
         const activeSession = data.active_session || null;
 
         document.getElementById("session-section").style.display = "block";
-        renderSessionList(sessions, activeSession);
 
-        // Auto-select active session and load its history
+        // Decide which session is current BEFORE rendering: the list marks
+        // the active row and sets the header from it, so rendering first
+        // would highlight one session while the header named another.
         if (activeSession && sessions.some(s => s.session_id === activeSession)) {
             currentSessionId = activeSession;
         } else if (sessions.length > 0) {
@@ -74,6 +205,8 @@ async function loadSessions(email) {
         } else {
             currentSessionId = null;
         }
+
+        renderSessionList(sessions, activeSession);
 
         // Load chat history for the selected session
         if (currentSessionId) {
@@ -104,22 +237,105 @@ function renderSessionList(sessions, activeSession) {
 
     let html = "";
     for (const s of sorted) {
+        // Highlights the session actually loaded in the chat — loadSessions
+        // resolves currentSessionId before calling this, so the lit row and
+        // the header always name the same conversation.
         const isActive = s.session_id === (currentSessionId || activeSession);
         const date = s.last_active
             ? s.last_active.substring(0, 10)
             : s.created_at ? s.created_at.substring(0, 10) : "";
         const name = s.name || "Untitled Session";
+        if (isActive) setChatTitle(name);
+
+        // Branches nest under their parent so a forked conversation reads as
+        // a variant rather than an unrelated sibling.
+        const kind = s.kind || "main";
+        const isBranch = kind === "branch" || kind === "side_chat";
 
         html += `
-            <div class="session-item${isActive ? " active" : ""}"
+            <div class="session-item${isActive ? " active" : ""}${isBranch ? " is-branch" : ""}"
                  onclick="switchSession('${s.session_id}')"
                  data-session-id="${s.session_id}">
-                <div class="session-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
-                <div class="session-date">${date}</div>
+                <div class="session-row">
+                    <div class="session-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+                    <button class="session-delete" title="Delete this session"
+                            onclick="deleteSession('${s.session_id}', this.closest('.session-item').querySelector('.session-name').textContent, event)">×</button>
+                </div>
+                <div class="session-date">${date}${isBranch ? ` · ${kind === "branch" ? "edited" : "side"}` : ""}</div>
             </div>`;
     }
 
     container.innerHTML = html;
+}
+
+/** Name the conversation you're actually in, in the chat header. */
+function setChatTitle(name) {
+    const el = document.getElementById("chat-title");
+    if (!el) return;
+    const label = (name || "").trim() || "New session";
+    el.textContent = label;
+    el.title = label;
+}
+
+// After this many user turns the session gets a title based on what was
+// actually discussed, rather than whatever the opening message happened to be.
+const RETITLE_AFTER_TURNS = 3;
+
+/** Ask the server for a subject-based title. Best-effort. */
+async function retitleSession(email, sessionId) {
+    try {
+        const res = await fetch(
+            `${API_BASE}/api/sessions/${encodeURIComponent(email)}/${sessionId}/retitle`,
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.name) {
+            if (sessionId === currentSessionId) setChatTitle(data.name);
+            loadSessions(email);
+        }
+    } catch (e) {
+        // Non-critical — the existing name stays.
+    }
+}
+
+/** Delete a session and its transcript, after confirming. */
+async function deleteSession(sessionId, name, ev) {
+    if (ev) ev.stopPropagation();   // don't also switch to the row being deleted
+    if (isStreaming) return;
+    const email = getEmail();
+    if (!email) return;
+    if (!confirm(`Delete "${name}"?\n\nThe conversation and its transcript are removed permanently.`)) return;
+
+    try {
+        const res = await fetch(
+            `${API_BASE}/api/sessions/${encodeURIComponent(email)}/${sessionId}`,
+            { method: "DELETE" }
+        );
+        if (!res.ok) return;
+        if (sessionId === currentSessionId) {
+            // We just deleted what was on screen — fall back to whatever the
+            // server promoted to active.
+            currentSessionId = null;
+            clearChat();
+            setChatTitle("New session");
+        }
+        await loadSessions(email);
+    } catch (e) {
+        console.error("Failed to delete session:", e);
+    }
+}
+
+/** Drop sessions that were created but never used. */
+async function pruneEmptySessions(email) {
+    try {
+        const res = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(email)}/prune`,
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (!res.ok) return 0;
+        return (await res.json()).count || 0;
+    } catch (e) {
+        return 0;
+    }
 }
 
 async function switchSession(sessionId) {
@@ -140,13 +356,22 @@ async function switchSession(sessionId) {
         }
     }
 
-    // Update UI
+    // Update UI. The header has to be set here, not just in
+    // renderSessionList: switching only re-flags the rows, and clearChat()
+    // below resets the title to "New session".
+    let switchedName = "New session";
     document.querySelectorAll(".session-item").forEach(el => {
-        el.classList.toggle("active", el.dataset.sessionId === sessionId);
+        const isTarget = el.dataset.sessionId === sessionId;
+        el.classList.toggle("active", isTarget);
+        if (isTarget) {
+            const label = el.querySelector(".session-name");
+            if (label) switchedName = label.textContent;
+        }
     });
 
     // Clear chat and load history
-    clearChat();
+    clearChat(false);
+    setChatTitle(switchedName);
     await loadSessionHistory(email, sessionId);
 
     // Refresh panels
@@ -185,13 +410,22 @@ async function createNewSession() {
     }
 }
 
-function clearChat() {
+/**
+ * Empty the transcript.
+ *
+ * @param {boolean} resetTitle  true when starting a genuinely new session.
+ *   Switching to an existing one passes false and sets the real name itself,
+ *   otherwise the header would flash back to "New session".
+ */
+function clearChat(resetTitle = true) {
     const container = document.getElementById("chat-messages");
     container.innerHTML = `
         <div class="empty-state">
-            <div class="emoji">&#127891;</div>
-            Start asking Python questions!
+            <div class="emoji">&#128218;</div>
+            Ask anything to get started.
         </div>`;
+
+    if (resetTitle) setChatTitle("New session");
 
     // Clear events log
     document.getElementById("events-log").innerHTML = "";
@@ -205,6 +439,11 @@ async function loadSessionHistory(email, sessionId) {
         if (!res.ok) return;
         const data = await res.json();
         const turns = data.turns || [];
+
+        // Remember how far along this conversation is, so the auto-name and
+        // retitle rules key off real history rather than DOM state.
+        loadedUserTurnCount = turns.filter(t => t.type === "user").length;
+        if (mainChat) mainChat.turnCount = loadedUserTurnCount;
 
         if (turns.length === 0) return;
 
@@ -503,6 +742,9 @@ class ChatController {
         this.sessionId = sessionId;
         this.isMain = isMain;
         this.streaming = false;
+        // How many user turns this controller has sent into the current
+        // session. Drives auto-naming (turn 1) and the retitle check (turn 3).
+        this.turnCount = 0;
         // Notified when the SDK reports the real session id (it differs from
         // any placeholder we sent).
         this.onSessionId = onSessionId;
@@ -533,7 +775,14 @@ class ChatController {
             setStatus("Thinking...", false);
         }
 
-        const isFirstMessage = !this.sessionId;
+        // Whether this turn is the one that names the session.
+        //
+        // NOT `!this.sessionId`: the "+" button pre-creates a session with a
+        // placeholder id, so sessionId is already set by the time the first
+        // message is sent — which is why every session created that way
+        // stayed called "New Session". Count turns instead.
+        this.turnCount += 1;
+        const isFirstMessage = this.turnCount === 1;
 
         let assistantDiv = null;
         let assistantText = "";
@@ -602,6 +851,7 @@ class ChatController {
                                 // Auto-name the session with first message
                                 if (isFirstMessage) {
                                     const sessionName = message.substring(0, 40);
+                                    if (this.isMain) setChatTitle(sessionName);
                                     try {
                                         await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(email)}/${event.session_id}`, {
                                             method: "PATCH",
@@ -735,6 +985,14 @@ class ChatController {
                     // message list. Doing that from a side-chat would destroy
                     // the main conversation's DOM mid-stream.
                     if (currentEmail) {
+                        // Once a conversation has a real subject, replace the
+                        // first-message title with one drawn from what was
+                        // actually covered — an opener is often just "hi", and
+                        // topics drift. Fire-and-forget: a failed retitle just
+                        // leaves the original name.
+                        if (this.turnCount === RETITLE_AFTER_TURNS && this.sessionId) {
+                            retitleSession(currentEmail, this.sessionId);
+                        }
                         loadSessions(currentEmail);
                         refreshKnowledge(currentEmail);
                         refreshEpisodes(currentEmail);
@@ -748,6 +1006,8 @@ class ChatController {
 
 // The main chat. Created lazily so the DOM is guaranteed to exist.
 let mainChat = null;
+// User-turn count of the session currently loaded into the main chat.
+let loadedUserTurnCount = 0;
 
 function getMainChat() {
     if (!mainChat) {
@@ -758,8 +1018,15 @@ function getMainChat() {
             isMain: true,
         });
     }
-    // Keep in sync with session switching, which mutates the global.
-    mainChat.sessionId = currentSessionId;
+    // Keep in sync with session switching, which mutates the global. Changing
+    // session resets the turn counter, so an existing conversation is never
+    // re-named by the naming rule meant for a brand-new one.
+    if (mainChat.sessionId !== currentSessionId) {
+        mainChat.sessionId = currentSessionId;
+        // Seeded from the loaded history (see loadSessionHistory) so an
+        // existing conversation is never re-named by the first-turn rule.
+        mainChat.turnCount = currentSessionId ? (loadedUserTurnCount || 99) : 0;
+    }
     return mainChat;
 }
 
@@ -1278,17 +1545,47 @@ function renderQuizzes(data) {
             </div>`;
     }
 
-    // Individual quizzes (most recent first)
+    // Individual quizzes (most recent first). Each is click-to-expand:
+    // the per-question detail (prompt, the learner's own answer, whether it
+    // was right, and the concept tested) has always been stored by
+    // record_quiz_result — it simply had no surface until now. Wrong answers
+    // are the most useful thing here, so they are called out.
     const sorted = [...quizzes].reverse();
     for (const q of sorted.slice(0, 10)) {
         const pct = q.percentage || 0;
         const cls = pct >= 80 ? "good" : pct >= 50 ? "ok" : "poor";
         const date = q.timestamp ? q.timestamp.substring(0, 16).replace("T", " ") : "";
+        const questions = q.questions || [];
+        const missed = questions.filter(x => !x.correct).length;
+
         html += `
-            <div class="quiz-item">
-                <span class="quiz-score ${cls}">${q.score}/${q.total} (${pct}%)</span>
+            <div class="quiz-item${questions.length ? " expandable" : ""}"
+                 ${questions.length ? 'onclick="this.classList.toggle(\'expanded\')"' : ""}>
+                <div class="quiz-item-head">
+                    <span class="quiz-score ${cls}">${q.score}/${q.total} (${pct}%)</span>
+                    ${questions.length
+                        ? `<span class="quiz-expand-hint">${questions.length} question${questions.length === 1 ? "" : "s"}${missed ? ` · ${missed} missed` : ""}</span>`
+                        : ""}
+                </div>
                 <div class="quiz-date">${escapeHtml(date)}</div>
                 <div class="episode-topics" style="margin-top:4px">${(q.topics || []).map(t => `<span class="topic-tag">${escapeHtml(t)}</span>`).join("")}</div>
+                ${questions.length ? `
+                <div class="quiz-questions">
+                    ${questions.map((x, i) => `
+                        <div class="quiz-q ${x.correct ? "right" : "wrong"}">
+                            <div class="quiz-q-head">
+                                <span class="quiz-q-mark">${x.correct ? "✓" : "✗"}</span>
+                                <span class="quiz-q-num">Q${i + 1}</span>
+                                ${x.concept ? `<span class="topic-tag">${escapeHtml(x.concept)}</span>` : ""}
+                            </div>
+                            <div class="quiz-q-text">${escapeHtml(x.question || "")}</div>
+                            ${x.user_answer ? `
+                                <div class="quiz-q-answer">
+                                    <span class="quiz-q-label">Your answer</span>
+                                    ${escapeHtml(x.user_answer)}
+                                </div>` : ""}
+                        </div>`).join("")}
+                </div>` : ""}
             </div>`;
     }
 
@@ -1382,7 +1679,9 @@ async function savePreferences() {
 function setPrefsStatus(text, isError) {
     const el = document.getElementById("prefs-status");
     el.textContent = text;
-    el.style.color = isError ? "#f7768e" : "#9ece6a";
+    // Tokens, not literals — hardcoding here would keep the dark-theme reds
+    // and greens in light mode.
+    el.style.color = isError ? "var(--error)" : "var(--success)";
 }
 
 // =====================================================================
@@ -1594,6 +1893,40 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Auto-resize textarea as user types
     textarea.addEventListener("input", () => autoResizeInput(textarea));
+
+    // Sync the button label only — don't persist what may be an OS default.
+    applyTheme(document.documentElement.getAttribute("data-theme") || "dark", false);
+
+    // Restore collapsed rails from last session.
+    initRails();
+
+    // Restore identity so a refresh doesn't blank every panel. ?email= and
+    // ?session= let the Memory explorer link straight into a conversation.
+    const params = new URLSearchParams(location.search);
+    let savedEmail = params.get("email");
+    if (!savedEmail) {
+        try { savedEmail = localStorage.getItem("pymentor:email"); } catch (e) {}
+    }
+    if (savedEmail) {
+        document.getElementById("email-input").value = savedEmail;
+        const wanted = params.get("session");
+        onEmailChange().then(() => {
+            if (wanted) {
+                switchSession(wanted);
+                // Drop the params so a refresh doesn't keep re-opening it.
+                history.replaceState(null, "", location.pathname);
+            }
+        });
+    } else {
+        updateLearnerChip("");
+    }
+
+    document.addEventListener("keydown", (e) => {
+        if (!(e.metaKey || e.ctrlKey)) return;
+        if (e.key === "\\") { e.preventDefault(); toggleRail("left"); }
+        else if (e.key === "]") { e.preventDefault(); toggleRail("right"); }
+        else if (e.key === ".") { e.preventDefault(); toggleFocus(); }
+    });
 
     // Side-chat window: drag/resize handlers and its own auto-resizing input.
     initSideChatWindow();

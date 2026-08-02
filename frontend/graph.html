@@ -1,703 +1,826 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PyMentor — Knowledge Graph</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #1a1b26;
-            --bg2: #24283b;
-            --bg3: #2f3348;
-            --text: #c0caf5;
-            --text2: #a9b1d6;
-            --muted: #565f89;
-            --border: #3b4261;
-            --accent: #7aa2f7;
-        }
-        body {
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-            background: var(--bg);
-            color: var(--text);
-            height: 100vh;
-            overflow: hidden;
-        }
-        .layout { display: flex; height: 100vh; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PyMentor — Knowledge Graph</title>
 
-        /* Sidebar */
-        .sidebar {
-            width: 260px;
-            min-width: 260px;
-            background: var(--bg2);
-            border-right: 1px solid var(--border);
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 14px;
-            overflow-y: auto;
-        }
-        .sidebar h2 {
-            font-size: 14px;
-            color: var(--accent);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .sidebar label {
-            font-size: 11px;
-            color: var(--muted);
-            display: block;
-            margin-bottom: 4px;
-        }
-        .sidebar input, .sidebar select {
-            width: 100%;
-            background: var(--bg3);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 8px 10px;
-            color: var(--text);
-            font-family: inherit;
-            font-size: 12px;
-        }
-        .sidebar input:focus, .sidebar select:focus {
-            outline: none;
-            border-color: var(--accent);
-        }
+<!-- Shared tokens, then the curriculum palette derived per theme in
+     backend/knowledge.py. This page keeps no colours of its own. -->
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/api/palette.css">
+<script>
+    // Applied before first paint so the page never flashes the wrong theme.
+    (function () {
+        var forced = new URLSearchParams(location.search).get('theme');
+        var saved = null;
+        try { saved = localStorage.getItem('pymentor:theme'); } catch (e) {}
+        var prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
+        var t = (forced === 'light' || forced === 'dark') ? forced
+              : saved || (prefersLight ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', t);
+    })();
+</script>
 
-        /* Legend */
-        .legend { margin-top: 8px; }
-        .legend h3 {
-            font-size: 11px;
-            color: var(--muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
-        }
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 3px 0;
-            font-size: 11px;
-            color: var(--text2);
-        }
-        .legend-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
 
-        /* Mastery legend */
-        .mastery-legend { margin-top: 14px; }
-        .mastery-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 3px 0;
-            font-size: 11px;
-            color: var(--text2);
-        }
-        .mastery-ring {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            flex-shrink: 0;
-            border: 2px solid;
-        }
-        .mastery-ring.not_started { border-color: var(--muted); background: transparent; }
-        .mastery-ring.introduced { border-color: #e0af68; background: rgba(224,175,104,0.2); }
-        .mastery-ring.practiced { border-color: #7aa2f7; background: rgba(122,162,247,0.3); }
-        .mastery-ring.mastered { border-color: #9ece6a; background: rgba(158,206,106,0.5); }
+body {
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    background: var(--bg-primary);
+    color: var(--text-dim);
+    height: 100vh;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+}
 
-        /* Stats */
-        .stats {
-            margin-top: auto;
-            padding-top: 12px;
-            border-top: 1px solid var(--border);
-        }
-        .stat-row {
-            display: flex;
-            justify-content: space-between;
-            font-size: 11px;
-            padding: 3px 0;
-        }
-        .stat-label { color: var(--muted); }
-        .stat-value { color: var(--text); font-weight: 600; }
+.layout { display: flex; height: calc(100vh - var(--header-height)); }
 
-        /* Tooltip */
-        .tooltip {
-            position: absolute;
-            display: none;
-            background: var(--bg2);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 10px 14px;
-            font-size: 11px;
-            max-width: 220px;
-            pointer-events: none;
-            z-index: 100;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-        }
-        .tooltip .tt-name {
-            font-size: 13px;
-            font-weight: 700;
-            margin-bottom: 4px;
-        }
-        .tooltip .tt-cat {
-            color: var(--muted);
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 6px;
-        }
-        .tooltip .tt-mastery {
-            font-weight: 600;
-            margin-bottom: 2px;
-        }
-        .tooltip .tt-prereqs {
-            color: var(--muted);
-            font-size: 10px;
-            margin-top: 4px;
-        }
+.sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-subtle);
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    overflow-y: auto;
+}
 
-        /* Canvas area */
-        .graph-area {
-            flex: 1;
-            position: relative;
-        }
-        canvas {
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
-        .nav-hint {
-            position: absolute;
-            bottom: 12px;
-            right: 16px;
-            font-size: 10px;
-            color: var(--muted);
-        }
-        a.back-link {
-            color: var(--accent);
-            text-decoration: none;
-            font-size: 11px;
-        }
-        a.back-link:hover { text-decoration: underline; }
-    </style>
+.sidebar h2 {
+    font-size: var(--text-sm);
+    font-weight: 650;
+    color: var(--text-bright);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.back-link {
+    font-size: var(--text-sm);
+    color: var(--accent);
+    text-decoration: none;
+    display: inline-block;
+    margin-top: var(--space-1);
+}
+.back-link:hover { text-decoration: underline; }
+
+label {
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    margin-bottom: var(--space-1);
+}
+
+input[type="email"] {
+    width: 100%;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    color: var(--text-bright);
+    font-family: inherit;
+    font-size: var(--text-base);
+}
+input[type="email"]:focus { outline: none; border-color: var(--accent); }
+
+.btn {
+    width: 100%;
+    padding: var(--space-2);
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease);
+}
+.btn:hover { background: var(--accent-hover); }
+
+.btn-ghost {
+    padding: 5px 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--duration-fast) var(--ease);
+}
+.btn-ghost:hover { color: var(--accent); border-color: var(--accent); }
+
+.section-label {
+    font-size: var(--text-2xs);
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: var(--space-2);
+}
+
+.legend-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 4px 0;
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease),
+                opacity var(--duration-fast) var(--ease);
+}
+.legend-row:hover { color: var(--text-bright); }
+.legend-row.dimmed { opacity: 0.3; }
+
+.legend-swatch {
+    width: 10px; height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.legend-count {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ring { width: 14px; height: 14px; flex-shrink: 0; }
+
+.hint {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    line-height: var(--leading-normal);
+}
+.hint b { color: var(--text-dim); font-weight: 600; }
+
+.stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2);
+}
+.stat {
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+}
+.stat-num {
+    font-family: var(--font-mono);
+    font-size: var(--text-lg);
+    color: var(--text-bright);
+    font-variant-numeric: tabular-nums;
+}
+.stat-lbl {
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+/* --- Canvas area --- */
+.graph-area { flex: 1; position: relative; min-width: 0; }
+#canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+
+.toolbar {
+    position: absolute;
+    top: var(--space-4);
+    left: var(--space-4);
+    right: var(--space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    pointer-events: none;
+}
+.toolbar > * { pointer-events: auto; }
+
+.search {
+    width: 280px;
+    padding: var(--space-2) var(--space-3);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    color: var(--text-bright);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+.search:focus { outline: none; border-color: var(--accent); }
+
+.toolbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+
+.zoom-level {
+    min-width: 44px;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.nav-hint {
+    position: absolute;
+    bottom: var(--space-4);
+    right: var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+}
+
+.tooltip {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    box-shadow: var(--shadow-md);
+    max-width: 300px;
+    z-index: 10;
+}
+.tt-name { font-size: var(--text-base); font-weight: 650; color: var(--text-bright); }
+.tt-meta {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+.tt-sec { margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-dim); }
+.tt-sec b {
+    display: block;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+.tt-tracks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tt-chip {
+    font-size: var(--text-2xs);
+    padding: 1px 6px;
+    border-radius: var(--radius-pill);
+    color: var(--bg-primary);
+    font-weight: 600;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-sm); }
+</style>
 </head>
 <body>
-    <div class="layout">
-        <div class="sidebar">
-            <div>
-                <h2>Knowledge Graph</h2>
-                <a href="/" class="back-link">Back to Chat</a>
-            </div>
-            <div>
-                <label>Email</label>
-                <input type="email" id="email" placeholder="learner@example.com">
-            </div>
-            <div>
-                <button onclick="loadGraph()" style="width:100%;padding:8px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;">Load Graph</button>
-            </div>
-
-            <div class="legend">
-                <h3>Tracks</h3>
-                <div class="legend-item"><div class="legend-dot" style="background:#7aa2f7"></div>Python</div>
-                <div class="legend-item"><div class="legend-dot" style="background:#f5a623"></div>ML / Data Science</div>
-                <div class="legend-item"><div class="legend-dot" style="background:#56b6c2"></div>Deep Learning</div>
-                <div class="legend-item"><div class="legend-dot" style="background:#c678dd"></div>LLM / RAG</div>
-                <div class="legend-item"><div class="legend-dot" style="background:#98c379"></div>MLOps</div>
-                <div class="legend-item"><div class="legend-dot" style="background:#ff1f8f"></div>Quantum / Qiskit</div>
-            </div>
-
-            <div class="legend">
-                <h3>Bridge Concepts</h3>
-                <div style="font-size:11px;color:var(--text2);line-height:1.45">
-                    A multi-color ring means this concept is a foundation for <em>several</em> tracks. Hover to see which.
-                </div>
-            </div>
-
-            <div class="legend" id="category-legend">
-                <h3>Categories</h3>
-            </div>
-
-            <div class="mastery-legend">
-                <h3>Mastery Levels</h3>
-                <div class="mastery-item"><div class="mastery-ring not_started"></div> Not Started</div>
-                <div class="mastery-item"><div class="mastery-ring introduced"></div> Introduced</div>
-                <div class="mastery-item"><div class="mastery-ring practiced"></div> Practiced</div>
-                <div class="mastery-item"><div class="mastery-ring mastered"></div> Mastered</div>
-            </div>
-
-            <div class="stats" id="stats"></div>
-        </div>
-
-        <div class="graph-area">
-            <canvas id="canvas"></canvas>
-            <div class="tooltip" id="tooltip"></div>
-            <div class="nav-hint">Drag nodes | Scroll to zoom | Drag canvas to pan</div>
+<!-- Same top bar as the chat page, so navigation never dead-ends. -->
+<div class="topbar">
+    <div class="brand"><span class="brand-mark">P</span> PyMentor</div>
+    <nav class="topnav">
+        <a href="/" class="topnav-link">Chat</a>
+        <a href="/graph" class="topnav-link active">Knowledge Graph</a>
+        <a href="/chroma" class="topnav-link">Memory</a>
+    </nav>
+    <div class="topbar-right">
+        <button class="btn-ghost" id="theme-btn" onclick="toggleTheme()">◐ Light</button>
+        <div class="learner-chip" onclick="document.getElementById('email').select()">
+            <span class="avatar" id="learner-avatar">?</span>
+            <span class="learner-email" id="learner-email">Set your email</span>
         </div>
     </div>
+</div>
+
+<div class="layout">
+    <div class="sidebar">
+        <div>
+            <label for="email">Email</label>
+            <input type="email" id="email" placeholder="learner@example.com"
+                   onkeydown="if(event.key==='Enter') loadGraph()">
+        </div>
+        <button class="btn" onclick="loadGraph()">Load graph</button>
+
+        <div>
+            <div class="section-label">Tracks</div>
+            <div id="track-legend"></div>
+        </div>
+
+        <div>
+            <div class="section-label">Mastery</div>
+            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="var(--border-strong)" stroke-width="2"/></svg>Not started</div>
+            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="var(--border-strong)" stroke-width="2"/><circle cx="10" cy="10" r="7" fill="none" stroke="var(--mastery-introduced)" stroke-width="2" stroke-dasharray="11 44" transform="rotate(-90 10 10)"/></svg>Introduced</div>
+            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="var(--border-strong)" stroke-width="2"/><circle cx="10" cy="10" r="7" fill="none" stroke="var(--mastery-practiced)" stroke-width="2" stroke-dasharray="33 44" transform="rotate(-90 10 10)"/></svg>Practiced</div>
+            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="var(--mastery-mastered)" fill-opacity="0.3" stroke="var(--mastery-mastered)" stroke-width="2"/></svg>Mastered</div>
+        </div>
+
+        <div>
+            <div class="section-label">Reading the map</div>
+            <div class="hint">
+                Prerequisites flow left → right; each lane is one track.
+                Edges appear when you hover a concept.
+                <b>Dashed</b> edges cross tracks — those are the bridges that
+                make one subject unlock another.
+            </div>
+        </div>
+
+        <div class="stats" id="stats"></div>
+    </div>
+
+    <div class="graph-area">
+        <div class="toolbar">
+            <input class="search" id="search" placeholder="Search concepts…"
+                   oninput="onSearch(this.value)">
+            <div class="toolbar-right">
+                <button class="btn-ghost" onclick="zoomBy(1/1.3)" title="Zoom out (−)">−</button>
+                <span class="zoom-level" id="zoom-level">100%</span>
+                <button class="btn-ghost" onclick="zoomBy(1.3)" title="Zoom in (+)">+</button>
+                <button class="btn-ghost" onclick="fitGraph(); drawGraph();" title="Fit everything (0)">Fit</button>
+            </div>
+        </div>
+        <canvas id="canvas"></canvas>
+        <div class="tooltip" id="tooltip"></div>
+        <div class="nav-hint">Hover for edges · scroll or +/− to zoom · 0 to fit · drag to pan</div>
+    </div>
+</div>
 
 <script>
 // =====================================================================
-// Force-Directed Graph Visualization
+// Layered prerequisite map.
+//
+// The previous force-directed layout drew all 271 edges permanently, which
+// buried the labels in the dense clusters. Here prerequisites flow strictly
+// left→right, each track owns a horizontal lane, and edges are drawn only
+// for the concept under the cursor — hovering NumPy Basics shows 8 edges
+// instead of 271.
 // =====================================================================
 
+const TRACK_LABEL = {
+    python: "Python", ml: "ML / Data Science", dl: "Deep Learning",
+    llm: "LLM / RAG", ops: "MLOps", quantum: "Quantum / Qiskit",
+    sysdesign: "System Design",
+};
+const TRACK_ORDER = ["python", "ml", "dl", "llm", "ops", "quantum", "sysdesign"];
+
+// Zoom limits and the point at which node names appear. Below LABEL_ZOOM
+// the whole curriculum is in view and 173 names would be an unreadable mat,
+// so only hovered/searched nodes are named.
+const MIN_ZOOM = 0.3, MAX_ZOOM = 4;
+const LABEL_ZOOM = 1.15;
+
+let G = null;
+let hoverNode = null, searchTerm = "", hiddenTracks = new Set();
+let gx = 0, gy = 0, gz = 1;
+let panning = false, panStart = null, moved = false;
+
 const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
 const tooltip = document.getElementById("tooltip");
 
-let nodes = [];
-let edges = [];
-let categories = [];
-let trackColors = {};
-let dpr = window.devicePixelRatio || 1;
-
-// Physics simulation
-const SIM = {
-    repulsion: 3000,
-    attraction: 0.005,
-    edgeLength: 120,
-    damping: 0.85,
-    centerGravity: 0.001,    // near-zero so tracks don't collapse into the middle
-    clusterGravity: 0.022,   // per-track anchor pull; gentle so bridges don't oscillate
-    crossTrackAttractionMultiplier: 0.3,  // cross-track edges tug bridges only weakly
-    running: true,
-    iterations: 0,
-};
-
-// Track anchor layout — offsets are fractions of the canvas half-dimension,
-// so clusters scale with window size and never clip off-screen.
-// Python sits in the middle; ML/DL/LLM/Ops/Quantum fan out around it.
-const TRACK_LAYOUT = {
-    python:    { fx:  0.00, fy:  0.00 },
-    ml:        { fx: -0.70, fy: -0.45 },
-    dl:        { fx:  0.70, fy: -0.45 },
-    llm:       { fx: -0.65, fy:  0.55 },
-    ops:       { fx:  0.65, fy:  0.55 },
-    quantum:   { fx:  0.00, fy:  0.85 },  // bottom-center, well clear of LLM/Ops
-    sysdesign: { fx:  0.00, fy: -0.85 },  // top-center, opposite Quantum
-};
-
-function trackAnchor(track, cx, cy) {
-    const t = TRACK_LAYOUT[track] || TRACK_LAYOUT.python;
-    return { x: cx + t.fx * cx, y: cy + t.fy * cy };
+function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-// View state
-let viewX = 0, viewY = 0, zoom = 1;
-let dragging = null;    // node being dragged
-let panning = false;
-let panStart = { x: 0, y: 0 };
-let hoveredNode = null;
+// --- Theme -----------------------------------------------------------
+// Canvas does not restyle itself when custom properties change, so every
+// theme switch must trigger an explicit repaint.
+function applyTheme(t, persist = true) {
+    document.documentElement.setAttribute("data-theme", t);
+    const btn = document.getElementById("theme-btn");
+    if (btn) btn.textContent = t === "light" ? "◑ Dark" : "◐ Light";
+    if (persist) {
+        try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
+    }
+    drawGraph();
+}
+function toggleTheme() {
+    const cur = document.documentElement.getAttribute("data-theme") || "dark";
+    applyTheme(cur === "dark" ? "light" : "dark");
+}
 
-// Mastery colors
-const MASTERY_COLORS = {
-    not_started: { fill: "rgba(86,95,137,0.15)", stroke: "#565f89" },
-    introduced:  { fill: "rgba(224,175,104,0.25)", stroke: "#e0af68" },
-    practiced:   { fill: "rgba(122,162,247,0.35)", stroke: "#7aa2f7" },
-    mastered:    { fill: "rgba(158,206,106,0.5)", stroke: "#9ece6a" },
-};
-
-function resize() {
-    const rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    canvas.style.width = rect.width + "px";
-    canvas.style.height = rect.height + "px";
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+/** Keep the top-bar chip in step with whichever learner is loaded. */
+function updateLearnerChip(email) {
+    const a = document.getElementById("learner-avatar");
+    const l = document.getElementById("learner-email");
+    if (!a || !l) return;
+    a.textContent = email ? email[0] : "?";
+    l.textContent = email || "Set your email";
 }
 
 async function loadGraph() {
     const email = document.getElementById("email").value.trim();
     if (!email) return;
+    try { localStorage.setItem("pymentor:email", email); } catch (e) {}
+    updateLearnerChip(email);
 
     try {
         const res = await fetch(`/api/graph/${encodeURIComponent(email)}`);
         if (!res.ok) throw new Error("Failed to load graph");
-        const data = await res.json();
-
-        categories = data.categories;
-        trackColors = data.track_colors || {};
-        buildCategoryLegend(categories);
-
-        // Initialize nodes at their track anchor so clusters form immediately
-        const cx = canvas.width / dpr / 2;
-        const cy = canvas.height / dpr / 2;
-        nodes = data.nodes.map((n) => {
-            const anchor = trackAnchor(n.track || "python", cx, cy);
-            return {
-                ...n,
-                x: anchor.x + (Math.random() - 0.5) * 80,
-                y: anchor.y + (Math.random() - 0.5) * 80,
-                vx: 0, vy: 0,
-                radius: n.mastery === "mastered" ? 20 : n.mastery === "practiced" ? 17 : n.mastery === "introduced" ? 15 : 12,
-            };
-        });
-
-        // Build edge references
-        const nodeMap = {};
-        nodes.forEach(n => nodeMap[n.id] = n);
-        edges = data.edges.map(e => ({
-            source: nodeMap[e.source],
-            target: nodeMap[e.target],
-        })).filter(e => e.source && e.target);
-
-        // Reset view
-        viewX = 0; viewY = 0; zoom = 1;
-        SIM.iterations = 0;
-        SIM.running = true;
-
-        // Show stats
-        updateStats(data);
-
+        layout(await res.json());
+        resizeCanvas();
+        fitGraph();
+        drawGraph();
     } catch (err) {
         console.error(err);
     }
 }
 
-function buildCategoryLegend(cats) {
-    const el = document.getElementById("category-legend");
-    let html = "<h3>Categories</h3>";
-    for (const c of cats) {
-        html += `<div class="legend-item"><div class="legend-dot" style="background:${c.color}"></div>${c.name}</div>`;
+/** Assign every node an (x, y) from prerequisite depth and track lane. */
+function layout(data) {
+    const nodes = data.nodes, edges = data.edges;
+    const byId = {};
+    nodes.forEach(n => byId[n.id] = n);
+
+    const prereqs = {};
+    nodes.forEach(n => prereqs[n.id] = []);
+    edges.forEach(e => { if (prereqs[e.target]) prereqs[e.target].push(e.source); });
+
+    // Longest-path depth, so an edge never points backwards.
+    const depth = {};
+    function d(id, seen) {
+        if (depth[id] != null) return depth[id];
+        if (seen.has(id)) return 0;          // defensive: curriculum is a DAG
+        seen.add(id);
+        const ps = prereqs[id] || [];
+        const v = ps.length ? Math.max(...ps.map(p => d(p, seen))) + 1 : 0;
+        depth[id] = v;
+        return v;
     }
-    el.innerHTML = html;
+    nodes.forEach(n => d(n.id, new Set()));
+
+    const lanes = {};
+    nodes.forEach(n => (lanes[n.track] ||= []).push(n));
+
+    const COL = 74, ROW = 26, LANE_GAP = 34;
+    let y = 30, maxX = 0;
+
+    TRACK_ORDER.forEach(track => {
+        const list = lanes[track];
+        if (!list || !list.length) return;
+
+        const cols = {};
+        list.forEach(n => (cols[depth[n.id]] ||= []).push(n));
+
+        // Re-index depths so a lane's columns are contiguous: a track whose
+        // shallowest concept sits at global depth 6 shouldn't start six
+        // columns right with nothing in between.
+        const used = Object.keys(cols).map(Number).sort((a, b) => a - b);
+        const slot = {};
+        used.forEach((dep, i) => slot[dep] = i);
+
+        const maxRows = Math.max(...Object.values(cols).map(c => c.length));
+        Object.entries(cols).forEach(([dep, cs]) => {
+            cs.forEach((n, i) => {
+                n.x = 40 + slot[+dep] * COL;
+                n.y = y + i * ROW + (maxRows - cs.length) * ROW / 2;
+                maxX = Math.max(maxX, n.x);
+            });
+        });
+
+        lanes[track].laneY = y;
+        lanes[track].laneH = maxRows * ROW;
+        y += maxRows * ROW + LANE_GAP;
+    });
+
+    G = { nodes, edges, byId, prereqs, lanes, height: y, width: maxX + 60 };
+    buildTrackLegend(nodes);
+    updateStats(nodes);
 }
 
-function updateStats(data) {
-    const total = data.nodes.length;
-    const started = data.nodes.filter(n => n.mastery !== "not_started").length;
-    const mastered = data.nodes.filter(n => n.mastery === "mastered").length;
-    const practiced = data.nodes.filter(n => n.mastery === "practiced").length;
-    const introduced = data.nodes.filter(n => n.mastery === "introduced").length;
-
-    const el = document.getElementById("stats");
-    el.innerHTML = `
-        <div class="stat-row"><span class="stat-label">Total Concepts</span><span class="stat-value">${total}</span></div>
-        <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${started}/${total}</span></div>
-        <div class="stat-row"><span class="stat-label">Mastered</span><span class="stat-value" style="color:#9ece6a">${mastered}</span></div>
-        <div class="stat-row"><span class="stat-label">Practiced</span><span class="stat-value" style="color:#7aa2f7">${practiced}</span></div>
-        <div class="stat-row"><span class="stat-label">Introduced</span><span class="stat-value" style="color:#e0af68">${introduced}</span></div>
-    `;
+/** Generated from the data, so a missing track can't silently go unlabelled. */
+function buildTrackLegend(nodes) {
+    const counts = {};
+    nodes.forEach(n => counts[n.track] = (counts[n.track] || 0) + 1);
+    document.getElementById("track-legend").innerHTML =
+        TRACK_ORDER.filter(t => counts[t]).map(t => `
+            <div class="legend-row" data-track="${t}" onclick="toggleTrack('${t}')">
+                <span class="legend-swatch" style="background:var(--track-${t})"></span>
+                ${TRACK_LABEL[t] || t}
+                <span class="legend-count">${counts[t]}</span>
+            </div>`).join("");
 }
 
-// =====================================================================
-// Physics Simulation
-// =====================================================================
-
-function simulate() {
-    if (!SIM.running || nodes.length === 0) return;
-
-    const cx = canvas.width / dpr / 2;
-    const cy = canvas.height / dpr / 2;
-
-    // Repulsion between all node pairs
-    for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-            const a = nodes[i], b = nodes[j];
-            let dx = b.x - a.x;
-            let dy = b.y - a.y;
-            let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            let force = SIM.repulsion / (dist * dist);
-            let fx = (dx / dist) * force;
-            let fy = (dy / dist) * force;
-            a.vx -= fx; a.vy -= fy;
-            b.vx += fx; b.vy += fy;
-        }
-    }
-
-    // Attraction along edges. Cross-track prereq edges are dialed down so
-    // bridge concepts (e.g. numpy_basics, classes_basic) stay anchored to
-    // their own cluster rather than being yanked into the middle.
-    for (const e of edges) {
-        let dx = e.target.x - e.source.x;
-        let dy = e.target.y - e.source.y;
-        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const sameTrack = e.source.track === e.target.track;
-        const mult = sameTrack ? 1 : SIM.crossTrackAttractionMultiplier;
-        let force = (dist - SIM.edgeLength) * SIM.attraction * mult;
-        let fx = (dx / dist) * force;
-        let fy = (dy / dist) * force;
-        e.source.vx += fx; e.source.vy += fy;
-        e.target.vx -= fx; e.target.vy -= fy;
-    }
-
-    // Center gravity (weak — keeps the whole graph from drifting off-screen)
-    for (const n of nodes) {
-        n.vx += (cx - n.x) * SIM.centerGravity;
-        n.vy += (cy - n.y) * SIM.centerGravity;
-    }
-
-    // Cluster gravity — pull each node toward its track's anchor.
-    // This is what creates the visual separation between python/ml/dl/llm/ops.
-    for (const n of nodes) {
-        const anchor = trackAnchor(n.track || "python", cx, cy);
-        n.vx += (anchor.x - n.x) * SIM.clusterGravity;
-        n.vy += (anchor.y - n.y) * SIM.clusterGravity;
-    }
-
-    // Apply velocity
-    for (const n of nodes) {
-        if (n === dragging) continue;
-        n.vx *= SIM.damping;
-        n.vy *= SIM.damping;
-        n.x += n.vx;
-        n.y += n.vy;
-    }
-
-    SIM.iterations++;
-    // Slow down after stabilizing — bumped up for cluster convergence
-    if (SIM.iterations > 500) {
-        SIM.running = false;
-    }
+function toggleTrack(t) {
+    hiddenTracks.has(t) ? hiddenTracks.delete(t) : hiddenTracks.add(t);
+    const row = document.querySelector(`.legend-row[data-track="${t}"]`);
+    if (row) row.classList.toggle("dimmed", hiddenTracks.has(t));
+    drawGraph();
 }
 
-// =====================================================================
-// Rendering
-// =====================================================================
+function updateStats(nodes) {
+    const n = m => nodes.filter(x => x.mastery === m).length;
+    document.getElementById("stats").innerHTML = `
+        <div class="stat"><div class="stat-num">${nodes.length}</div><div class="stat-lbl">Concepts</div></div>
+        <div class="stat"><div class="stat-num">${nodes.filter(x => x.mastery !== "not_started").length}</div><div class="stat-lbl">Started</div></div>
+        <div class="stat"><div class="stat-num">${n("practiced")}</div><div class="stat-lbl">Practiced</div></div>
+        <div class="stat"><div class="stat-num">${n("mastered")}</div><div class="stat-lbl">Mastered</div></div>`;
+}
 
-function draw() {
-    const w = canvas.width / dpr;
-    const h = canvas.height / dpr;
+function resizeCanvas() {
+    const wrap = canvas.parentElement;
+    const dpr = devicePixelRatio || 1;
+    canvas.width = wrap.clientWidth * dpr;
+    canvas.height = wrap.clientHeight * dpr;
+    canvas.style.width = wrap.clientWidth + "px";
+    canvas.style.height = wrap.clientHeight + "px";
+    canvas.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+/** Zoom/pan so the whole curriculum is visible on first paint. */
+function fitGraph() {
+    if (!G) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h) return;
+    const padX = 20, padY = 20, labelRoom = 150;
+    gz = Math.min((w - padX * 2 - labelRoom) / G.width, (h - padY * 2) / G.height, MAX_ZOOM);
+    gx = padX + Math.max(0, (w - labelRoom - G.width * gz) / 2);
+    gy = padY + Math.max(0, (h - G.height * gz) / 2);
+}
+
+function visible(n) { return !hiddenTracks.has(n.track); }
+
+function drawGraph() {
+    if (!G) return;
+    const ctx = canvas.getContext("2d");
+    const w = canvas.clientWidth, h = canvas.clientHeight;
     ctx.clearRect(0, 0, w, h);
-
     ctx.save();
-    ctx.translate(w / 2 + viewX, h / 2 + viewY);
-    ctx.scale(zoom, zoom);
-    ctx.translate(-w / 2, -h / 2);
+    ctx.translate(gx, gy);
+    ctx.scale(gz, gz);
 
-    // Draw edges
-    for (const e of edges) {
-        const srcMastery = e.source.mastery || "not_started";
-        const tgtMastery = e.target.mastery || "not_started";
-        const bothStarted = srcMastery !== "not_started" && tgtMastery !== "not_started";
+    // Lane bands, so tracks read as regions without a label on every node.
+    TRACK_ORDER.forEach(t => {
+        const lane = G.lanes[t];
+        if (!lane || !lane.length || hiddenTracks.has(t)) return;
+        ctx.fillStyle = cssVar("--canvas-lane");
+        ctx.fillRect(0, lane.laneY - 12, G.width, lane.laneH + 10);
+        ctx.fillStyle = cssVar("--track-" + t) || cssVar("--accent");
+        ctx.font = "600 10px " + cssVar("--font-sans");
+        ctx.fillText((TRACK_LABEL[t] || t).toUpperCase(), 4, lane.laneY - 16);
+    });
 
-        ctx.beginPath();
-        ctx.moveTo(e.source.x, e.source.y);
-        ctx.lineTo(e.target.x, e.target.y);
-        ctx.strokeStyle = bothStarted ? "rgba(122,162,247,0.3)" : "rgba(59,66,97,0.5)";
-        ctx.lineWidth = bothStarted ? 1.5 : 0.8;
-        ctx.stroke();
-
-        // Arrow head
-        const dx = e.target.x - e.source.x;
-        const dy = e.target.y - e.source.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const ux = dx / dist, uy = dy / dist;
-        const arrowX = e.target.x - ux * (e.target.radius + 4);
-        const arrowY = e.target.y - uy * (e.target.radius + 4);
-        const arrowSize = 6;
-
-        ctx.beginPath();
-        ctx.moveTo(arrowX, arrowY);
-        ctx.lineTo(arrowX - ux * arrowSize - uy * arrowSize * 0.5, arrowY - uy * arrowSize + ux * arrowSize * 0.5);
-        ctx.lineTo(arrowX - ux * arrowSize + uy * arrowSize * 0.5, arrowY - uy * arrowSize - ux * arrowSize * 0.5);
-        ctx.closePath();
-        ctx.fillStyle = bothStarted ? "rgba(122,162,247,0.4)" : "rgba(59,66,97,0.4)";
-        ctx.fill();
+    // Edges only for the hovered node — at rest the canvas stays legible.
+    if (hoverNode) {
+        G.edges.forEach(e => {
+            if (e.source !== hoverNode.id && e.target !== hoverNode.id) return;
+            const a = G.byId[e.source], b = G.byId[e.target];
+            if (!a || !b || !visible(a) || !visible(b)) return;
+            const cross = a.track !== b.track;
+            ctx.strokeStyle = cross ? cssVar("--warning") : cssVar("--accent");
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash(cross ? [4, 4] : []);
+            const mx = (a.x + b.x) / 2;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.bezierCurveTo(mx, a.y, mx, b.y, b.x, b.y);
+            ctx.stroke();
+        });
+        ctx.setLineDash([]);
     }
 
-    // Draw nodes
-    for (const n of nodes) {
-        const mc = MASTERY_COLORS[n.mastery] || MASTERY_COLORS.not_started;
-        const isHovered = n === hoveredNode;
-        const r = isHovered ? n.radius + 3 : n.radius;
+    const matching = searchTerm
+        ? new Set(G.nodes.filter(n => n.name.toLowerCase().includes(searchTerm)).map(n => n.id))
+        : null;
 
-        // Outer glow for hovered
-        if (isHovered) {
-            ctx.beginPath();
-            ctx.arc(n.x, n.y, r + 4, 0, Math.PI * 2);
-            ctx.fillStyle = `${n.color}22`;
-            ctx.fill();
-        }
+    // Collected during the node pass, drawn afterwards so text sits on top.
+    const labels = [];
 
-        // Node fill (mastery encoding stays unchanged — translucent disc).
+    G.nodes.forEach(n => {
+        if (!visible(n)) return;
+
+        const related = hoverNode && (n.id === hoverNode.id || G.edges.some(e =>
+            (e.source === hoverNode.id && e.target === n.id) ||
+            (e.target === hoverNode.id && e.source === n.id)));
+
+        let alpha = 1;
+        if (hoverNode && !related) alpha = 0.18;
+        if (matching) alpha = matching.has(n.id) ? 1 : 0.12;
+        ctx.globalAlpha = alpha;
+
+        const color = cssVar("--cat-" + n.category.replace(/_/g, "-"))
+                   || cssVar("--track-" + n.track)
+                   || cssVar("--accent");
+        const r = n.is_bridge ? 7 : 5.5;
+
+        // Mastery is fill level; colour already encodes the track.
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = mc.fill;
-        ctx.fill();
-
-        // Outer ring. For "bridge" concepts (used by 2+ tracks) draw a pie
-        // ring with one arc per track; otherwise a solid mastery-colored ring.
-        const ringWidth = isHovered ? 2.5 : 1.8;
-        if (n.is_bridge && Array.isArray(n.feeds_tracks) && n.feeds_tracks.length >= 2) {
-            const slices = n.feeds_tracks;
-            const step = (Math.PI * 2) / slices.length;
-            // Start at -π/2 so the first slice begins at 12 o'clock — gives a
-            // predictable layout regardless of track count.
-            let start = -Math.PI / 2;
-            ctx.lineWidth = ringWidth;
-            for (const t of slices) {
-                ctx.beginPath();
-                ctx.arc(n.x, n.y, r, start, start + step);
-                ctx.strokeStyle = isHovered ? "#ffffff" : (trackColors[t] || mc.stroke);
-                if (!isHovered) ctx.strokeStyle = trackColors[t] || mc.stroke;
-                ctx.stroke();
-                start += step;
-            }
-            // White outline overlay when hovered so the node still pops
-            if (isHovered) {
-                ctx.beginPath();
-                ctx.arc(n.x, n.y, r + 1.5, 0, Math.PI * 2);
-                ctx.strokeStyle = "#ffffff";
-                ctx.lineWidth = 1;
-                ctx.stroke();
-            }
+        if (n.mastery === "mastered") {
+            ctx.fillStyle = color; ctx.fill();
+        } else if (n.mastery === "practiced") {
+            ctx.fillStyle = color; ctx.globalAlpha = alpha * 0.55; ctx.fill(); ctx.globalAlpha = alpha;
+        } else if (n.mastery === "introduced") {
+            ctx.fillStyle = color; ctx.globalAlpha = alpha * 0.25; ctx.fill(); ctx.globalAlpha = alpha;
         } else {
-            ctx.beginPath();
-            ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-            ctx.strokeStyle = isHovered ? "#ffffff" : mc.stroke;
-            ctx.lineWidth = ringWidth;
-            ctx.stroke();
+            ctx.fillStyle = cssVar("--bg-primary"); ctx.fill();
         }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = n.is_bridge ? 2 : 1.5;
+        ctx.stroke();
 
-        // Inner category color dot
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, r * 0.4, 0, Math.PI * 2);
-        ctx.fillStyle = n.color;
-        ctx.fill();
+        // Labels are collected, not drawn here: they must sit on top of every
+        // node, and they need collision checking against each other.
+        const forced = related || (matching && matching.has(n.id));
+        if (forced || gz >= LABEL_ZOOM) {
+            labels.push({ n, r, alpha, forced });
+        }
+    });
 
-        // Label
-        ctx.fillStyle = isHovered ? "#ffffff" : "rgba(192,202,245,0.85)";
-        ctx.font = `${isHovered ? "bold " : ""}${10 / Math.max(zoom, 0.5)}px 'JetBrains Mono', monospace`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.fillText(n.name, n.x, n.y + r + 4);
-    }
+    drawLabels(ctx, labels);
 
+    ctx.globalAlpha = 1;
     ctx.restore();
+
+    const zl = document.getElementById("zoom-level");
+    if (zl) zl.textContent = Math.round(gz * 100) + "%";
 }
 
-function loop() {
-    simulate();
-    draw();
-    requestAnimationFrame(loop);
-}
+/**
+ * Draw node names, skipping any that would overlap one already placed.
+ *
+ * Font size is divided by the zoom so text stays the same physical size on
+ * screen at any zoom — previously labels shrank with the graph and became
+ * unreadable exactly when you had zoomed out to see everything.
+ */
+function drawLabels(ctx, labels) {
+    if (!labels.length) return;
+    const px = 12 / gz;                       // constant on-screen size
+    ctx.font = `${px}px ` + cssVar("--font-sans");
+    ctx.textBaseline = "middle";
 
-// =====================================================================
-// Interaction
-// =====================================================================
+    // Forced labels (hover / search) claim their space first.
+    labels.sort((a, b) => (b.forced ? 1 : 0) - (a.forced ? 1 : 0));
 
-function screenToWorld(sx, sy) {
-    const w = canvas.width / dpr;
-    const h = canvas.height / dpr;
-    return {
-        x: (sx - w / 2 - viewX) / zoom + w / 2,
-        y: (sy - h / 2 - viewY) / zoom + h / 2,
-    };
-}
+    const placed = [];
+    const padY = px * 0.62;
+    for (const { n, r, alpha, forced } of labels) {
+        const x = n.x + r + 5 / gz;
+        const y = n.y;
+        const w = ctx.measureText(n.name).width;
+        const box = { x1: x, y1: y - padY, x2: x + w, y2: y + padY };
 
-function findNodeAt(wx, wy) {
-    for (let i = nodes.length - 1; i >= 0; i--) {
-        const n = nodes[i];
-        const dx = n.x - wx, dy = n.y - wy;
-        if (dx * dx + dy * dy < (n.radius + 5) * (n.radius + 5)) return n;
-    }
-    return null;
-}
-
-canvas.addEventListener("mousedown", (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-    const { x, y } = screenToWorld(sx, sy);
-    const node = findNodeAt(x, y);
-
-    if (node) {
-        dragging = node;
-        SIM.running = true;
-        SIM.iterations = 0;
-    } else {
-        panning = true;
-        panStart = { x: e.clientX - viewX, y: e.clientY - viewY };
-    }
-});
-
-canvas.addEventListener("mousemove", (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-
-    if (dragging) {
-        const { x, y } = screenToWorld(sx, sy);
-        dragging.x = x;
-        dragging.y = y;
-        dragging.vx = 0;
-        dragging.vy = 0;
-    } else if (panning) {
-        viewX = e.clientX - panStart.x;
-        viewY = e.clientY - panStart.y;
-    } else {
-        // Hover detection
-        const { x, y } = screenToWorld(sx, sy);
-        const node = findNodeAt(x, y);
-        hoveredNode = node;
-        canvas.style.cursor = node ? "grab" : "default";
-
-        if (node) {
-            const masteryLabel = node.mastery === "not_started" ? "Not Started" :
-                node.mastery.charAt(0).toUpperCase() + node.mastery.slice(1);
-            const masteryColor = MASTERY_COLORS[node.mastery]?.stroke || "#565f89";
-
-            // Find prerequisites
-            const prereqs = edges.filter(e => e.target === node).map(e => e.source.name);
-            const dependents = edges.filter(e => e.source === node).map(e => e.target.name);
-
-            tooltip.style.display = "block";
-            tooltip.style.left = (e.clientX + 14) + "px";
-            tooltip.style.top = (e.clientY - 10) + "px";
-            // Bridge concepts feed >=2 tracks. Show those tracks in their own
-            // colors so the student can read the pie ring at a glance.
-            let foundationLine = "";
-            if (node.is_bridge && Array.isArray(node.feeds_tracks) && node.feeds_tracks.length >= 2) {
-                const labelMap = { python: "Python", ml: "ML", dl: "Deep Learning", llm: "LLM/RAG", ops: "MLOps", quantum: "Quantum", sysdesign: "System Design" };
-                const chips = node.feeds_tracks.map(t =>
-                    `<span style="color:${trackColors[t] || "#c0caf5"};font-weight:600">${labelMap[t] || t}</span>`
-                ).join(", ");
-                foundationLine = `<div class="tt-prereqs" style="margin-top:6px">Foundation for: ${chips}</div>`;
-            }
-
-            tooltip.innerHTML = `
-                <div class="tt-name" style="color:${node.color}">${node.name}</div>
-                <div class="tt-cat">${node.category.replace("_", " ")}</div>
-                <div class="tt-mastery" style="color:${masteryColor}">${masteryLabel}</div>
-                ${node.review_count ? `<div style="color:var(--muted)">Reviewed ${node.review_count}x</div>` : ""}
-                ${prereqs.length ? `<div class="tt-prereqs">Requires: ${prereqs.join(", ")}</div>` : '<div class="tt-prereqs">No prerequisites</div>'}
-                ${dependents.length ? `<div class="tt-prereqs">Unlocks: ${dependents.join(", ")}</div>` : ""}
-                ${foundationLine}
-            `;
-        } else {
-            tooltip.style.display = "none";
+        if (!forced && placed.some(p =>
+            box.x1 < p.x2 && box.x2 > p.x1 && box.y1 < p.y2 && box.y2 > p.y1)) {
+            continue;                          // would collide — leave it out
         }
+        placed.push(box);
+
+        // A halo keeps text legible where it crosses a node or lane band.
+        ctx.globalAlpha = forced ? 1 : alpha;
+        ctx.lineWidth = 3 / gz;
+        ctx.strokeStyle = cssVar("--bg-primary");
+        ctx.lineJoin = "round";
+        ctx.strokeText(n.name, x, y);
+        ctx.fillStyle = forced ? cssVar("--text-bright") : cssVar("--text-dim");
+        ctx.fillText(n.name, x, y);
     }
+    ctx.textBaseline = "alphabetic";
+}
+
+function hitTest(mx, my) {
+    if (!G) return null;
+    const x = (mx - gx) / gz, y = (my - gy) / gz;
+    let best = null, bd = 14;
+    G.nodes.forEach(n => {
+        if (!visible(n)) return;
+        const dist = Math.hypot(n.x - x, n.y - y);
+        if (dist < bd) { bd = dist; best = n; }
+    });
+    return best;
+}
+
+function showTooltip(n, mx, my) {
+    const pre = (G.prereqs[n.id] || []).map(p => G.byId[p]?.name).filter(Boolean);
+    const unlocks = G.edges.filter(e => e.source === n.id)
+        .map(e => G.byId[e.target]?.name).filter(Boolean);
+
+    let html = `<div class="tt-name">${n.name}</div>
+                <div class="tt-meta">${n.category} · ${n.mastery.replace(/_/g, " ")}</div>`;
+    if (pre.length) {
+        html += `<div class="tt-sec"><b>Requires</b>${pre.slice(0, 5).join(", ")}</div>`;
+    }
+    if (unlocks.length) {
+        html += `<div class="tt-sec"><b>Unlocks</b>${unlocks.slice(0, 5).join(", ")}` +
+                (unlocks.length > 5 ? ` +${unlocks.length - 5} more` : "") + `</div>`;
+    }
+    // Bridge concepts are the interesting part of the curriculum — say so.
+    if (n.is_bridge && n.feeds_tracks?.length) {
+        html += `<div class="tt-sec"><b>Foundation for</b><div class="tt-tracks">` +
+            n.feeds_tracks.map(t =>
+                `<span class="tt-chip" style="background:var(--track-${t})">${TRACK_LABEL[t] || t}</span>`
+            ).join("") + `</div></div>`;
+    }
+
+    tooltip.innerHTML = html;
+    tooltip.style.display = "block";
+    tooltip.style.left = Math.min(mx + 16, canvas.clientWidth - 320) + "px";
+    tooltip.style.top = Math.min(my + 16, canvas.clientHeight - 160) + "px";
+}
+
+canvas.addEventListener("mousemove", e => {
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+
+    if (panning) {
+        gx += mx - panStart.x;
+        gy += my - panStart.y;
+        panStart = { x: mx, y: my };
+        moved = true;
+        drawGraph();
+        return;
+    }
+
+    const n = hitTest(mx, my);
+    if (n !== hoverNode) { hoverNode = n; drawGraph(); }
+    if (n) showTooltip(n, mx, my);
+    else tooltip.style.display = "none";
 });
 
-canvas.addEventListener("mouseup", () => {
-    dragging = null;
-    panning = false;
+canvas.addEventListener("mousedown", e => {
+    const r = canvas.getBoundingClientRect();
+    panning = true;
+    moved = false;
+    panStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+    canvas.style.cursor = "grabbing";
 });
+
+addEventListener("mouseup", () => { panning = false; canvas.style.cursor = "grab"; });
 
 canvas.addEventListener("mouseleave", () => {
-    dragging = null;
-    panning = false;
-    hoveredNode = null;
+    hoverNode = null;
     tooltip.style.display = "none";
+    drawGraph();
 });
 
-canvas.addEventListener("wheel", (e) => {
+canvas.addEventListener("wheel", e => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    zoom = Math.max(0.2, Math.min(3, zoom * delta));
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+
+    // Scale by the actual scroll distance rather than a fixed step per event.
+    // A trackpad fires many small deltas and a mouse wheel a few large ones;
+    // a fixed 10% step made the trackpad feel violent. Clamping the per-event
+    // delta keeps one flick from jumping several zoom levels.
+    let delta = e.deltaY;
+    if (e.deltaMode === 1) delta *= 16;        // lines -> approx. pixels
+    else if (e.deltaMode === 2) delta *= 100;  // pages
+    const step = Math.exp(-Math.max(-60, Math.min(60, delta)) * 0.0022);
+
+    const nz = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, gz * step));
+    // Zoom toward the cursor rather than the origin.
+    gx = mx - (mx - gx) * (nz / gz);
+    gy = my - (my - gy) * (nz / gz);
+    gz = nz;
+    drawGraph();
 }, { passive: false });
 
-// =====================================================================
-// Init
-// =====================================================================
+// Keyboard zoom, for when a trackpad isn't precise enough.
+addEventListener("keydown", e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (document.activeElement && document.activeElement.tagName === "INPUT") return;
+    if (e.key === "+" || e.key === "=") { zoomBy(1.2); }
+    else if (e.key === "-" || e.key === "_") { zoomBy(1 / 1.2); }
+    else if (e.key === "0") { fitGraph(); drawGraph(); }
+});
 
-window.addEventListener("resize", resize);
-resize();
-loop();
+/** Zoom about the canvas centre by a factor. */
+function zoomBy(factor) {
+    const cx = canvas.clientWidth / 2, cy = canvas.clientHeight / 2;
+    const nz = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, gz * factor));
+    gx = cx - (cx - gx) * (nz / gz);
+    gy = cy - (cy - gy) * (nz / gz);
+    gz = nz;
+    drawGraph();
+}
+
+addEventListener("resize", () => {
+    if (!G) return;
+    resizeCanvas();
+    drawGraph();
+});
+
+function onSearch(v) {
+    searchTerm = v.trim().toLowerCase();
+    drawGraph();
+}
+
+// Boot: sync the theme label, restore the last email, and load.
+applyTheme(document.documentElement.getAttribute("data-theme") || "dark", false);
+resizeCanvas();
+(function boot() {
+    // ?email= lets a link (or a test) target a learner directly.
+    let saved = new URLSearchParams(location.search).get("email");
+    if (!saved) {
+        try { saved = localStorage.getItem("pymentor:email"); } catch (e) {}
+    }
+    if (saved) {
+        document.getElementById("email").value = saved;
+        loadGraph();
+    }
+})();
 </script>
 </body>
 </html>

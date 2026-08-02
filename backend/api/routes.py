@@ -1,7 +1,7 @@
 """API endpoints for the Python Learning Agent."""
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 import asyncio
 import json
@@ -304,6 +304,40 @@ class BranchRequest(BaseModel):
     message: str
 
 
+@router.get("/palette.css")
+async def palette_css():
+    """Serve the derived track/category palette as CSS custom properties.
+
+    Curriculum colour is owned by knowledge.py — this endpoint stops the
+    frontend from keeping its own drifting copy. Linked as a stylesheet, so
+    the browser caches it like any other CSS.
+    """
+    from backend.knowledge import build_oklch_palette, CATEGORY_LABELS, TRACK_ORDER
+
+    lines = [
+        "/* Generated from backend/knowledge.py — do not edit by hand.",
+        "   Curriculum colour is derived per theme: a hue that glows on black",
+        "   is thin and washed out on white, so both ramps are emitted and the",
+        "   data-theme attribute selects between them. */",
+    ]
+
+    for theme, selector in (("dark", ":root"), ("light", '[data-theme="light"]')):
+        palette = build_oklch_palette(theme)
+        lines.append(f"{selector} {{")
+        for track in TRACK_ORDER:
+            if track in palette["tracks"]:
+                lines.append(f"  --track-{track}: {palette['tracks'][track]};")
+        lines.append("")
+        for cat, css in sorted(palette["categories"].items()):
+            label = CATEGORY_LABELS.get(cat, cat.replace("_", " ").title())
+            lines.append(f"  --cat-{cat.replace('_', '-')}: {css};  /* {label} */")
+        lines.append("}")
+        lines.append("")
+    # Must be served as text/css — browsers refuse to apply a stylesheet with
+    # any other MIME type, and the custom properties silently resolve to "".
+    return Response(content="\n".join(lines), media_type="text/css")
+
+
 @router.get("/sessions/{email}")
 async def list_sessions(email: str):
     """List all sessions for a user."""
@@ -354,6 +388,132 @@ async def get_session_history(email: str, session_id: str):
     # read_turns is the single source of truth: it migrates legacy sessions and
     # strips superseded turns, so edited-away content never reaches the client.
     return {"turns": read_turns(email, session_id), "session_id": session_id}
+
+
+@router.delete("/sessions/{email}/{session_id}")
+async def remove_session(email: str, session_id: str):
+    """Delete a session and its transcript."""
+    from backend.memory import delete_session
+
+    if not delete_session(email, session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted", "session_id": session_id}
+
+
+@router.post("/sessions/{email}/prune")
+async def prune_sessions(email: str):
+    """Drop sessions that were created but never used."""
+    from backend.memory import prune_empty_sessions
+
+    removed = prune_empty_sessions(email)
+    return {"status": "ok", "removed": removed, "count": len(removed)}
+
+
+def _clean_title(raw: str) -> str:
+    """Reduce a model reply to a bare title.
+
+    Small models sometimes ignore "reply with the title only" and prefix
+    something like "Based on the transcript, the subject covered is: X".
+    Strip that lead-in rather than storing it, and drop a trailing clause so
+    a truncated sentence never becomes the name.
+    """
+    import re as _re
+
+    # Take the first non-empty line: a model that ignores the instruction
+    # tends to answer with a list or a paragraph, and the rest is noise.
+    first = next((ln for ln in raw.strip().splitlines() if ln.strip()), "")
+    text = " ".join(first.split())
+    # Drop list markers ("1.", "-", "*") and markdown emphasis.
+    text = _re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", text)
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    # A dash-separated gloss ("Dictionary creation - Creating a dict") keeps
+    # only the head.
+    text = _re.split(r"\s+[-–—]\s+", text)[0]
+    # Prefer the part after a lead-in colon ("… the subject covered is: X").
+    if ":" in text:
+        head, _, tail = text.partition(":")
+        if len(head.split()) > 3 and tail.strip():
+            text = tail.strip()
+    text = _re.sub(
+        r"^(?:the\s+)?(?:title|subject|topic)(?:\s+\w+){0,3}\s+(?:is|would be)\s+",
+        "", text, flags=_re.I,
+    )
+    text = text.strip().strip('"').strip("'").rstrip(".")
+
+    # If it still opens like a sentence about the task, the model ignored the
+    # instruction and no amount of trimming yields a real title — reject it
+    # so the caller can keep the existing name rather than store prose.
+    if _re.match(r"^(looking at|based on|here|this (?:conversation|session)|"
+                 r"the (?:conversation|session|learner|student))\b", text, _re.I):
+        return ""
+
+    words = text.split()
+    if len(words) > 7:
+        text = " ".join(words[:7])
+    return text[:48].strip()
+
+
+@router.post("/sessions/{email}/{session_id}/retitle")
+async def retitle_session(email: str, session_id: str):
+    """Give a session a short title based on what it actually covered.
+
+    Called once a conversation has enough turns to have a real subject —
+    the first message alone is often a greeting, or the topic drifts. Reuses
+    the same one-shot summarizer pattern as the side-chat fold: no memory
+    tools, so it cannot write anything on its own.
+    """
+    from backend.agent import run_agent_internal
+    from backend.memory import read_turns, rename_session
+
+    turns = read_turns(email, session_id)
+    exchanges = [
+        t for t in turns
+        if t.get("type") in ("user", "assistant_message") and t.get("content")
+    ]
+    if not exchanges:
+        raise HTTPException(status_code=404, detail="Session has no conversation")
+
+    transcript = "\n\n".join(
+        f"{'User' if t['type'] == 'user' else 'Tutor'}: {str(t['content'])[:600]}"
+        for t in exchanges[:12]
+    )
+
+    async def ask(prompt: str) -> str:
+        chunks: list[str] = []
+
+        async def collect(event: dict):
+            if event.get("type") == "assistant_message" and event.get("content"):
+                chunks.append(event["content"])
+
+        await run_agent_internal(
+            prompt=prompt,
+            system_prompt="You reply with a short title and nothing else.",
+            on_event=collect,
+        )
+        return _clean_title("".join(chunks))
+
+    title = await ask(
+        "Give this tutoring conversation a title of at most 5 words naming "
+        "the specific subject covered. No quotes, no punctuation at the end, "
+        "no preamble — reply with the title only.\n\n"
+        f"--- transcript ---\n{transcript}"
+    )
+
+    # A long or rambling transcript sometimes draws an explanation instead of
+    # a title. One firmer retry on a shorter excerpt is usually enough.
+    if not title:
+        title = await ask(
+            "TITLE ONLY. Three to five words. No sentence, no explanation, "
+            "no list, no colon.\n\nExample good replies:\n"
+            "Python Dictionary Basics\nCAP Theorem And Tradeoffs\n\n"
+            f"--- transcript ---\n{transcript[:1500]}"
+        )
+
+    if not title:
+        raise HTTPException(status_code=502, detail="Could not generate a title")
+
+    rename_session(email, session_id, title)
+    return {"session_id": session_id, "name": title}
 
 
 @router.post("/sessions/{email}/{session_id}/branch")

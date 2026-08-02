@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dropzone</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:,">
+<meta name="apple-mobile-web-app-capable" content="yes">
+</head>
+<body data-role="tablet" class="tablet">
+<div class="wrap">
+
+  <header>
+    <span class="dot" id="dot"></span>
+    <h1>Dropzone</h1>
+    <span class="status" id="status">connecting…</span>
+    <button class="ghost danger" id="clear">Clear</button>
+  </header>
+
+  <div class="banner warn" id="insecure" hidden>
+    <strong>Not a secure connection.</strong>
+    This page was opened over plain <code>http://</code>, so the browser blocks
+    clipboard access. Sending to the laptop still works, and you can save
+    images with the Save button — but for one-tap copying, open the
+    <code>https://</code> tunnel address instead.
+  </div>
+
+  <!-- Send to the laptop. The file input covers photos, files and the camera;
+       the paste button only appears where clipboard reading is available. -->
+  <div class="sendbox">
+    <div class="sendrow">
+      <button class="primary" id="pickfile">Photo or file</button>
+      <button class="ghost" id="pasteclip" hidden>Paste</button>
+    </div>
+    <textarea id="sendtext" rows="2" placeholder="…or type/paste text to send"></textarea>
+    <button class="ghost" id="sendtextbtn" hidden>Send text</button>
+    <input type="file" id="fileinput" accept="image/*,*/*" multiple hidden>
+  </div>
+
+  <div class="items" id="items"></div>
+
+</div>
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

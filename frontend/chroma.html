@@ -3,57 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChromaDB Viewer - PyMentor</title>
+    <title>PyMentor — Memory Explorer</title>
+    <link rel="stylesheet" href="/static/tokens.css">
+    <link rel="stylesheet" href="/api/palette.css">
+    <script>
+        // Applied before first paint so the page never flashes the wrong theme.
+        (function () {
+            var forced = new URLSearchParams(location.search).get('theme');
+            var saved = null;
+            try { saved = localStorage.getItem('pymentor:theme'); } catch (e) {}
+            var prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
+            var t = (forced === 'light' || forced === 'dark') ? forced
+                  : saved || (prefersLight ? 'light' : 'dark');
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        :root {
-            --bg-primary: #1a1b26;
-            --bg-secondary: #24283b;
-            --bg-tertiary: #2f3348;
-            --text-primary: #c0caf5;
-            --text-secondary: #a9b1d6;
-            --text-muted: #565f89;
-            --accent: #7aa2f7;
-            --accent-hover: #89b4fa;
-            --success: #9ece6a;
-            --warning: #e0af68;
-            --error: #f7768e;
-            --border: #3b4261;
-            --cyan: #7dcfff;
-            --magenta: #bb9af7;
-        }
 
         body {
-            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+            font-family: var(--font-sans);
+            -webkit-font-smoothing: antialiased;
             background: var(--bg-primary);
-            color: var(--text-primary);
+            color: var(--text-bright);
             min-height: 100vh;
         }
 
         /* Top Bar */
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 24px;
-            background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border);
+        /* .topbar / .topnav / .brand come from tokens.css so all three
+           pages share one header. Only the local button style lives here. */
+        .btn-ghost {
+            padding: 5px 10px;
+            font-family: inherit;
+            font-size: var(--text-xs);
+            font-weight: 600;
+            color: var(--text-dim);
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: color var(--duration-fast) var(--ease),
+                        border-color var(--duration-fast) var(--ease);
         }
-
-        .topbar h1 {
-            font-size: 15px;
-            color: var(--accent);
-            letter-spacing: 1px;
-        }
-
-        .topbar a {
-            color: var(--text-muted);
-            text-decoration: none;
-            font-size: 12px;
-        }
-
-        .topbar a:hover { color: var(--accent); }
+        .btn-ghost:hover { color: var(--accent); border-color: var(--accent); }
 
         /* Stats Bar */
         .stats-bar {
@@ -61,7 +54,7 @@
             gap: 24px;
             padding: 14px 24px;
             background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--border-strong);
         }
 
         .stat-chip {
@@ -72,7 +65,7 @@
         }
 
         .stat-chip .label { color: var(--text-muted); }
-        .stat-chip .value { color: var(--text-primary); font-weight: 700; }
+        .stat-chip .value { color: var(--text-bright); font-weight: 700; }
         .stat-chip .value.accent { color: var(--accent); }
 
         /* Main Layout */
@@ -81,7 +74,7 @@
             grid-template-columns: 1fr 1fr;
             grid-template-rows: auto 1fr;
             gap: 0;
-            height: calc(100vh - 90px);
+            height: calc(100vh - var(--header-height) - 52px);
         }
 
         /* Search Panel (spans full width) */
@@ -89,7 +82,7 @@
             grid-column: 1 / -1;
             padding: 14px 24px;
             background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--border-strong);
             display: flex;
             gap: 10px;
             align-items: center;
@@ -98,10 +91,10 @@
         .search-panel input {
             flex: 1;
             background: var(--bg-tertiary);
-            border: 1px solid var(--border);
+            border: 1px solid var(--border-strong);
             border-radius: 6px;
             padding: 8px 12px;
-            color: var(--text-primary);
+            color: var(--text-bright);
             font-family: inherit;
             font-size: 13px;
         }
@@ -127,17 +120,17 @@
 
         .search-panel select {
             background: var(--bg-tertiary);
-            border: 1px solid var(--border);
+            border: 1px solid var(--border-strong);
             border-radius: 6px;
             padding: 8px 10px;
-            color: var(--text-primary);
+            color: var(--text-bright);
             font-family: inherit;
             font-size: 12px;
         }
 
         /* Left: Scatter Plot */
         .scatter-panel {
-            border-right: 1px solid var(--border);
+            border-right: 1px solid var(--border-strong);
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -150,7 +143,7 @@
             color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--border-strong);
             background: var(--bg-secondary);
         }
 
@@ -180,7 +173,7 @@
         .tooltip {
             position: absolute;
             background: var(--bg-secondary);
-            border: 1px solid var(--border);
+            border: 1px solid var(--border-strong);
             border-radius: 6px;
             padding: 8px 12px;
             font-size: 11px;
@@ -188,11 +181,11 @@
             pointer-events: none;
             z-index: 100;
             display: none;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            box-shadow: var(--shadow-md);
         }
 
         .tooltip .tt-doc {
-            color: var(--text-secondary);
+            color: var(--text-dim);
             line-height: 1.4;
             margin-bottom: 4px;
         }
@@ -211,7 +204,7 @@
 
         .tooltip .tt-tag {
             font-size: 9px;
-            background: rgba(122, 162, 247, 0.15);
+            background: var(--accent-soft);
             color: var(--accent);
             padding: 1px 5px;
             border-radius: 2px;
@@ -246,7 +239,7 @@
 
         .doc-card.active {
             border-color: var(--accent);
-            background: rgba(122, 162, 247, 0.08);
+            background: var(--accent-soft);
         }
 
         .doc-card.search-result {
@@ -254,6 +247,8 @@
         }
 
         .doc-id {
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
             font-size: 10px;
             color: var(--text-muted);
             margin-bottom: 4px;
@@ -264,10 +259,22 @@
 
         .doc-text {
             font-size: 12px;
-            color: var(--text-secondary);
+            color: var(--text-dim);
             line-height: 1.5;
             margin-bottom: 6px;
         }
+
+        /* Retrieval -> resumption: find an exchange in memory, then land in
+           that conversation and continue it. */
+        .doc-open {
+            margin-left: auto;
+            font-size: var(--text-2xs);
+            font-weight: 600;
+            color: var(--accent);
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .doc-open:hover { text-decoration: underline; }
 
         .doc-meta {
             display: flex;
@@ -278,10 +285,11 @@
 
         .doc-email {
             font-size: 10px;
-            color: var(--cyan);
+            color: var(--accent-hover);
         }
 
         .doc-time {
+            font-family: var(--font-mono);
             font-size: 10px;
             color: var(--text-muted);
         }
@@ -302,7 +310,7 @@
 
         .doc-tag {
             font-size: 10px;
-            background: rgba(122, 162, 247, 0.15);
+            background: var(--accent-soft);
             color: var(--accent);
             padding: 2px 6px;
             border-radius: 3px;
@@ -319,7 +327,7 @@
         .collection-toggle {
             display: flex;
             gap: 0;
-            border: 1px solid var(--border);
+            border: 1px solid var(--border-strong);
             border-radius: 6px;
             overflow: hidden;
         }
@@ -337,7 +345,7 @@
         }
 
         .collection-toggle button:not(:last-child) {
-            border-right: 1px solid var(--border);
+            border-right: 1px solid var(--border-strong);
         }
 
         .collection-toggle button.active {
@@ -346,17 +354,17 @@
         }
 
         .collection-toggle button:hover:not(.active) {
-            color: var(--text-primary);
+            color: var(--text-bright);
         }
 
         /* Exchange card styles */
         .doc-card.exchange-card {
-            border-left: 2px solid var(--magenta);
+            border-left: 2px solid var(--accent);
         }
 
         .doc-user-msg {
             font-size: 11px;
-            color: var(--cyan);
+            color: var(--accent-hover);
             margin-bottom: 4px;
             font-style: italic;
         }
@@ -373,7 +381,7 @@
 
         .doc-raw-exchange {
             font-size: 11px;
-            color: var(--text-secondary);
+            color: var(--text-dim);
             line-height: 1.5;
             margin-top: 6px;
             padding: 8px;
@@ -391,7 +399,7 @@
         /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
         /* Loading */
@@ -415,9 +423,17 @@
     </style>
 </head>
 <body>
+    <!-- Same top bar as the chat and graph pages. -->
     <div class="topbar">
-        <h1>CHROMADB VIEWER</h1>
-        <a href="/">Back to PyMentor</a>
+        <div class="brand"><span class="brand-mark">P</span> PyMentor</div>
+        <nav class="topnav">
+            <a href="/" class="topnav-link">Chat</a>
+            <a href="/graph" class="topnav-link">Knowledge Graph</a>
+            <a href="/chroma" class="topnav-link active">Memory</a>
+        </nav>
+        <div class="topbar-right">
+            <button class="btn-ghost" id="theme-btn" onclick="toggleTheme()">◐ Light</button>
+        </div>
     </div>
 
     <div class="stats-bar" id="stats-bar">
@@ -438,7 +454,7 @@
                 <option value="">All users</option>
             </select>
             <button onclick="doSearch()">Search</button>
-            <button onclick="clearSearch()" style="background: var(--bg-tertiary); color: var(--text-secondary);">Clear</button>
+            <button onclick="clearSearch()" style="background: var(--bg-tertiary); color: var(--text-dim);">Clear</button>
         </div>
 
         <div class="scatter-panel">
@@ -575,6 +591,26 @@
 
         // ===== Document List Rendering =====
 
+        function cssVar(name) {
+            return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+
+        // Canvas does not restyle when custom properties change, so a theme
+        // switch has to repaint the scatter explicitly.
+        function applyTheme(t, persist = true) {
+            document.documentElement.setAttribute("data-theme", t);
+            const btn = document.getElementById("theme-btn");
+            if (btn) btn.textContent = t === "light" ? "\u25d1 Dark" : "\u25d0 Light";
+            if (persist) {
+                try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
+            }
+            if (typeof renderScatter === "function") renderScatter();
+        }
+        function toggleTheme() {
+            const cur = document.documentElement.getAttribute("data-theme") || "dark";
+            applyTheme(cur === "dark" ? "light" : "dark");
+        }
+
         function escapeHtml(text) {
             const div = document.createElement("div");
             div.textContent = text;
@@ -612,6 +648,10 @@
                             <span class="doc-time">${escapeHtml(ts)}</span>
                             ${isExchange ? `<span class="doc-time">#${d.exchange_index || 0}</span>` : ""}
                             ${isSearch ? `<span class="doc-similarity">${(d._similarity * 100).toFixed(1)}% match</span>` : ""}
+                            ${d.session_id ? `
+                                <a class="doc-open" title="Open this conversation and keep going"
+                                   href="/?session=${encodeURIComponent(d.session_id)}&email=${encodeURIComponent(d.email || "")}"
+                                   onclick="event.stopPropagation()">open session →</a>` : ""}
                         </div>`;
 
                 if (d.topics && d.topics.length) {
@@ -673,7 +713,7 @@
             ctx.fillRect(0, 0, W, H);
 
             // Grid
-            ctx.strokeStyle = "rgba(59, 66, 97, 0.5)";
+            ctx.strokeStyle = cssVar("--canvas-grid");
             ctx.lineWidth = 0.5;
             for (let i = 0; i <= 4; i++) {
                 const x = pad + (W - 2 * pad) * i / 4;
@@ -683,7 +723,7 @@
             }
 
             // Axes labels
-            ctx.fillStyle = "#565f89";
+            ctx.fillStyle = cssVar("--text-muted");
             ctx.font = "10px monospace";
             ctx.textAlign = "center";
             ctx.fillText("PC1", W / 2, H - 8);
@@ -703,7 +743,8 @@
 
             // Assign colors by email
             const emails = [...new Set(allDocs.map(d => d.email))];
-            const palette = ["#7aa2f7", "#9ece6a", "#e0af68", "#f7768e", "#bb9af7", "#7dcfff", "#ff9e64"];
+            const palette = ["python", "ops", "ml", "sysdesign", "llm", "dl", "quantum"]
+                    .map(t => cssVar("--track-" + t));
 
             // Draw points
             for (let i = 0; i < allPoints.length; i++) {
@@ -726,7 +767,7 @@
                 ctx.fill();
 
                 if (isHighlighted) {
-                    ctx.strokeStyle = "#ffffff";
+                    ctx.strokeStyle = cssVar("--text-bright");
                     ctx.lineWidth = 2;
                     ctx.stroke();
                     ctx.shadowBlur = 0;
@@ -745,7 +786,7 @@
                     ctx.beginPath();
                     ctx.arc(legendX - 4, legendY - 3, 4, 0, Math.PI * 2);
                     ctx.fill();
-                    ctx.fillStyle = "#a9b1d6";
+                    ctx.fillStyle = cssVar("--text-dim");
                     ctx.fillText(emails[i], legendX - 14, legendY);
                     legendY += 16;
                 }
@@ -854,6 +895,9 @@
         window.addEventListener("resize", () => renderScatter());
 
         // ===== Init =====
+        // Sync the button label only — persisting here would harden an OS
+        // preference into an explicit saved choice.
+        applyTheme(document.documentElement.getAttribute("data-theme") || "dark", false);
         loadStats();
         loadDocuments();
     </script>

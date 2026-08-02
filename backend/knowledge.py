@@ -358,6 +358,92 @@ TRACK_COLORS = {
 # tuple so adding a track only means editing this list (and TRACK_COLORS).
 TRACK_ORDER = ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign")
 
+# --- Derived palette (OKLCH) ------------------------------------------------
+# 31 independently-chosen category hues are indistinguishable on screen. Since
+# every category belongs to exactly one track, colour is *derived* instead:
+# one hue per track, and each category is a lightness/chroma step within that
+# hue. The System Design cluster then reads as one family of red rather than
+# six unrelated colours, and adding a category can never invent a new hue.
+#
+# OKLCH is used because its lightness is perceptually uniform — equal steps
+# look equally different, which plain HSL does not give you.
+
+# Hue angle per track, spaced around the wheel so all seven stay mutually
+# distinguishable. Chroma and lightness are set per theme below, not here —
+# a hue that glows on black is thin and washed out on white.
+TRACK_HUE = {
+    "python":    264,
+    "ml":        75,
+    "dl":        205,
+    "llm":       295,
+    "ops":       145,
+    "quantum":   330,
+    "sysdesign": 25,
+}
+
+# Per-theme rendering targets.
+#
+# Dark: high lightness, high chroma — nodes read as light on a near-black
+# canvas. Light: lower lightness so the same nodes read as ink on paper.
+#
+# The category ramp runs in OPPOSITE directions per theme. Foundational
+# categories are the lighter end in dark mode; inverting the whole scheme
+# would make them white-on-white in light mode, so light mode ramps the
+# other way (foundational = lighter but still ink-dark enough to see).
+THEME_RAMP = {
+    "dark":  {"l_start": 80.0, "l_end": 58.0, "chroma": 0.155},
+    "light": {"l_start": 62.0, "l_end": 42.0, "chroma": 0.145},
+}
+
+
+def _category_track_map() -> dict[str, str]:
+    """Map each category id to its (single) owning track."""
+    mapping: dict[str, str] = {}
+    for info in CURRICULUM_GRAPH.values():
+        mapping.setdefault(info["category"], info.get("track", "python"))
+    return mapping
+
+
+def build_oklch_palette(theme: str = "dark") -> dict:
+    """Derive per-track and per-category OKLCH colours for one theme.
+
+    Categories are ordered by CATEGORY_PRIORITY within their track, so the
+    lightness ramp follows the actual learning progression rather than
+    alphabetical accident.
+
+    Returns {"tracks": {track: css}, "categories": {category: css}}.
+    """
+    ramp = THEME_RAMP.get(theme, THEME_RAMP["dark"])
+    l_start, l_end, chroma = ramp["l_start"], ramp["l_end"], ramp["chroma"]
+
+    cat_track = _category_track_map()
+    by_track: dict[str, list[str]] = {}
+    for cat, track in cat_track.items():
+        by_track.setdefault(track, []).append(cat)
+
+    # Track swatches sit mid-ramp so they represent the family as a whole.
+    mid = (l_start + l_end) / 2
+    tracks_css = {
+        track: f"oklch({mid:.1f}% {chroma:.3f} {hue})"
+        for track, hue in TRACK_HUE.items()
+    }
+
+    categories_css = {}
+    for track, cats in by_track.items():
+        hue = TRACK_HUE.get(track, TRACK_HUE["python"])
+        cats.sort(key=lambda c: (CATEGORY_PRIORITY.get(c, 99), c))
+        n = len(cats)
+        for i, cat in enumerate(cats):
+            # Single-category tracks sit mid-ramp rather than at an extreme.
+            t = 0.5 if n == 1 else i / (n - 1)
+            lightness = l_start + (l_end - l_start) * t
+            # Deeper shades carry slightly more chroma so they don't read as
+            # muddy versions of the light end.
+            c = chroma * (0.85 + 0.3 * t)
+            categories_css[cat] = f"oklch({lightness:.1f}% {c:.3f} {hue})"
+
+    return {"tracks": tracks_css, "categories": categories_css}
+
 # Human-readable legend labels. Naive `cat.replace("_", " ").title()` mangles
 # the abbreviated prefixes ("Ml Core", "Qc Qiskit", "Sd Data"), so spell out
 # the ones that don't survive title-casing. Anything absent falls back to the
