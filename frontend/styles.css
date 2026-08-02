@@ -762,8 +762,11 @@ code, pre, kbd, samp,
     padding: 12px 20px;
     border-top: 1px solid var(--border-strong);
     background: var(--bg-secondary);
+    /* Column so the attachment strip can stack above the input row. The
+       horizontal layout now lives on .chat-input-row. */
     display: flex;
-    gap: 10px;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .chat-input-area textarea {
@@ -806,6 +809,111 @@ code, pre, kbd, samp,
 .chat-input-area button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* =====================================================================
+   Image attachments — shared by the main composer and the side chat.
+   Both surfaces use the same markup, so these rules are written once.
+   ===================================================================== */
+
+/* The horizontal row the textarea and buttons used to form directly. */
+.chat-input-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+}
+
+/* Staged thumbnails. Empty means no attachments, so collapse entirely
+   rather than leaving a gap above the composer. */
+.attach-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.attach-strip:empty {
+    display: none;
+}
+
+.attach-thumb {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-tertiary);
+    flex-shrink: 0;
+}
+
+.attach-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.attach-thumb-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    line-height: 14px;
+    text-align: center;
+    font-size: 12px;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    color: #fff;
+    /* Fixed dark scrim, not a theme token: it sits on top of an arbitrary
+       image, so it needs contrast in both themes. */
+    background: rgba(0, 0, 0, 0.65);
+}
+
+.attach-thumb-remove:hover {
+    background: rgba(0, 0, 0, 0.85);
+}
+
+/* Paperclip. Deliberately quieter than Send — Send is the primary action. */
+.chat-input-area .attach-btn,
+.side-chat-input-area .attach-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
+    padding: 9px 12px;
+    font-size: 14px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.chat-input-area .attach-btn:hover,
+.side-chat-input-area .attach-btn:hover {
+    background: var(--bg-secondary);
+    border-color: var(--accent);
+}
+
+/* Drop target feedback while a file is dragged over a chat surface. */
+.drop-active {
+    outline: 2px dashed var(--accent);
+    outline-offset: -6px;
+}
+
+/* Attachments echoed back on the user's own message bubble. */
+.message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.message-attachments img {
+    max-width: 220px;
+    max-height: 220px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    display: block;
 }
 
 /* Right Panel (Knowledge Dashboard) */
@@ -1244,14 +1352,34 @@ code, pre, kbd, samp,
 
 .side-chat {
     position: fixed;
+
+    /* Size bounds live here and ONLY here. The resize JS reads these back
+       via getComputedStyle, so there is one source of truth rather than the
+       same numbers written twice. Everything is viewport-relative: a fixed
+       pixel size is either cramped on a large screen or overflowing on a
+       small one. */
+    --sc-min-w: 300px;
+    --sc-min-h: 240px;
+    /* Never more than half the viewport wide — the main lesson has to stay
+       readable alongside it. Height may run the full viewport, less a margin
+       so the window never sits flush against the edges. */
+    --sc-max-w: 50vw;
+    --sc-max-h: calc(100vh - 32px);
+
     /* Default berth: bottom-right, clear of the composer. JS overrides
        left/top once the window is dragged. */
     right: 24px;
     bottom: 24px;
-    width: 420px;
-    height: 520px;
-    min-width: 300px;
-    min-height: 240px;
+    width: clamp(300px, 32vw, 50vw);
+    height: clamp(240px, 60vh, calc(100vh - 32px));
+    min-width: var(--sc-min-w);
+    min-height: var(--sc-min-h);
+    /* Belt and braces: CSS enforces the ceiling itself, so shrinking the
+       browser after a manual resize can't leave an oversized window behind.
+       On a very narrow viewport min-width wins over max-width — correct, a
+       readability floor beats the cap. */
+    max-width: var(--sc-max-w);
+    max-height: var(--sc-max-h);
     display: none;
     flex-direction: column;
     background: var(--bg-secondary);
@@ -1314,10 +1442,17 @@ code, pre, kbd, samp,
 
 .side-chat-input-area {
     display: flex;
+    flex-direction: column;
     gap: 8px;
     padding: 10px;
     border-top: 1px solid var(--border-strong);
     background: var(--bg-primary);
+}
+
+/* The side chat is narrow — keep its thumbnails smaller than the main one's. */
+.side-chat-input-area .attach-thumb {
+    width: 44px;
+    height: 44px;
 }
 
 .side-chat-input-area textarea {
@@ -1355,22 +1490,66 @@ code, pre, kbd, samp,
     cursor: not-allowed;
 }
 
-/* Resize grip, bottom-right. */
+/* Resize handles: four edges and four corners, all invisible hit zones
+   except the top-left corner (see below). They sit above the header so a
+   grab near the window's edge resizes rather than starting a drag. */
 .side-chat-resize {
     position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 16px;
-    height: 16px;
-    cursor: nwse-resize;
+    z-index: 2;
+}
+
+/* Edges are inset by the corner size at both ends so they never overlap a
+   corner handle — otherwise the corner becomes unhittable. */
+.side-chat-resize[data-dir="n"],
+.side-chat-resize[data-dir="s"] {
+    left: 14px;
+    right: 14px;
+    height: 6px;
+    cursor: ns-resize;
+}
+
+.side-chat-resize[data-dir="n"] { top: 0; }
+.side-chat-resize[data-dir="s"] { bottom: 0; }
+
+.side-chat-resize[data-dir="e"],
+.side-chat-resize[data-dir="w"] {
+    top: 14px;
+    bottom: 14px;
+    width: 6px;
+    cursor: ew-resize;
+}
+
+.side-chat-resize[data-dir="e"] { right: 0; }
+.side-chat-resize[data-dir="w"] { left: 0; }
+
+/* Corners win over edges where they meet. */
+.side-chat-resize[data-dir="nw"],
+.side-chat-resize[data-dir="ne"],
+.side-chat-resize[data-dir="sw"],
+.side-chat-resize[data-dir="se"] {
+    width: 14px;
+    height: 14px;
+    z-index: 3;
+}
+
+.side-chat-resize[data-dir="nw"] { top: 0; left: 0; cursor: nwse-resize; }
+.side-chat-resize[data-dir="se"] { bottom: 0; right: 0; cursor: nwse-resize; }
+.side-chat-resize[data-dir="ne"] { top: 0; right: 0; cursor: nesw-resize; }
+.side-chat-resize[data-dir="sw"] { bottom: 0; left: 0; cursor: nesw-resize; }
+
+/* Only the top-left corner is drawn. The window is berthed bottom-right, so
+   that is the corner facing into the screen with room to drag — it's the one
+   worth advertising. The other seven stay invisible. */
+.side-chat-resize[data-dir="nw"] {
     background: linear-gradient(
-        135deg,
+        315deg,
         transparent 0 50%,
         var(--border-strong) 50% 60%,
         transparent 60% 70%,
         var(--border-strong) 70% 80%,
         transparent 80%
     );
+    border-top-left-radius: 10px;
 }
 
 /* The ⤴ button that opens a side chat from an assistant message. */

@@ -17,6 +17,19 @@ router = APIRouter(prefix="/api")
 KEEPALIVE_SECONDS = 15
 
 
+# Ceiling on a single decoded attachment. The browser enforces its own limit
+# for a fast error, but that's a UX affordance — this is the actual control.
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENTS_PER_TURN = 4
+
+
+class Attachment(BaseModel):
+    """An image the learner attached to a chat turn, as base64."""
+    data: str
+    content_type: str
+    filename: str | None = None
+
+
 class ChatRequest(BaseModel):
     message: str
     email: str
@@ -26,6 +39,50 @@ class ChatRequest(BaseModel):
     fork_from: str | None = None
     # Side-chats must not steal the user's active-session pointer.
     set_active: bool = True
+    # Images attached to THIS turn only. Sent to the model as content blocks
+    # and written to disk; the transcript keeps paths, never base64.
+    attachments: list[Attachment] | None = None
+
+
+def _validate_attachments(attachments: list[Attachment] | None) -> list[Attachment]:
+    """Reject anything that isn't a supported image within the size cap.
+
+    Raises HTTPException(400) rather than letting a bad payload reach the SDK,
+    where it would surface as an opaque streaming failure.
+    """
+    import base64
+    import binascii
+
+    from backend.episodic import EpisodicMemory
+
+    if not attachments:
+        return []
+
+    if len(attachments) > MAX_ATTACHMENTS_PER_TURN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at most {MAX_ATTACHMENTS_PER_TURN} images per message",
+        )
+
+    for att in attachments:
+        if att.content_type not in EpisodicMemory.IMAGE_EXT_MAP:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported image type: {att.content_type}",
+            )
+        try:
+            raw = base64.b64decode(att.data, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="attachment is not valid base64")
+        if not raw:
+            raise HTTPException(status_code=400, detail="attachment is empty")
+        if len(raw) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"image exceeds {MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB limit",
+            )
+
+    return attachments
 
 
 # --- Chat Endpoints ---
@@ -35,6 +92,11 @@ class ChatRequest(BaseModel):
 async def chat_stream(body: ChatRequest):
     """Send a message and stream back events as SSE."""
     event_queue: asyncio.Queue = asyncio.Queue()
+
+    # Validate before the task starts: a 400 here is a real HTTP error the
+    # client can show, whereas a failure inside the stream is just an SSE
+    # error frame buried in the transcript.
+    attachments = _validate_attachments(body.attachments)
 
     async def on_event(event: dict):
         await event_queue.put(event)
@@ -50,6 +112,7 @@ async def chat_stream(body: ChatRequest):
                 session_id=body.session_id,
                 fork_from=body.fork_from,
                 set_active=body.set_active,
+                attachments=[a.model_dump() for a in attachments],
             )
         except Exception as e:
             await event_queue.put({"type": "error", "content": str(e)})
@@ -153,6 +216,35 @@ async def code_reset_venv(body: ResetVenvRequest):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"reset failed: {e}")
+
+
+# --- Uploaded Images ---
+
+
+@router.get("/uploads/{email}/{filename}")
+async def get_upload(email: str, filename: str):
+    """Serve an image the learner attached to a chat turn.
+
+    Deliberately a route rather than a StaticFiles mount over data/uploads:
+    that tree is user data keyed by email, and the filename reaches us as a
+    URL segment. Everything is resolved and then checked for containment, so
+    a traversal attempt lands outside the user's directory and is refused.
+    """
+    from fastapi.responses import FileResponse
+
+    from backend.episodic import EpisodicMemory
+
+    uploads_dir = os.path.realpath(EpisodicMemory.uploads_dir_for(email))
+    target = os.path.realpath(os.path.join(uploads_dir, filename))
+
+    # os.path.commonpath, not startswith: the latter says /a/b-evil is inside
+    # /a/b. Compare resolved paths so symlinks can't sidestep the check.
+    if target != uploads_dir and os.path.commonpath([uploads_dir, target]) != uploads_dir:
+        raise HTTPException(status_code=404, detail="not found")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="not found")
+
+    return FileResponse(target)
 
 
 # --- Knowledge & Quiz Endpoints ---

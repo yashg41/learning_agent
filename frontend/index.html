@@ -116,9 +116,16 @@
                             title="Jump to latest">&#8595; Latest</button>
                 </div>
                 <div class="chat-input-area">
-                    <textarea id="message-input" placeholder="Ask anything — or type &quot;quiz me&quot; to test what you know…" rows="1"
-                             onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMessage(); }"></textarea>
-                    <button id="send-btn" onclick="sendMessage()">Send</button>
+                    <!-- Thumbnails of images staged for the next turn. Hidden
+                         while empty; populated by ChatController. -->
+                    <div class="attach-strip" id="attach-strip"></div>
+                    <div class="chat-input-row">
+                        <textarea id="message-input" placeholder="Ask anything — or type &quot;quiz me&quot; to test what you know…" rows="1"
+                                 onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMessage(); }"></textarea>
+                        <button class="attach-btn" id="attach-btn" title="Attach an image">&#128206;</button>
+                        <input type="file" id="attach-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+                        <button id="send-btn" onclick="sendMessage()">Send</button>
+                    </div>
                 </div>
             </div>
 
@@ -225,11 +232,25 @@
             </div>
         </div>
         <div class="side-chat-input-area">
-            <textarea id="side-chat-input" rows="1" placeholder="Ask about this topic…"
-                      onkeydown="if(event.key==='Enter' &amp;&amp; !event.shiftKey){ event.preventDefault(); sendSideMessage(); }"></textarea>
-            <button id="side-chat-send" onclick="sendSideMessage()">Send</button>
+            <div class="attach-strip" id="side-attach-strip"></div>
+            <div class="chat-input-row">
+                <textarea id="side-chat-input" rows="1" placeholder="Ask about this topic…"
+                          onkeydown="if(event.key==='Enter' &amp;&amp; !event.shiftKey){ event.preventDefault(); sendSideMessage(); }"></textarea>
+                <button class="attach-btn" id="side-attach-btn" title="Attach an image">&#128206;</button>
+                <input type="file" id="side-attach-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+                <button id="side-chat-send" onclick="sendSideMessage()">Send</button>
+            </div>
         </div>
-        <div class="side-chat-resize" id="side-chat-resize" title="Resize"></div>
+        <!-- Resize handles: four edges, four corners. Last in the DOM so they
+             stack above the content. Only "nw" is visible (see styles.css). -->
+        <div class="side-chat-resize" data-dir="n"></div>
+        <div class="side-chat-resize" data-dir="s"></div>
+        <div class="side-chat-resize" data-dir="e"></div>
+        <div class="side-chat-resize" data-dir="w"></div>
+        <div class="side-chat-resize" data-dir="nw" title="Resize"></div>
+        <div class="side-chat-resize" data-dir="ne"></div>
+        <div class="side-chat-resize" data-dir="sw"></div>
+        <div class="side-chat-resize" data-dir="se"></div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>

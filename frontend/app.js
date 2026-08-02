@@ -95,6 +95,85 @@ function initRails() {
 }
 
 // =====================================================================
+// Image attachments
+// =====================================================================
+
+// Kept in step with backend/api/routes.py (MAX_ATTACHMENT_BYTES,
+// MAX_ATTACHMENTS_PER_TURN, EpisodicMemory.IMAGE_EXT_MAP). The server
+// enforces all three independently — these exist so the user gets an
+// immediate, readable error instead of a 400 after the upload.
+const ATTACH_TYPES = ["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"];
+const MAX_ATTACH_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS = 4;
+
+function readFileAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+    });
+}
+
+/**
+ * Wire paste, drag-drop and the file picker for one chat surface.
+ *
+ * `dropZone` is the whole chat area rather than just the textarea — dropping
+ * a screenshot anywhere over the conversation is the natural gesture.
+ */
+function initAttachments(chatFor, { inputEl, dropZone, attachBtnEl, attachInputEl }) {
+    if (inputEl) {
+        inputEl.addEventListener("paste", (e) => {
+            const files = Array.from(e.clipboardData?.items || [])
+                .filter(item => item.kind === "file" && ATTACH_TYPES.includes(item.type))
+                .map(item => item.getAsFile())
+                .filter(Boolean);
+            if (!files.length) return;   // plain text paste — leave it alone
+            e.preventDefault();
+            chatFor().addAttachments(files);
+        });
+    }
+
+    if (attachBtnEl && attachInputEl) {
+        attachBtnEl.onclick = (e) => { e.preventDefault(); attachInputEl.click(); };
+        attachInputEl.addEventListener("change", () => {
+            chatFor().addAttachments(attachInputEl.files);
+            // Allow re-picking the same file, which otherwise fires no change.
+            attachInputEl.value = "";
+        });
+    }
+
+    if (dropZone) {
+        // dragenter/dragleave fire for every child element crossed, so a
+        // depth counter is needed or the highlight flickers constantly.
+        let depth = 0;
+        const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
+
+        dropZone.addEventListener("dragenter", (e) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            depth += 1;
+            dropZone.classList.add("drop-active");
+        });
+        // Without preventDefault on dragover the drop event never fires.
+        dropZone.addEventListener("dragover", (e) => {
+            if (hasFiles(e)) e.preventDefault();
+        });
+        dropZone.addEventListener("dragleave", () => {
+            depth = Math.max(0, depth - 1);
+            if (!depth) dropZone.classList.remove("drop-active");
+        });
+        dropZone.addEventListener("drop", (e) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            depth = 0;
+            dropZone.classList.remove("drop-active");
+            chatFor().addAttachments(e.dataTransfer.files);
+        });
+    }
+}
+
+// =====================================================================
 // Markdown Renderer (delegates to marked.js loaded in index.html)
 // =====================================================================
 
@@ -467,7 +546,13 @@ async function loadSessionHistory(email, sessionId) {
             switch (turn.type) {
                 case "user": {
                     flushAssistant();
-                    const div = addMessage(turn.content, "user");
+                    // Attachments come back as filenames only; the serving
+                    // route rebuilds the path from email + filename.
+                    const atts = (turn.attachments || []).map(a => ({
+                        url: `${API_BASE}/api/uploads/${encodeURIComponent(email)}/${encodeURIComponent(a.filename)}`,
+                        filename: a.filename,
+                    }));
+                    const div = addMessage(turn.content, "user", null, atts);
                     // The stored index is the handle "edit this message" needs;
                     // without it the client can't tell the server what to
                     // rewrite. Live-streamed messages get theirs on reload.
@@ -547,7 +632,11 @@ function mainMessagesEl() {
     return document.getElementById("chat-messages");
 }
 
-function addMessage(content, type, container) {
+/**
+ * @param attachments Images to show on the bubble. Either staged uploads
+ *   ({dataUrl}) or replayed history ({url}) — both render the same.
+ */
+function addMessage(content, type, container, attachments = null) {
     container = container || mainMessagesEl();
     // Remove empty state
     const empty = container.querySelector(".empty-state");
@@ -559,6 +648,19 @@ function addMessage(content, type, container) {
         div.innerHTML = renderMarkdown(content);
     } else {
         div.textContent = content;
+    }
+    if (attachments && attachments.length) {
+        // Appended as DOM, not concatenated into the string above: user
+        // messages render via textContent, which would show raw markup.
+        const strip = document.createElement("div");
+        strip.className = "message-attachments";
+        attachments.forEach(att => {
+            const img = document.createElement("img");
+            img.src = att.dataUrl || att.url;
+            img.alt = att.name || att.filename || "attached image";
+            strip.appendChild(img);
+        });
+        div.appendChild(strip);
     }
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
@@ -735,19 +837,102 @@ function hideThinking(container) {
 // =====================================================================
 
 class ChatController {
-    constructor({ messagesEl, inputEl, sendBtnEl, sessionId = null, isMain = false, onSessionId = null }) {
+    constructor({ messagesEl, inputEl, sendBtnEl, sessionId = null, isMain = false, onSessionId = null,
+                  attachStripEl = null, attachBtnEl = null, attachInputEl = null }) {
         this.messagesEl = messagesEl;
         this.inputEl = inputEl;
         this.sendBtnEl = sendBtnEl;
         this.sessionId = sessionId;
         this.isMain = isMain;
         this.streaming = false;
+        // Images staged for the NEXT turn, as {name, contentType, data}
+        // where data is bare base64 (no data: prefix). Cleared on send.
+        this.pendingAttachments = [];
+        this.attachStripEl = attachStripEl;
+        this.attachBtnEl = attachBtnEl;
+        this.attachInputEl = attachInputEl;
         // How many user turns this controller has sent into the current
         // session. Drives auto-naming (turn 1) and the retitle check (turn 3).
         this.turnCount = 0;
         // Notified when the SDK reports the real session id (it differs from
         // any placeholder we sent).
         this.onSessionId = onSessionId;
+    }
+
+    /**
+     * Stage image files for the next turn. Accepts anything File-like — a
+     * FileList from the picker or drop, or files pulled off clipboard items.
+     *
+     * Limits mirror the server's (see MAX_ATTACHMENT_BYTES in routes.py).
+     * The server is the real gate; these just fail fast with a clearer
+     * message than a 400 mid-send.
+     */
+    async addAttachments(files) {
+        const list = Array.from(files || []).filter(f => ATTACH_TYPES.includes(f.type));
+        if (!list.length) return;
+
+        for (const file of list) {
+            if (this.pendingAttachments.length >= MAX_ATTACHMENTS) {
+                addMessage(`You can attach at most ${MAX_ATTACHMENTS} images per message.`,
+                           "error", this.messagesEl);
+                break;
+            }
+            if (file.size > MAX_ATTACH_BYTES) {
+                addMessage(`"${file.name || "image"}" is larger than ${MAX_ATTACH_BYTES / (1024 * 1024)}MB.`,
+                           "error", this.messagesEl);
+                continue;
+            }
+            try {
+                const dataUrl = await readFileAsDataURL(file);
+                this.pendingAttachments.push({
+                    name: file.name || "pasted-image",
+                    contentType: file.type,
+                    // Strip the "data:<mime>;base64," prefix — the API wants
+                    // bare base64, but the thumbnail needs the full URL.
+                    data: dataUrl.slice(dataUrl.indexOf(",") + 1),
+                    dataUrl,
+                });
+            } catch (e) {
+                addMessage(`Could not read "${file.name || "image"}".`, "error", this.messagesEl);
+            }
+        }
+        this.renderAttachments();
+    }
+
+    /** Repaint the staged-thumbnail strip from pendingAttachments. */
+    renderAttachments() {
+        const strip = this.attachStripEl;
+        if (!strip) return;
+        strip.innerHTML = "";
+        this.pendingAttachments.forEach((att, i) => {
+            const wrap = document.createElement("div");
+            wrap.className = "attach-thumb";
+
+            const img = document.createElement("img");
+            img.src = att.dataUrl;
+            img.alt = att.name;
+            wrap.appendChild(img);
+
+            const rm = document.createElement("button");
+            rm.className = "attach-thumb-remove";
+            rm.textContent = "×";
+            rm.title = "Remove";
+            rm.onclick = (e) => {
+                e.stopPropagation();
+                this.pendingAttachments.splice(i, 1);
+                this.renderAttachments();
+            };
+            wrap.appendChild(rm);
+
+            strip.appendChild(wrap);
+        });
+    }
+
+    clearAttachments() {
+        this.pendingAttachments = [];
+        this.renderAttachments();
+        // Reset the picker too, or re-choosing the same file fires no change.
+        if (this.attachInputEl) this.attachInputEl.value = "";
     }
 
     async send() {
@@ -758,14 +943,18 @@ class ChatController {
         }
 
         const message = this.inputEl.value.trim();
-        if (!message) return;
+        const attachments = this.pendingAttachments.slice();
+        // An image on its own is a complete question ("what's wrong here?"),
+        // so only bail when there's neither text nor an image.
+        if (!message && !attachments.length) return;
         if (this.streaming) return;   // one turn at a time per surface
 
         this.inputEl.value = "";
         this.inputEl.style.height = "auto";
+        this.clearAttachments();
         if (this.isMain) currentEmail = email;
 
-        addMessage(message, "user", this.messagesEl);
+        addMessage(message, "user", this.messagesEl, attachments);
 
         this.sendBtnEl.disabled = true;
         this.inputEl.disabled = true;
@@ -802,6 +991,13 @@ class ChatController {
             // which two concurrent chats would fight over.
             if (this.sessionId) requestBody.session_id = this.sessionId;
             if (this.forkFrom) requestBody.fork_from = this.forkFrom;
+            if (attachments.length) {
+                requestBody.attachments = attachments.map(a => ({
+                    data: a.data,
+                    content_type: a.contentType,
+                    filename: a.name,
+                }));
+            }
 
             const res = await fetch(`${API_BASE}/api/chat/stream`, {
                 method: "POST",
@@ -850,7 +1046,10 @@ class ChatController {
                                 if (this.onSessionId) this.onSessionId(event.session_id);
                                 // Auto-name the session with first message
                                 if (isFirstMessage) {
-                                    const sessionName = message.substring(0, 40);
+                                    // An image-only opening turn has no text
+                                    // to name from — don't PATCH a blank name.
+                                    const sessionName = message.substring(0, 40)
+                                        || (attachments.length ? "Image question" : "");
                                     if (this.isMain) setChatTitle(sessionName);
                                     try {
                                         await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(email)}/${event.session_id}`, {
@@ -969,6 +1168,12 @@ class ChatController {
                         this.inputEl.value = message;
                         autoResizeInput(this.inputEl);
                     }
+                    // Restore the images too, or a failed turn silently eats
+                    // them and the retry sends text with no picture.
+                    if (attachments.length && !this.pendingAttachments.length) {
+                        this.pendingAttachments = attachments;
+                        this.renderAttachments();
+                    }
                     addMessage("Your message was not sent — it's back in the box, press Send to retry.", "error", this.messagesEl);
                 }
             } finally {
@@ -1016,6 +1221,9 @@ function getMainChat() {
             inputEl: document.getElementById("message-input"),
             sendBtnEl: document.getElementById("send-btn"),
             isMain: true,
+            attachStripEl: document.getElementById("attach-strip"),
+            attachBtnEl: document.getElementById("attach-btn"),
+            attachInputEl: document.getElementById("attach-input"),
         });
     }
     // Keep in sync with session switching, which mutates the global. Changing
@@ -1056,6 +1264,9 @@ function getSideChat() {
             inputEl: document.getElementById("side-chat-input"),
             sendBtnEl: document.getElementById("side-chat-send"),
             isMain: false,
+            attachStripEl: document.getElementById("side-attach-strip"),
+            attachBtnEl: document.getElementById("side-attach-btn"),
+            attachInputEl: document.getElementById("side-attach-input"),
         });
     }
     return sideChat;
@@ -1336,22 +1547,53 @@ function attachSideChatLauncher(messageDiv) {
 function initSideChatWindow() {
     const win = sideChatEl();
     const header = document.getElementById("side-chat-header");
-    const grip = document.getElementById("side-chat-resize");
+    const handles = win ? win.querySelectorAll(".side-chat-resize") : [];
     if (!win || !header) return;
 
     let mode = null;         // "drag" | "resize"
+    let dir = "";            // for resize: any of n/s/e/w, combined at corners
     let startX = 0, startY = 0, startLeft = 0, startTop = 0, startW = 0, startH = 0;
 
-    function beginDrag(e) {
-        // Ignore clicks on the header buttons.
-        if (e.target.closest("button")) return;
+    /**
+     * Switch the window from its CSS right/bottom berth to absolute left/top.
+     *
+     * This is load-bearing for BOTH gestures. While the window is still
+     * right/bottom-anchored, growing width/height expands it leftward and
+     * upward — so a resize appears to run away from the pointer. Pinning
+     * left/top first makes the geometry unambiguous. Idempotent.
+     */
+    function pinToLeftTop() {
         const r = win.getBoundingClientRect();
-        // Switch from right/bottom anchoring to left/top so dragging is
-        // absolute rather than fighting the CSS defaults.
         win.style.left = r.left + "px";
         win.style.top = r.top + "px";
         win.style.right = "auto";
         win.style.bottom = "auto";
+    }
+
+    /**
+     * Read the size bounds from CSS rather than duplicating them here.
+     * Resolved per gesture so viewport-relative values (50vw / 100vh) are
+     * correct even if the browser was resized since load.
+     */
+    function bounds() {
+        const cs = getComputedStyle(win);
+        const px = (v, fallback) => {
+            const n = parseFloat(v);
+            return Number.isFinite(n) && n > 0 ? n : fallback;
+        };
+        return {
+            minW: px(cs.minWidth, 300),
+            minH: px(cs.minHeight, 240),
+            maxW: px(cs.maxWidth, window.innerWidth),
+            maxH: px(cs.maxHeight, window.innerHeight),
+        };
+    }
+
+    function beginDrag(e) {
+        // Ignore clicks on the header buttons.
+        if (e.target.closest("button")) return;
+        pinToLeftTop();
+        const r = win.getBoundingClientRect();
         mode = "drag";
         startX = e.clientX; startY = e.clientY;
         startLeft = r.left; startTop = r.top;
@@ -1359,17 +1601,21 @@ function initSideChatWindow() {
     }
 
     function beginResize(e) {
+        pinToLeftTop();
         const r = win.getBoundingClientRect();
         mode = "resize";
+        dir = e.currentTarget.dataset.dir || "";
         startX = e.clientX; startY = e.clientY;
+        startLeft = r.left; startTop = r.top;
         startW = r.width; startH = r.height;
-        grip.setPointerCapture(e.pointerId);
+        e.currentTarget.setPointerCapture(e.pointerId);
         e.stopPropagation();
     }
 
     function onMove(e) {
         if (!mode) return;
         const dx = e.clientX - startX, dy = e.clientY - startY;
+
         if (mode === "drag") {
             // Clamp so the window can never be dragged fully off-screen and
             // become unreachable.
@@ -1377,22 +1623,69 @@ function initSideChatWindow() {
             const maxT = window.innerHeight - win.offsetHeight;
             win.style.left = Math.max(0, Math.min(startLeft + dx, maxL)) + "px";
             win.style.top = Math.max(0, Math.min(startTop + dy, maxT)) + "px";
-        } else {
-            win.style.width = Math.max(300, startW + dx) + "px";
-            win.style.height = Math.max(240, startH + dy) + "px";
+            return;
         }
+
+        const b = bounds();
+        let w = startW, h = startH, left = startLeft, top = startTop;
+
+        // Size first, position second. Deriving left/top from the *clamped*
+        // size is what makes a west/north drag stop dead at the minimum
+        // instead of sliding the whole window across the screen.
+        if (dir.includes("e")) {
+            w = startW + dx;
+        } else if (dir.includes("w")) {
+            w = startW - dx;
+        }
+        if (dir.includes("s")) {
+            h = startH + dy;
+        } else if (dir.includes("n")) {
+            h = startH - dy;
+        }
+
+        // Keep the window inside the viewport: a west/north edge can't cross
+        // the screen edge, and an east/south edge can't run past it.
+        if (dir.includes("w")) w = Math.min(w, startLeft + startW);
+        if (dir.includes("n")) h = Math.min(h, startTop + startH);
+        if (dir.includes("e")) w = Math.min(w, window.innerWidth - startLeft);
+        if (dir.includes("s")) h = Math.min(h, window.innerHeight - startTop);
+
+        w = Math.max(b.minW, Math.min(w, b.maxW));
+        h = Math.max(b.minH, Math.min(h, b.maxH));
+
+        if (dir.includes("w")) left = startLeft + startW - w;
+        if (dir.includes("n")) top = startTop + startH - h;
+
+        win.style.width = w + "px";
+        win.style.height = h + "px";
+        win.style.left = Math.max(0, left) + "px";
+        win.style.top = Math.max(0, top) + "px";
     }
 
-    function endDrag() { mode = null; }
+    function endDrag() { mode = null; dir = ""; }
 
     header.addEventListener("pointerdown", beginDrag);
     header.addEventListener("pointermove", onMove);
     header.addEventListener("pointerup", endDrag);
-    if (grip) {
-        grip.addEventListener("pointerdown", beginResize);
-        grip.addEventListener("pointermove", onMove);
-        grip.addEventListener("pointerup", endDrag);
-    }
+    // A cancelled gesture (OS/browser interruption) must clear `mode` too,
+    // or the window keeps following the cursor with no button held.
+    header.addEventListener("pointercancel", endDrag);
+
+    handles.forEach(handle => {
+        handle.addEventListener("pointerdown", beginResize);
+        handle.addEventListener("pointermove", onMove);
+        handle.addEventListener("pointerup", endDrag);
+        handle.addEventListener("pointercancel", endDrag);
+    });
+
+    // Shrinking the browser must not strand a manually-placed window
+    // off-screen. Size caps are handled by CSS max-width/max-height.
+    window.addEventListener("resize", () => {
+        if (win.style.left === "" || !win.classList.contains("open")) return;
+        const r = win.getBoundingClientRect();
+        win.style.left = Math.max(0, Math.min(r.left, window.innerWidth - r.width)) + "px";
+        win.style.top = Math.max(0, Math.min(r.top, window.innerHeight - r.height)) + "px";
+    });
 }
 
 function setStatus(text, connected) {
@@ -1894,6 +2187,15 @@ document.addEventListener("DOMContentLoaded", () => {
     // Auto-resize textarea as user types
     textarea.addEventListener("input", () => autoResizeInput(textarea));
 
+    // Image attachments: paste into the composer, drop anywhere over the
+    // conversation, or use the paperclip.
+    initAttachments(getMainChat, {
+        inputEl: textarea,
+        dropZone: document.querySelector(".chat-scroll-wrap") || document.getElementById("chat-messages"),
+        attachBtnEl: document.getElementById("attach-btn"),
+        attachInputEl: document.getElementById("attach-input"),
+    });
+
     // Sync the button label only — don't persist what may be an OS default.
     applyTheme(document.documentElement.getAttribute("data-theme") || "dark", false);
 
@@ -1932,6 +2234,13 @@ document.addEventListener("DOMContentLoaded", () => {
     initSideChatWindow();
     const sideInput = document.getElementById("side-chat-input");
     if (sideInput) sideInput.addEventListener("input", () => autoResizeInput(sideInput));
+
+    initAttachments(getSideChat, {
+        inputEl: sideInput,
+        dropZone: sideChatEl(),
+        attachBtnEl: document.getElementById("side-attach-btn"),
+        attachInputEl: document.getElementById("side-attach-input"),
+    });
 
     // Show the jump-to-latest button whenever the reader scrolls away from
     // the bottom, and retire it once they're back.
