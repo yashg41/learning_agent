@@ -1044,6 +1044,12 @@ class ChatController {
                                 this.forkFrom = null;
                                 if (this.isMain) currentSessionId = event.session_id;
                                 if (this.onSessionId) this.onSessionId(event.session_id);
+                                // Let the notes pane follow a branch: editing a
+                                // message forks a new id, and a note pinned to
+                                // the old one would otherwise disappear.
+                                if (this.isMain && typeof notesOnSessionChange === "function") {
+                                    notesOnSessionChange(event.session_id);
+                                }
                                 // Auto-name the session with first message
                                 if (isFirstMessage) {
                                     // An image-only opening turn has no text
@@ -2027,6 +2033,17 @@ function loadCells() {
 function toggleNotebook() {
     notebookOpen = !notebookOpen;
     document.getElementById("notebook-pane").style.display = notebookOpen ? "flex" : "none";
+    const runBtn = document.getElementById("run-code-btn");
+    if (runBtn) runBtn.classList.toggle("is-on", notebookOpen);
+    // The divider serves whichever pane is open, so it has to re-evaluate
+    // here too. Guarded: notes.js may not be loaded.
+    if (typeof syncPaneSplit === "function") syncPaneSplit();
+    // The notebook and the notes canvas both want half the centre column;
+    // three panes at flex:1 leaves none of them usable.
+    if (notebookOpen && typeof notesOpen !== "undefined" && notesOpen
+        && typeof toggleNotes === "function") {
+        toggleNotes(false);
+    }
     if (notebookOpen && document.querySelectorAll(".cell").length === 0) {
         loadCells();
     }
@@ -2228,7 +2245,13 @@ document.addEventListener("DOMContentLoaded", () => {
         if (e.key === "\\") { e.preventDefault(); toggleRail("left"); }
         else if (e.key === "]") { e.preventDefault(); toggleRail("right"); }
         else if (e.key === ".") { e.preventDefault(); toggleFocus(); }
+        else if (e.key.toLowerCase() === "e" && typeof toggleNotes === "function") {
+            e.preventDefault(); toggleNotes();
+        }
     });
+
+    // Notes canvas. Guarded so app.js keeps working if notes.js fails to load.
+    if (typeof initNotes === "function") initNotes();
 
     // Side-chat window: drag/resize handlers and its own auto-resizing input.
     initSideChatWindow();

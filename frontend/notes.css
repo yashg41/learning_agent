@@ -1,0 +1,754 @@
+/* Notes canvas — a free-positioning whiteboard beside the chat.
+ *
+ * Loaded after styles.css so .header-btn overrides here win without
+ * !important. Kept out of styles.css because these selectors are used by one
+ * pane on one page, and styles.css is shared with graph.html and chroma.html.
+ *
+ * Sticky/shape fills are declared per theme rather than shared: the saturated
+ * translucent fills that read well on #09090b turn to grey mush on white. */
+
+.notes-pane {
+    flex: 1;
+    /* Matches PANE_MIN in notes.js. A larger value here would fight the
+       divider's clamp — the drag would stop before the CSS minimum and the
+       last few pixels would feel stuck. */
+    min-width: 320px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid var(--border-strong);
+    background: var(--bg-primary);
+}
+
+/* --- Pane divider (chat vs notebook/notes) --- */
+
+.pane-divider {
+    flex: 0 0 auto;
+    width: 5px;
+    cursor: col-resize;
+    background: var(--border-strong);
+    position: relative;
+    display: none;              /* shown by JS when a right pane opens */
+    touch-action: none;         /* the pointer drag owns the gesture */
+}
+
+/* A 5px target is a fiddly thing to hit, so widen the hit area with a
+   pseudo-element rather than the visible line — the divider stays a hairline
+   while being comfortable to grab. */
+.pane-divider::after {
+    content: "";
+    position: absolute;
+    inset: 0 -4px;
+}
+
+.pane-divider:hover,
+.pane-divider.is-dragging { background: var(--accent); }
+
+/* While dragging, stop the panes' contents from swallowing the pointer or
+   selecting text under the cursor. */
+body.is-resizing-panes { cursor: col-resize; user-select: none; }
+body.is-resizing-panes iframe,
+body.is-resizing-panes .notes-scroll { pointer-events: none; }
+
+/* --- Header: note picker + actions --- */
+
+.notes-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+}
+
+.notes-picker {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-tertiary);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 5px 8px;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.notes-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.notes-header-actions .header-btn { padding: 5px 8px; }
+
+.header-btn.is-on {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+}
+
+.header-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.header-btn:disabled:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    border-color: var(--border-strong);
+}
+
+/* --- Toolbar --- */
+
+.notes-toolbar {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.nb-tool {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease),
+                color var(--duration-fast) var(--ease);
+}
+
+.nb-tool:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-bright);
+}
+
+.nb-tool.is-active {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+}
+
+/* Same look as .nb-tool but carries no tool semantics — used for zoom, which
+   must not participate in the active-tool highlight. */
+.nb-btn {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease),
+                color var(--duration-fast) var(--ease);
+}
+
+.nb-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-bright);
+}
+
+.nb-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.nb-btn:disabled:hover { background: transparent; color: var(--text-dim); }
+
+.nb-tool-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border-strong);
+    margin: 0 4px;
+}
+
+.notes-save-state {
+    margin-left: auto;
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.notes-save-state.is-error { color: var(--error); }
+
+/* --- Scroll container + canvas --- */
+
+.notes-scroll {
+    flex: 1;
+    overflow-y: auto;
+    /* Horizontal scrolling exists only for zoom. At 100% the canvas is
+       exactly the pane width so no bar appears; zoomed in it is genuinely
+       wider and the right-hand side would otherwise be unreachable. */
+    overflow-x: auto;
+    position: relative;
+    background: var(--bg-primary);
+}
+
+.notes-canvas {
+    position: relative;
+    width: 100%;
+    /* height is set inline from note.canvas_height — this is the Samsung Notes
+       model: fixed width, grows downward only. */
+
+    /* Zoom-compensated measurements, derived once here and used by every
+       block rule. --nb-inv-zoom is 1/zoom, set by applyZoom(). Everything
+       drawn as "chrome" (borders, radii, padding, the grid) multiplies by it
+       so it renders at a constant on-screen size — otherwise a block at 400%
+       gets a 32px corner radius and an 8px outline, which is the fat
+       double-ringed pill look. */
+    --nb-radius: calc(8px * var(--nb-inv-zoom, 1));
+    --nb-hairline: calc(1px * var(--nb-inv-zoom, 1));
+    --nb-pad-y: calc(10px * var(--nb-inv-zoom, 1));
+    --nb-pad-x: calc(12px * var(--nb-inv-zoom, 1));
+    background-image:
+        linear-gradient(var(--canvas-grid) var(--nb-hairline), transparent var(--nb-hairline)),
+        linear-gradient(90deg, var(--canvas-grid) var(--nb-hairline), transparent var(--nb-hairline));
+    background-size:
+        calc(24px * var(--nb-inv-zoom, 1)) calc(24px * var(--nb-inv-zoom, 1));
+    opacity: 1;
+}
+
+/* Faint grid — present enough to judge alignment by eye, quiet enough not to
+   compete with content. There is no snapping; this is purely a visual aid. */
+.notes-canvas { background-blend-mode: normal; }
+
+.notes-canvas.is-dragging { cursor: grabbing; }
+
+/* Space held (or mid-pan): show the grab affordance so the gesture is
+   discoverable rather than something you have to be told about. */
+.notes-scroll.can-pan,
+.notes-scroll.can-pan .notes-canvas { cursor: grab; }
+.notes-scroll.is-panning,
+.notes-scroll.is-panning .notes-canvas { cursor: grabbing; }
+
+/* While dragging a block, suppress touch scrolling so a trackpad gesture
+   can't fight the pointer capture. Idle blocks keep normal scrolling. */
+.notes-canvas.is-dragging .nb-block { touch-action: none; }
+
+.notes-pages {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;    /* pages are a backdrop, never a click target */
+}
+
+.nb-page {
+    position: absolute;
+    left: 0;
+    background: #fff;        /* paper is white in both themes */
+    box-shadow: var(--shadow-md);
+    border-radius: 2px;
+}
+
+.nb-page img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 2px;
+}
+
+.nb-page-num {
+    position: absolute;
+    top: 4px;
+    left: -34px;
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.notes-arrows {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;    /* only the transparent hit-lines take clicks */
+    overflow: visible;
+}
+
+.nb-arrow-hit { pointer-events: stroke; cursor: pointer; }
+
+/* Spans the whole canvas, so it would otherwise sit over the arrow hit-lines
+   in the SVG layer beneath and swallow every click meant for an arrow. The
+   layer itself takes no pointer events; the blocks inside it opt back in. */
+.notes-blocks { position: absolute; inset: 0; pointer-events: none; }
+.notes-blocks > .nb-block { pointer-events: auto; }
+
+.notes-marquee {
+    position: absolute;
+    border: 1px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 2px;
+    pointer-events: none;
+}
+
+.notes-add-space {
+    display: block;
+    margin: 12px auto 40px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 8px 20px;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: color var(--duration-fast) var(--ease),
+                border-color var(--duration-fast) var(--ease);
+}
+
+.notes-add-space:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+/* --- Blocks --- */
+
+.nb-block {
+    position: absolute;
+    box-sizing: border-box;
+    border-radius: var(--nb-radius);
+    cursor: default;
+    /* Absolutely positioned children of an untransformed parent, so left/top
+       can be written directly during a drag without a re-render. */
+}
+
+
+/* Chrome is expressed in inverse-zoom units so it renders at a constant
+   on-screen size. Without this, a block at 400% gets an 8px outline, an 8px
+   gap and a 32px corner radius — the fat double-ringed pill effect. */
+.nb-block.is-selected {
+    outline: calc(2px * var(--nb-inv-zoom, 1)) solid var(--accent);
+    outline-offset: calc(1px * var(--nb-inv-zoom, 1));
+}
+
+.nb-block.nb-grouped::after {
+    content: "";
+    position: absolute;
+    inset: calc(-3px * var(--nb-inv-zoom, 1));
+    border: var(--nb-hairline) dashed var(--border-strong);
+    border-radius: var(--nb-radius);
+    pointer-events: none;
+}
+
+.nb-block.is-selected.nb-grouped::after { border-color: var(--accent); }
+
+.nb-body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    padding: var(--nb-pad-y) var(--nb-pad-x);
+    box-sizing: border-box;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--text-bright);
+    word-wrap: break-word;
+}
+
+.nb-block.nb-text .nb-body {
+    background: var(--bg-tertiary);
+    border: var(--nb-hairline) solid var(--border-subtle);
+    border-radius: var(--nb-radius);
+}
+
+/* Markdown inside a block: tighten the vertical rhythm, since a block is a
+   small box and default heading margins waste most of it. */
+.nb-body > :first-child { margin-top: 0; }
+.nb-body > :last-child { margin-bottom: 0; }
+/* Relative to the block's own font-size (set inline by the formatting
+   toolbar), so bumping size scales headings and body together. Colour is
+   inherited rather than fixed, or a coloured block would keep grey headings. */
+.nb-body h1, .nb-body h2, .nb-body h3,
+.nb-body h4, .nb-body h5, .nb-body h6 {
+    margin: 6px 0 4px;
+    color: inherit;
+    line-height: var(--leading-tight);
+}
+.nb-body h1 { font-size: 1.6em; }
+.nb-body h2 { font-size: 1.3em; }
+.nb-body h3 { font-size: 1.12em; }
+.nb-body h4, .nb-body h5, .nb-body h6 { font-size: 1em; }
+.nb-body p { margin: 4px 0; }
+.nb-body ul, .nb-body ol { margin: 4px 0; padding-left: 18px; }
+.nb-body li { margin: 2px 0; }
+.nb-body code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: var(--bg-primary);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+}
+.nb-body pre {
+    background: var(--bg-primary);
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+}
+.nb-body a { color: var(--accent); }
+.nb-body img { max-width: 100%; }
+
+.nb-placeholder { color: var(--text-muted); font-style: italic; }
+
+/* Sticky notes — the fills are theme-specific (see file header). */
+.nb-block.nb-sticky .nb-body {
+    border-radius: var(--nb-radius);
+    box-shadow: var(--shadow-md);
+    color: #1c1917;              /* stickies are always light paper */
+}
+
+.nb-sticky[data-bg="amber"]  .nb-body { background: #fde68a; }
+.nb-sticky[data-bg="green"]  .nb-body { background: #bbf7d0; }
+.nb-sticky[data-bg="blue"]   .nb-body { background: #bfdbfe; }
+.nb-sticky[data-bg="pink"]   .nb-body { background: #fbcfe8; }
+.nb-sticky[data-bg="violet"] .nb-body { background: #ddd6fe; }
+
+.nb-sticky .nb-body code,
+.nb-sticky .nb-body pre { background: rgba(0, 0, 0, 0.07); }
+.nb-sticky .nb-body a { color: #6d28d9; }
+
+/* Code blocks */
+.nb-block.nb-code .nb-body {
+    background: var(--bg-primary);
+    border: var(--nb-hairline) solid var(--border-strong);
+    border-radius: var(--nb-radius);
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.nb-code-lang {
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+}
+
+.nb-code pre {
+    margin: 0;
+    padding: 8px 10px;
+    overflow: auto;
+    flex: 1;
+    background: none;
+}
+
+.nb-code pre code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-bright);
+    background: none;
+    padding: 0;
+    white-space: pre;
+}
+
+/* Images */
+.nb-block.nb-image .nb-body { padding: 0; }
+
+.nb-image img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: var(--nb-radius);
+    background: var(--bg-secondary);
+}
+
+.nb-image.is-uploading .nb-body {
+    border: var(--nb-hairline) dashed var(--accent);
+    border-radius: var(--nb-radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    background: var(--bg-secondary);
+}
+
+/* Shapes — an SVG fills the block so rect/ellipse/diamond all resize with it,
+   with the optional label centred on top. */
+.nb-block.nb-shape .nb-body {
+    padding: 0;
+    position: relative;
+    overflow: visible;
+}
+
+.nb-shape svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.nb-shape-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 8px;
+    font-size: var(--text-sm);
+    color: var(--text-bright);
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.nb-arrow-block { pointer-events: none; }
+
+/* --- Editing --- */
+
+.nb-edit {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    background: var(--bg-primary);
+    color: var(--text-bright);
+    border: none;
+    /* Thinner than the selection ring and inset, so an editing block reads as
+       one focused box rather than two concentric outlines. */
+    outline: var(--nb-hairline) solid var(--accent);
+    outline-offset: calc(-1px * var(--nb-inv-zoom, 1));
+    border-radius: var(--nb-radius);
+    padding: var(--nb-pad-y) var(--nb-pad-x);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    resize: none;
+}
+
+.nb-code .nb-edit,
+.nb-edit.is-mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+.nb-block.is-editing { z-index: 9000 !important; }
+
+/* While editing, the textarea's own outline marks the block. Keeping the
+   selection ring too produced the concentric double-ring look. */
+.nb-block.is-editing.is-selected { outline: none; }
+
+/* --- Handles --- */
+
+.nb-resize {
+    position: absolute;
+    right: -5px;
+    bottom: -5px;
+    width: 12px;
+    height: 12px;
+    background: var(--accent);
+    border: 2px solid var(--bg-primary);
+    border-radius: 50%;
+    cursor: nwse-resize;
+    display: none;
+    /* Counter the canvas scale so the handle keeps a constant on-screen size
+       at any zoom (--nb-inv-zoom is set by applyZoom). */
+    transform: scale(var(--nb-inv-zoom, 1));
+    transform-origin: center;
+}
+
+.nb-block.is-selected .nb-resize { display: block; }
+.nb-block.is-multi .nb-resize { display: none; }
+
+/* --- Selection toolbar --- */
+
+/* Formatting ribbon — fixed in the pane header, word-processor style. It
+   never overlaps the canvas, so it can stay open while you type. */
+.notes-format {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    min-height: 38px;
+}
+
+.nb-format-hint {
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+}
+
+.notes-format .header-btn {
+    padding: 3px 7px;
+    min-width: 26px;
+}
+
+.nb-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.nb-swatch:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Text-colour swatches show a letter in the colour rather than a filled
+   chip — a chip would read as a background fill, which is a different tool. */
+.nb-swatch-fg {
+    background: var(--bg-tertiary);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 700;
+    line-height: 1;
+}
+
+.nb-swatch-none,
+.nb-swatch-stroke {
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+    line-height: 1;
+}
+
+.nb-swatch-stroke { border-width: 3px; }
+
+.nb-select {
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    padding: 3px 4px;
+    cursor: pointer;
+}
+
+.nb-zoom {
+    font-size: var(--text-2xs);
+    color: var(--text-dim);
+    min-width: 40px;
+    text-align: center;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
+
+.nb-zoom:hover { color: var(--accent); }
+
+/* Reserves the scaled footprint. The canvas itself is transformed, and a
+   transform doesn't affect layout — without this the scroll container would
+   size to the unscaled canvas and clip anything zoomed past 100%. */
+/* Clips the canvas's zoom-out fill: below 1.0 the canvas is deliberately
+   larger than the note so the grid reaches the viewport edges, and without
+   this that overflow would create scroll space past the content. */
+.notes-canvas-wrap { position: relative; overflow: hidden; }
+
+.nb-fontsize {
+    font-size: var(--text-2xs);
+    color: var(--text-dim);
+    min-width: 18px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+/* --- Send-to-notes button (floats over the chat on text selection) --- */
+
+.send-to-notes-btn {
+    position: fixed;
+    z-index: 150;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border: none;
+    border-radius: var(--radius-pill);
+    padding: 6px 12px;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow-lg);
+    white-space: nowrap;
+}
+
+.send-to-notes-btn[hidden] { display: none; }
+.send-to-notes-btn:hover { background: var(--accent-hover); }
+
+/* --- Empty states, toasts, drop overlay --- */
+
+.notes-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    height: 100%;
+    padding: var(--space-5);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+}
+
+.notes-toast {
+    position: absolute;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    background: var(--bg-overlay);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 8px 14px;
+    font-size: var(--text-xs);
+    box-shadow: var(--shadow-lg);
+    z-index: 200;
+    max-width: 90%;
+    text-align: center;
+}
+
+.notes-toast.is-error { border-color: var(--error); color: var(--error); }
+
+.notes-scroll.drop-active::after {
+    content: "Drop a PDF to annotate it";
+    position: absolute;
+    inset: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius-lg);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    pointer-events: none;
+    z-index: 300;
+}
+
+.notes-busy {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    opacity: 0.9;
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    z-index: 250;
+}
+
+/* Light theme: blocks need real edges here — luminance alone doesn't
+   separate a white card from a near-white page. */
+[data-theme="light"] .nb-block.nb-text .nb-body,
+[data-theme="light"] .nb-block.nb-code .nb-body {
+    box-shadow: var(--shadow-sm);
+}

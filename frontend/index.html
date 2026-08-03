@@ -10,6 +10,9 @@
     <link rel="stylesheet" href="/static/tokens.css">
     <link rel="stylesheet" href="/api/palette.css">
     <link rel="stylesheet" href="/static/styles.css">
+    <!-- After styles.css: the notes pane overrides a few shared button rules
+         and should win without !important. -->
+    <link rel="stylesheet" href="/static/notes.css">
     <script>
         // Applied before first paint so the page never flashes the wrong theme.
         // ?theme= wins (useful for screenshots), then the saved choice, then
@@ -80,6 +83,8 @@
                                 title="Focus mode — hide both rails (⌘.)">⛶ Focus</button>
                         <button id="run-code-btn" class="header-btn" onclick="toggleNotebook()"
                                 title="Open code runner">&gt;_ Run Code</button>
+                        <button id="notes-btn" class="header-btn" onclick="toggleNotes()"
+                                title="Notes canvas (⌘E)">&#9998; Notes</button>
                         <button class="rail-toggle" id="toggle-right" onclick="toggleRail('right')"
                                 title="Hide panel (⌘])">⊟</button>
                     </div>
@@ -129,6 +134,12 @@
                 </div>
             </div>
 
+            <!-- Drag to rebalance chat against whichever pane is open on the
+                 right. Sits immediately after the chat pane so it serves both
+                 the notebook and the notes canvas; hidden when neither is
+                 open, since there is nothing to split. -->
+            <div class="pane-divider" id="pane-divider" title="Drag to resize"></div>
+
             <!-- Notebook pane (hidden by default; toggled by Run Code button) -->
             <div class="notebook-pane" id="notebook-pane" style="display:none">
                 <div class="notebook-header">
@@ -140,6 +151,75 @@
                     </div>
                 </div>
                 <div class="cells" id="cells"></div>
+            </div>
+
+            <!-- Notes canvas (hidden by default; toggled by the Notes button).
+                 Fixed width, grows downward only — blocks sit at absolute x/y
+                 and nothing reflows under them. An imported PDF renders as a
+                 page column behind the blocks. -->
+            <div class="notes-pane" id="notes-pane" style="display:none">
+                <div class="notes-header">
+                    <select class="notes-picker" id="notes-picker" onchange="onNotePicked()"
+                            title="Switch note"></select>
+                    <div class="notes-header-actions">
+                        <button class="header-btn" onclick="createNote()" title="New note">+</button>
+                        <button class="header-btn" onclick="renameNote()" title="Rename this note">Aa</button>
+                        <button class="header-btn" id="notes-pdf-btn" onclick="pickPdf()"
+                                title="Import a PDF to annotate">PDF</button>
+                        <button class="header-btn" id="notes-pin-btn" onclick="togglePinNote()"
+                                title="Pin this note to this chat">&#128204;</button>
+                        <button class="header-btn" onclick="deleteNote()" title="Delete this note">&#128465;</button>
+                        <button class="header-btn" onclick="toggleNotes()" title="Hide notes">&times;</button>
+                    </div>
+                </div>
+
+                <div class="notes-toolbar" id="notes-toolbar">
+                    <button class="nb-tool is-active" data-tool="select" title="Select (V)">&#9655;</button>
+                    <span class="nb-tool-sep"></span>
+                    <button class="nb-tool" data-tool="text" title="Text (T)">T</button>
+                    <button class="nb-tool" data-tool="sticky" title="Sticky note (S)">&#9635;</button>
+                    <button class="nb-tool" data-tool="code" title="Code block (C)">&lt;/&gt;</button>
+                    <span class="nb-tool-sep"></span>
+                    <button class="nb-tool" data-tool="rect" title="Rectangle (R)">&#9645;</button>
+                    <button class="nb-tool" data-tool="ellipse" title="Ellipse (O)">&#9711;</button>
+                    <button class="nb-tool" data-tool="diamond" title="Diamond (D)">&#9671;</button>
+                    <button class="nb-tool" data-tool="arrow" title="Arrow (A)">&#8599;</button>
+                    <span class="nb-tool-sep"></span>
+                    <!-- nb-btn, not nb-tool: .nb-tool elements get a click
+                         handler that sets the active drawing tool, and these
+                         are not tools. -->
+                    <button class="nb-btn" id="notes-zoom-out" onclick="zoomBy(-1)"
+                            title="Zoom out (⌘−)">&minus;</button>
+                    <span class="nb-zoom" id="notes-zoom-level" onclick="zoomReset()"
+                          title="Click to reset to 100% (⌘0)">100%</span>
+                    <button class="nb-btn" id="notes-zoom-in" onclick="zoomBy(1)"
+                            title="Zoom in (⌘+)">+</button>
+                    <span class="notes-save-state" id="notes-save-state"></span>
+                </div>
+
+                <!-- Formatting ribbon. Fixed in the header like a word
+                     processor rather than floating over the canvas, so it
+                     never covers the block being edited and the controls stay
+                     in one place. Populated by renderFormatBar(). -->
+                <div class="notes-format" id="notes-format"></div>
+
+                <div class="notes-scroll" id="notes-scroll">
+                    <div class="notes-empty" id="notes-empty"></div>
+                    <!-- Wrapper reserves the *scaled* size: a CSS transform
+                         doesn't affect layout, so without this the scroll
+                         container would clip a zoomed-in canvas. -->
+                    <div class="notes-canvas-wrap" id="notes-canvas-wrap">
+                        <div class="notes-canvas" id="notes-canvas">
+                            <div class="notes-pages" id="notes-pages"></div>
+                            <svg class="notes-arrows" id="notes-arrows"></svg>
+                            <div class="notes-blocks" id="notes-blocks"></div>
+                            <div class="notes-marquee" id="notes-marquee" hidden></div>
+                        </div>
+                    </div>
+                    <button class="notes-add-space" onclick="addCanvasSpace()">+ Add space</button>
+                </div>
+
+                <input type="file" id="notes-pdf-input" accept="application/pdf,.pdf" hidden>
             </div>
         </div>
 
@@ -255,5 +335,8 @@
 
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
     <script src="/static/app.js"></script>
+    <!-- After app.js: notes.js uses renderMarkdown/escapeHtml and reads the
+         currentEmail / currentSessionId globals it declares. -->
+    <script src="/static/notes.js"></script>
 </body>
 </html>
