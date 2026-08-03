@@ -1,8 +1,9 @@
 """API endpoints for the Python Learning Agent."""
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from urllib.parse import quote
 import asyncio
 import json
 import logging
@@ -17,6 +18,19 @@ router = APIRouter(prefix="/api")
 KEEPALIVE_SECONDS = 15
 
 
+# Ceiling on a single decoded attachment. The browser enforces its own limit
+# for a fast error, but that's a UX affordance — this is the actual control.
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENTS_PER_TURN = 4
+
+
+class Attachment(BaseModel):
+    """An image the learner attached to a chat turn, as base64."""
+    data: str
+    content_type: str
+    filename: str | None = None
+
+
 class ChatRequest(BaseModel):
     message: str
     email: str
@@ -26,6 +40,50 @@ class ChatRequest(BaseModel):
     fork_from: str | None = None
     # Side-chats must not steal the user's active-session pointer.
     set_active: bool = True
+    # Images attached to THIS turn only. Sent to the model as content blocks
+    # and written to disk; the transcript keeps paths, never base64.
+    attachments: list[Attachment] | None = None
+
+
+def _validate_attachments(attachments: list[Attachment] | None) -> list[Attachment]:
+    """Reject anything that isn't a supported image within the size cap.
+
+    Raises HTTPException(400) rather than letting a bad payload reach the SDK,
+    where it would surface as an opaque streaming failure.
+    """
+    import base64
+    import binascii
+
+    from backend.episodic import EpisodicMemory
+
+    if not attachments:
+        return []
+
+    if len(attachments) > MAX_ATTACHMENTS_PER_TURN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at most {MAX_ATTACHMENTS_PER_TURN} images per message",
+        )
+
+    for att in attachments:
+        if att.content_type not in EpisodicMemory.IMAGE_EXT_MAP:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported image type: {att.content_type}",
+            )
+        try:
+            raw = base64.b64decode(att.data, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="attachment is not valid base64")
+        if not raw:
+            raise HTTPException(status_code=400, detail="attachment is empty")
+        if len(raw) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"image exceeds {MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB limit",
+            )
+
+    return attachments
 
 
 # --- Chat Endpoints ---
@@ -35,6 +93,11 @@ class ChatRequest(BaseModel):
 async def chat_stream(body: ChatRequest):
     """Send a message and stream back events as SSE."""
     event_queue: asyncio.Queue = asyncio.Queue()
+
+    # Validate before the task starts: a 400 here is a real HTTP error the
+    # client can show, whereas a failure inside the stream is just an SSE
+    # error frame buried in the transcript.
+    attachments = _validate_attachments(body.attachments)
 
     async def on_event(event: dict):
         await event_queue.put(event)
@@ -50,6 +113,7 @@ async def chat_stream(body: ChatRequest):
                 session_id=body.session_id,
                 fork_from=body.fork_from,
                 set_active=body.set_active,
+                attachments=[a.model_dump() for a in attachments],
             )
         except Exception as e:
             await event_queue.put({"type": "error", "content": str(e)})
@@ -153,6 +217,35 @@ async def code_reset_venv(body: ResetVenvRequest):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"reset failed: {e}")
+
+
+# --- Uploaded Images ---
+
+
+@router.get("/uploads/{email}/{filename}")
+async def get_upload(email: str, filename: str):
+    """Serve an image the learner attached to a chat turn.
+
+    Deliberately a route rather than a StaticFiles mount over data/uploads:
+    that tree is user data keyed by email, and the filename reaches us as a
+    URL segment. Everything is resolved and then checked for containment, so
+    a traversal attempt lands outside the user's directory and is refused.
+    """
+    from fastapi.responses import FileResponse
+
+    from backend.episodic import EpisodicMemory
+
+    uploads_dir = os.path.realpath(EpisodicMemory.uploads_dir_for(email))
+    target = os.path.realpath(os.path.join(uploads_dir, filename))
+
+    # os.path.commonpath, not startswith: the latter says /a/b-evil is inside
+    # /a/b. Compare resolved paths so symlinks can't sidestep the check.
+    if target != uploads_dir and os.path.commonpath([uploads_dir, target]) != uploads_dir:
+        raise HTTPException(status_code=404, detail="not found")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="not found")
+
+    return FileResponse(target)
 
 
 # --- Knowledge & Quiz Endpoints ---
@@ -304,6 +397,40 @@ class BranchRequest(BaseModel):
     message: str
 
 
+@router.get("/palette.css")
+async def palette_css():
+    """Serve the derived track/category palette as CSS custom properties.
+
+    Curriculum colour is owned by knowledge.py — this endpoint stops the
+    frontend from keeping its own drifting copy. Linked as a stylesheet, so
+    the browser caches it like any other CSS.
+    """
+    from backend.knowledge import build_oklch_palette, CATEGORY_LABELS, TRACK_ORDER
+
+    lines = [
+        "/* Generated from backend/knowledge.py — do not edit by hand.",
+        "   Curriculum colour is derived per theme: a hue that glows on black",
+        "   is thin and washed out on white, so both ramps are emitted and the",
+        "   data-theme attribute selects between them. */",
+    ]
+
+    for theme, selector in (("dark", ":root"), ("light", '[data-theme="light"]')):
+        palette = build_oklch_palette(theme)
+        lines.append(f"{selector} {{")
+        for track in TRACK_ORDER:
+            if track in palette["tracks"]:
+                lines.append(f"  --track-{track}: {palette['tracks'][track]};")
+        lines.append("")
+        for cat, css in sorted(palette["categories"].items()):
+            label = CATEGORY_LABELS.get(cat, cat.replace("_", " ").title())
+            lines.append(f"  --cat-{cat.replace('_', '-')}: {css};  /* {label} */")
+        lines.append("}")
+        lines.append("")
+    # Must be served as text/css — browsers refuse to apply a stylesheet with
+    # any other MIME type, and the custom properties silently resolve to "".
+    return Response(content="\n".join(lines), media_type="text/css")
+
+
 @router.get("/sessions/{email}")
 async def list_sessions(email: str):
     """List all sessions for a user."""
@@ -354,6 +481,132 @@ async def get_session_history(email: str, session_id: str):
     # read_turns is the single source of truth: it migrates legacy sessions and
     # strips superseded turns, so edited-away content never reaches the client.
     return {"turns": read_turns(email, session_id), "session_id": session_id}
+
+
+@router.delete("/sessions/{email}/{session_id}")
+async def remove_session(email: str, session_id: str):
+    """Delete a session and its transcript."""
+    from backend.memory import delete_session
+
+    if not delete_session(email, session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted", "session_id": session_id}
+
+
+@router.post("/sessions/{email}/prune")
+async def prune_sessions(email: str):
+    """Drop sessions that were created but never used."""
+    from backend.memory import prune_empty_sessions
+
+    removed = prune_empty_sessions(email)
+    return {"status": "ok", "removed": removed, "count": len(removed)}
+
+
+def _clean_title(raw: str) -> str:
+    """Reduce a model reply to a bare title.
+
+    Small models sometimes ignore "reply with the title only" and prefix
+    something like "Based on the transcript, the subject covered is: X".
+    Strip that lead-in rather than storing it, and drop a trailing clause so
+    a truncated sentence never becomes the name.
+    """
+    import re as _re
+
+    # Take the first non-empty line: a model that ignores the instruction
+    # tends to answer with a list or a paragraph, and the rest is noise.
+    first = next((ln for ln in raw.strip().splitlines() if ln.strip()), "")
+    text = " ".join(first.split())
+    # Drop list markers ("1.", "-", "*") and markdown emphasis.
+    text = _re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", text)
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    # A dash-separated gloss ("Dictionary creation - Creating a dict") keeps
+    # only the head.
+    text = _re.split(r"\s+[-–—]\s+", text)[0]
+    # Prefer the part after a lead-in colon ("… the subject covered is: X").
+    if ":" in text:
+        head, _, tail = text.partition(":")
+        if len(head.split()) > 3 and tail.strip():
+            text = tail.strip()
+    text = _re.sub(
+        r"^(?:the\s+)?(?:title|subject|topic)(?:\s+\w+){0,3}\s+(?:is|would be)\s+",
+        "", text, flags=_re.I,
+    )
+    text = text.strip().strip('"').strip("'").rstrip(".")
+
+    # If it still opens like a sentence about the task, the model ignored the
+    # instruction and no amount of trimming yields a real title — reject it
+    # so the caller can keep the existing name rather than store prose.
+    if _re.match(r"^(looking at|based on|here|this (?:conversation|session)|"
+                 r"the (?:conversation|session|learner|student))\b", text, _re.I):
+        return ""
+
+    words = text.split()
+    if len(words) > 7:
+        text = " ".join(words[:7])
+    return text[:48].strip()
+
+
+@router.post("/sessions/{email}/{session_id}/retitle")
+async def retitle_session(email: str, session_id: str):
+    """Give a session a short title based on what it actually covered.
+
+    Called once a conversation has enough turns to have a real subject —
+    the first message alone is often a greeting, or the topic drifts. Reuses
+    the same one-shot summarizer pattern as the side-chat fold: no memory
+    tools, so it cannot write anything on its own.
+    """
+    from backend.agent import run_agent_internal
+    from backend.memory import read_turns, rename_session
+
+    turns = read_turns(email, session_id)
+    exchanges = [
+        t for t in turns
+        if t.get("type") in ("user", "assistant_message") and t.get("content")
+    ]
+    if not exchanges:
+        raise HTTPException(status_code=404, detail="Session has no conversation")
+
+    transcript = "\n\n".join(
+        f"{'User' if t['type'] == 'user' else 'Tutor'}: {str(t['content'])[:600]}"
+        for t in exchanges[:12]
+    )
+
+    async def ask(prompt: str) -> str:
+        chunks: list[str] = []
+
+        async def collect(event: dict):
+            if event.get("type") == "assistant_message" and event.get("content"):
+                chunks.append(event["content"])
+
+        await run_agent_internal(
+            prompt=prompt,
+            system_prompt="You reply with a short title and nothing else.",
+            on_event=collect,
+        )
+        return _clean_title("".join(chunks))
+
+    title = await ask(
+        "Give this tutoring conversation a title of at most 5 words naming "
+        "the specific subject covered. No quotes, no punctuation at the end, "
+        "no preamble — reply with the title only.\n\n"
+        f"--- transcript ---\n{transcript}"
+    )
+
+    # A long or rambling transcript sometimes draws an explanation instead of
+    # a title. One firmer retry on a shorter excerpt is usually enough.
+    if not title:
+        title = await ask(
+            "TITLE ONLY. Three to five words. No sentence, no explanation, "
+            "no list, no colon.\n\nExample good replies:\n"
+            "Python Dictionary Basics\nCAP Theorem And Tradeoffs\n\n"
+            f"--- transcript ---\n{transcript[:1500]}"
+        )
+
+    if not title:
+        raise HTTPException(status_code=502, detail="Could not generate a title")
+
+    rename_session(email, session_id, title)
+    return {"session_id": session_id, "name": title}
 
 
 @router.post("/sessions/{email}/{session_id}/branch")
@@ -806,3 +1059,236 @@ async def save_feedback_file(email: str, aspect: str, body: FeedbackBody):
         raise HTTPException(status_code=400, detail=f"Unknown aspect {aspect!r}")
     save_user_feedback(email, aspect, body.content)
     return {"ok": True}
+
+
+# --- Notes Endpoints ---
+#
+# A note is a canvas of absolutely-positioned blocks, optionally over a
+# rasterized PDF. Images and pages are NOT stored in the note document — they
+# go through the same save_attachment/uploads path as chat attachments, so
+# there is exactly one asset tree and one traversal check in this codebase.
+
+
+class NoteCreateBody(BaseModel):
+    title: str = ""
+
+
+class NoteSaveBody(BaseModel):
+    """Partial update — only fields that are sent get written."""
+    title: str | None = None
+    canvas_height: int | None = None
+    next_z: int | None = None
+    blocks: list[dict] | None = None
+    groups: dict | None = None
+    doc: dict | None = None
+
+
+class NotePinBody(BaseModel):
+    session_id: str | None = None   # null unpins
+
+
+class NoteImageBody(BaseModel):
+    data: str                       # base64, no data: prefix
+    content_type: str = "image/png"
+
+
+@router.get("/notes/{email}")
+async def list_notes_route(email: str):
+    """List a user's notes for the picker (denormalized index, one read)."""
+    from backend.notes import list_notes
+    return {"notes": list_notes(email)}
+
+
+@router.post("/notes/{email}")
+async def create_note_route(email: str, body: NoteCreateBody):
+    """Create an empty note."""
+    from backend.notes import create_note
+    return create_note(email, body.title)
+
+
+@router.get("/notes/{email}/pinned/{session_id}")
+async def get_pinned_note(email: str, session_id: str):
+    """Which note is pinned to this chat, following branch ancestry.
+
+    Declared before /notes/{email}/{note_id} so "pinned" isn't captured as a
+    note id — FastAPI matches routes in declaration order.
+    """
+    from backend.notes import get_pinned
+    return {"note_id": get_pinned(email, session_id)}
+
+
+@router.get("/notes/{email}/{note_id}")
+async def get_note_route(email: str, note_id: str):
+    """Full note document, including every block."""
+    from backend.notes import get_note
+    note = get_note(email, note_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return note
+
+
+@router.put("/notes/{email}/{note_id}")
+async def save_note_route(email: str, note_id: str, body: NoteSaveBody):
+    """Persist canvas state. Called by autosave, so it must stay cheap."""
+    from backend.notes import save_note, validate_blocks
+
+    blocks = body.blocks
+    if blocks is not None:
+        try:
+            blocks = validate_blocks(blocks)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    note = save_note(
+        email,
+        note_id,
+        title=body.title,
+        canvas_height=body.canvas_height,
+        next_z=body.next_z,
+        blocks=blocks,
+        groups=body.groups,
+        doc=body.doc,
+    )
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"ok": True, "updated_at": note["updated_at"]}
+
+
+@router.delete("/notes/{email}/{note_id}")
+async def delete_note_route(email: str, note_id: str):
+    """Delete a note. Referenced images survive — chat turns may use them."""
+    from backend.notes import delete_note
+    if not delete_note(email, note_id):
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"ok": True}
+
+
+@router.put("/notes/{email}/{note_id}/pin")
+async def pin_note_route(email: str, note_id: str, body: NotePinBody):
+    """Pin this note to a chat session, or unpin with a null session_id."""
+    from backend.notes import pin_note
+    if not pin_note(email, note_id, body.session_id):
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"ok": True}
+
+
+@router.post("/notes/{email}/{note_id}/images")
+async def add_note_image(email: str, note_id: str, body: NoteImageBody):
+    """Store a pasted screenshot and return its URL plus true dimensions.
+
+    Reuses the chat-attachment validation and storage wholesale: same type
+    whitelist, same size cap, same uploads directory, same serving route. The
+    only addition is width/height, which the canvas needs to size the block at
+    the image's real aspect ratio.
+    """
+    import base64
+    import binascii
+
+    from backend.episodic import EpisodicMemory
+    from backend.notes import get_note
+
+    if get_note(email, note_id) is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    if body.content_type not in EpisodicMemory.IMAGE_EXT_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported image type: {body.content_type}",
+        )
+    try:
+        raw = base64.b64decode(body.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="image is not valid base64")
+    if not raw:
+        raise HTTPException(status_code=400, detail="image is empty")
+    if len(raw) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"image exceeds {MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB limit",
+        )
+
+    saved = EpisodicMemory.save_attachment(email, body.data, body.content_type)
+
+    from backend.pdfimport import image_size
+    dims = image_size(raw)
+
+    return {
+        "ok": True,
+        "src": f"/api/uploads/{quote(email)}/{saved['filename']}",
+        "w": dims[0] if dims else None,
+        "h": dims[1] if dims else None,
+    }
+
+
+@router.post("/notes/{email}/{note_id}/document")
+async def import_note_document(email: str, note_id: str, file: UploadFile = File(...)):
+    """Rasterize an uploaded PDF into the note's background page column.
+
+    Multipart rather than base64 here: a 30MB lecture PDF would become ~40MB
+    of JSON string in browser memory. Rendering runs on a worker thread so a
+    200-page import doesn't stall the event loop — chat streams over SSE from
+    this same process.
+    """
+    import asyncio
+
+    from backend.episodic import EpisodicMemory
+    from backend.notes import get_note, set_document
+    from backend.pdfimport import (
+        MAX_PDF_BYTES,
+        PdfImportUnavailable,
+        rasterize_pdf,
+    )
+
+    if get_note(email, note_id) is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    if len(data) > MAX_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF exceeds {MAX_PDF_BYTES // (1024 * 1024)}MB limit",
+        )
+
+    out_dir = EpisodicMemory.uploads_dir_for(email)
+    try:
+        pages = await asyncio.to_thread(rasterize_pdf, data, out_dir, email)
+    except PdfImportUnavailable:
+        raise HTTPException(
+            status_code=501,
+            detail="PDF import needs PyMuPDF on the server (pip install PyMuPDF)",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    doc = {
+        "kind": "pdf",
+        "filename": file.filename or "document.pdf",
+        "page_gap": 24,
+        "layout_width": None,   # set by the client once it lays the pages out
+        "pages": pages,
+    }
+    if set_document(email, note_id, doc) is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"ok": True, "doc": doc}
+
+
+@router.delete("/notes/{email}/{note_id}/document")
+async def clear_note_document(email: str, note_id: str):
+    """Drop the background pages but keep every annotation written on them."""
+    from backend.notes import set_document
+    if set_document(email, note_id, None) is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"ok": True}
+
+
+@router.get("/notes-capabilities")
+async def notes_capabilities():
+    """What the notes UI can offer — currently just whether PDF import works.
+
+    Lets the client disable the import button with a real explanation instead
+    of letting the user discover a 501 by trying.
+    """
+    from backend.pdfimport import is_available
+    return {"pdf_import": is_available()}

@@ -83,6 +83,7 @@ async def run_agent(
     session_id: str | None = None,
     fork_from: str | None = None,
     set_active: bool = True,
+    attachments: list[dict] | None = None,
 ) -> str | None:
     """Run the learning agent for a user.
 
@@ -103,11 +104,30 @@ async def run_agent(
             the first turn; afterwards the child resumes normally.
         set_active: Whether this run should become the user's active session.
             Side-chats pass False so opening one doesn't hijack the main chat.
+        attachments: Images for THIS turn, as [{data, content_type, filename}]
+            with base64 `data`. Already validated by the route.
 
     Returns the session_id.
     """
     user_data_dir = _get_user_data_dir(email)
     episodic = _get_episodic()
+
+    # Write attachments to disk before the SDK call so the transcript can
+    # record paths. The base64 goes to the model but is never persisted.
+    saved_attachments = []
+    for att in (attachments or []):
+        try:
+            saved_attachments.append(
+                episodic.save_attachment(
+                    email,
+                    att["data"],
+                    content_type=att.get("content_type", "image/png"),
+                )
+            )
+        except Exception as e:
+            # A failed write must not sink the turn — the model can still see
+            # the image, it just won't survive reload.
+            logger.warning(f"Could not persist attachment for {email}: {e}")
 
     # Load Tier 3: Semantic memory → inject into system prompt
     knowledge_store = KnowledgeStore(user_data_dir)
@@ -173,6 +193,8 @@ async def run_agent(
         on_event=on_event,
         email=email,
         fork_session=do_fork,
+        attachments=attachments,
+        saved_attachments=saved_attachments,
     )
 
     # Save session mapping
@@ -198,16 +220,53 @@ def _unwrap_exception(exc: BaseException) -> BaseException:
     return exc
 
 
-async def _prompt_as_stream(prompt: str):
-    """Wrap a string prompt into an AsyncIterable for the SDK.
+async def _prompt_as_stream(prompt: str, attachments: list[dict] | None = None):
+    """Wrap a prompt into an AsyncIterable for the SDK.
 
     Required when mcp_servers or can_use_tool is set — the SDK raises
     ValueError for plain strings in these modes.
+
+    With attachments, `content` becomes a list of content blocks instead of a
+    string. The SDK does not inspect `content` — stream_input json.dumps-es
+    the dict straight to the CLI — so multimodal blocks pass through to the
+    Messages API unchanged.
     """
+    content: str | list[dict] = prompt
+
+    if attachments:
+        # Images before text: when the question refers to an image, the model
+        # does better having seen it first.
+        content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": att.get("content_type", "image/png"),
+                    "data": att["data"],
+                },
+            }
+            for att in attachments
+        ]
+        # An image-only turn still needs a text block — a bare image gives the
+        # model nothing to act on.
+        #
+        # The wording matters: anything resembling "take a look at this image"
+        # reads as a pointer to a file on disk, and the model goes hunting for
+        # a path instead of reading the image already in its context. Say
+        # explicitly that the image is attached above.
+        content.append({
+            "type": "text",
+            "text": prompt or (
+                "The learner attached this image with no accompanying text. "
+                "The image is included directly in this message — do not look "
+                "for a file on disk. Describe what you see and help them with it."
+            ),
+        })
+
     yield {
         "type": "user",
         "session_id": "",
-        "message": {"role": "user", "content": prompt},
+        "message": {"role": "user", "content": content},
         "parent_tool_use_id": None,
     }
 
@@ -220,6 +279,8 @@ async def run_agent_internal(
     on_event=None,
     email: str | None = None,
     fork_session: bool = False,
+    attachments: list[dict] | None = None,
+    saved_attachments: list[dict] | None = None,
 ) -> str | None:
     """Internal SDK call — runs query() and streams events.
 
@@ -227,6 +288,10 @@ async def run_agent_internal(
 
     fork_session: when resuming, split off a new session id instead of
     continuing the resumed one. The parent's transcript stays untouched.
+
+    attachments: base64 images for this turn, sent to the model as content
+    blocks. saved_attachments: the same images' on-disk metadata, recorded to
+    the transcript. Split because base64 must never be persisted.
     """
     episodic = _get_episodic()
 
@@ -262,8 +327,13 @@ async def run_agent_internal(
     captured_session_id = None
     memory: MemoryStore | None = None
 
-    # SDK requires AsyncIterable prompt when mcp_servers is set
-    prompt_input = _prompt_as_stream(prompt) if options.mcp_servers else prompt
+    # SDK requires AsyncIterable prompt when mcp_servers is set. Attachments
+    # force the streaming path regardless: a plain string can't carry images.
+    prompt_input = (
+        _prompt_as_stream(prompt, attachments)
+        if (options.mcp_servers or attachments)
+        else prompt
+    )
 
     # Timing around the SDK handshake. The initialize control request has a
     # 60s ceiling inside the SDK; when it blows, the traceback says nothing
@@ -294,7 +364,7 @@ async def run_agent_internal(
                         model=settings.MODEL_NAME,
                         system_prompt=system_prompt,
                     )
-                    memory.record_user_message(prompt)
+                    memory.record_user_message(prompt, attachments=saved_attachments)
 
                 if on_event:
                     await on_event({

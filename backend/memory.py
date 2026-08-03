@@ -224,8 +224,14 @@ def _session_name_from_conversation(session_dir: str) -> str:
     try:
         turns = _apply_supersedes(_read_raw_lines(_ensure_jsonl(session_dir)))
         for turn in turns:
-            if turn.get("type") == "user" and turn.get("content"):
+            if turn.get("type") != "user":
+                continue
+            if turn.get("content"):
                 return turn["content"][:40].strip()
+            # An image-only opening turn has no text to name the session
+            # after; without this it would fall through to "Untitled Session".
+            if turn.get("attachments"):
+                return "Image question"
     except Exception:
         pass
     return "Untitled Session"
@@ -366,6 +372,59 @@ def set_active_session(email: str, session_id: str) -> bool:
     return True
 
 
+def delete_session(email: str, session_id: str) -> bool:
+    """Remove a session from the registry and delete its transcript.
+
+    Returns True if it existed. If the deleted session was active, the
+    pointer moves to the most recently active survivor so the user isn't
+    left pointing at nothing.
+
+    The SDK's own transcript under ~/.claude/projects/ is left alone — it is
+    not ours to remove, and an orphaned .jsonl there is harmless.
+    """
+    data = _read_user_json(email)
+    sessions = data.get("sessions", [])
+    remaining = [s for s in sessions if s["session_id"] != session_id]
+    if len(remaining) == len(sessions):
+        return False
+
+    data["sessions"] = remaining
+    if data.get("active_session") == session_id:
+        data["active_session"] = (
+            max(remaining, key=lambda s: s.get("last_active", ""))["session_id"]
+            if remaining else None
+        )
+
+    safe = _safe_email(email)
+    with open(os.path.join(USERS_DIR, safe, "user.json"), "w") as f:
+        json.dump(data, f, indent=2)
+
+    session_dir = os.path.join(USERS_DIR, safe, "sessions", session_id)
+    if os.path.isdir(session_dir):
+        shutil.rmtree(session_dir, ignore_errors=True)
+    return True
+
+
+def prune_empty_sessions(email: str) -> list[str]:
+    """Drop sessions that were created but never used.
+
+    Clicking "+" registers a session before any message is sent, so an
+    abandoned click leaves a permanent empty row in the sidebar. Returns the
+    ids removed. Never touches the active session — the user may be about to
+    type into it.
+    """
+    active = get_active_session(email)
+    removed = []
+    for s in list(get_user_sessions(email)):
+        sid = s["session_id"]
+        if sid == active:
+            continue
+        if not read_turns(email, sid):
+            if delete_session(email, sid):
+                removed.append(sid)
+    return removed
+
+
 def rename_session(email: str, session_id: str, name: str) -> bool:
     """Rename a session. Returns True if found."""
     data = _read_user_json(email)
@@ -472,8 +531,22 @@ class MemoryStore:
 
         self._write_metadata(model, system_prompt)
 
-    def record_user_message(self, content: str):
-        self._append_turn({"type": "user", "content": content})
+    def record_user_message(self, content: str, attachments: list[dict] | None = None):
+        """Record a user turn, optionally with image attachment metadata.
+
+        Only {filename, content_type} is stored — never base64, and never the
+        absolute path, which would leak the server's directory layout into a
+        file the frontend reads. The serving route rebuilds the path from the
+        email and filename.
+        """
+        turn = {"type": "user", "content": content}
+        if attachments:
+            turn["attachments"] = [
+                {"filename": a["filename"], "content_type": a.get("content_type", "")}
+                for a in attachments
+                if a.get("filename")
+            ]
+        self._append_turn(turn)
 
     def record_event(self, event: dict):
         event_type = event.get("type")

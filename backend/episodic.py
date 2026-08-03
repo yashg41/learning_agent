@@ -308,6 +308,71 @@ class EpisodicMemory:
     # Image Handling
     # =================================================================
 
+    # MIME types accepted for image input, mapped to file extensions. Shared
+    # by save_image (agent-captioned memories) and save_attachment (images the
+    # learner attaches to a chat turn).
+    IMAGE_EXT_MAP = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+
+    @classmethod
+    def uploads_dir_for(cls, email: str) -> str:
+        """Absolute path of a user's uploads directory.
+
+        The email is sanitized with the same helper the rest of the store
+        uses, so it can never contribute path separators or "..": this value
+        is the trust anchor the serving route checks containment against, and
+        an email that escaped here would move the anchor itself rather than
+        fail the check. Both the writer and the reader go through this
+        function, so they agree on the directory.
+        """
+        from backend.memory import _safe_email
+
+        return os.path.join(settings.DATA_DIR, "uploads", _safe_email(email))
+
+    @classmethod
+    def save_attachment(
+        cls,
+        email: str,
+        image_data: str,
+        content_type: str = "image/png",
+    ) -> dict:
+        """Write a chat attachment to disk and return its metadata.
+
+        Deliberately NOT save_image(): that one demands an agent-written
+        caption and records a ChromaDB episode, which is right for the agent's
+        image-memory tool but wrong here — an attachment is just part of a
+        chat turn, and the model has not seen it yet at the point we save it.
+
+        The filename is generated, never taken from the client: it later comes
+        straight back as a URL path segment.
+
+        Returns {filename, path, content_type}. Base64 is never persisted.
+        """
+        ext = cls.IMAGE_EXT_MAP.get(content_type, ".png")
+
+        uploads_dir = cls.uploads_dir_for(email)
+        os.makedirs(uploads_dir, exist_ok=True)
+
+        now = datetime.now(timezone.utc)
+        filename = f"img_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+        file_path = os.path.join(uploads_dir, filename)
+
+        image_bytes = base64.b64decode(image_data)
+        with open(file_path, "wb") as f:
+            f.write(image_bytes)
+
+        logger.info(f"Attachment saved: {file_path} ({len(image_bytes)} bytes)")
+        return {
+            "filename": filename,
+            "path": file_path,
+            "content_type": content_type,
+        }
+
     def save_image(
         self,
         email: str,
@@ -335,17 +400,10 @@ class EpisodicMemory:
             dict with {file_path, caption, episode_id}
         """
         # Determine file extension from content type
-        ext_map = {
-            "image/png": ".png",
-            "image/jpeg": ".jpg",
-            "image/jpg": ".jpg",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-        }
-        ext = ext_map.get(content_type, ".png")
+        ext = self.IMAGE_EXT_MAP.get(content_type, ".png")
 
         # Create uploads directory for this user
-        uploads_dir = os.path.join(settings.DATA_DIR, "uploads", email)
+        uploads_dir = self.uploads_dir_for(email)
         os.makedirs(uploads_dir, exist_ok=True)
 
         # Generate filename if not provided
