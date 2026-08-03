@@ -4,3 +4,10 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 python-dotenv
+# Multipart file uploads (PDF import into the notes canvas). FastAPI needs this
+# installed to declare an UploadFile parameter at all.
+python-multipart
+# Rasterizes uploaded PDFs into page images so they can be annotated, and reads
+# image dimensions. Imported lazily — without it the app still runs and only
+# PDF import is disabled.
+PyMuPDF

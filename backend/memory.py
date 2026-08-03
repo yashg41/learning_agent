@@ -224,8 +224,14 @@ def _session_name_from_conversation(session_dir: str) -> str:
     try:
         turns = _apply_supersedes(_read_raw_lines(_ensure_jsonl(session_dir)))
         for turn in turns:
-            if turn.get("type") == "user" and turn.get("content"):
+            if turn.get("type") != "user":
+                continue
+            if turn.get("content"):
                 return turn["content"][:40].strip()
+            # An image-only opening turn has no text to name the session
+            # after; without this it would fall through to "Untitled Session".
+            if turn.get("attachments"):
+                return "Image question"
     except Exception:
         pass
     return "Untitled Session"
@@ -525,8 +531,22 @@ class MemoryStore:
 
         self._write_metadata(model, system_prompt)
 
-    def record_user_message(self, content: str):
-        self._append_turn({"type": "user", "content": content})
+    def record_user_message(self, content: str, attachments: list[dict] | None = None):
+        """Record a user turn, optionally with image attachment metadata.
+
+        Only {filename, content_type} is stored — never base64, and never the
+        absolute path, which would leak the server's directory layout into a
+        file the frontend reads. The serving route rebuilds the path from the
+        email and filename.
+        """
+        turn = {"type": "user", "content": content}
+        if attachments:
+            turn["attachments"] = [
+                {"filename": a["filename"], "content_type": a.get("content_type", "")}
+                for a in attachments
+                if a.get("filename")
+            ]
+        self._append_turn(turn)
 
     def record_event(self, event: dict):
         event_type = event.get("type")
