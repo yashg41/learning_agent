@@ -475,11 +475,15 @@ async function toggleNotes(force) {
 
     if (!notesOpen) { await flushSave(); saveNotesUi(); return; }
 
-    // The notebook and notes panes both want half the centre column; three
-    // panes at flex:1 leaves none of them usable.
+    // The right-hand panes all want the same half of the centre column;
+    // several at flex:1 leaves none of them usable.
     if (typeof notebookOpen !== "undefined" && notebookOpen
         && typeof toggleNotebook === "function") {
         toggleNotebook();
+    }
+    if (typeof demoOpen !== "undefined" && demoOpen
+        && typeof toggleDemo === "function") {
+        await toggleDemo(false);
     }
 
     const email = getEmail();
@@ -1761,6 +1765,13 @@ function onCanvasPointerDown(e) {
     }
 
     if (e.button !== 0) return;
+
+    // A pointerdown inside the open editor belongs to the textarea: clicking
+    // to place the caret, or dragging to select text. Handling it here closed
+    // the editor and started a block drag instead, so the caret could not be
+    // moved with the mouse and selecting a line dragged the whole block.
+    if (editing && e.target.closest(".nb-edit")) return;
+
     if (editing) { exitEdit(); }
 
     const resizeNode = e.target.closest(".nb-resize");
@@ -2049,6 +2060,9 @@ function nearArrow(a, pt, tol) {
 
 function onCanvasDblClick(e) {
     if (!note) return;
+    // Double-click inside the editor selects a word — leave it to the
+    // textarea rather than re-entering edit mode and collapsing the caret.
+    if (editing && e.target.closest(".nb-edit")) return;
     const pt = canvasPoint(e);
     const hit = blockAtPoint(pt);
     if (hit) {
@@ -2203,6 +2217,8 @@ function paneSplitKey() {
 function openRightPane() {
     const notes = document.getElementById("notes-pane");
     if (notes && notes.style.display !== "none") return notes;
+    const demo = document.getElementById("demo-pane");
+    if (demo && demo.style.display !== "none") return demo;
     const nb = document.getElementById("notebook-pane");
     if (nb && nb.style.display !== "none") return nb;
     return null;

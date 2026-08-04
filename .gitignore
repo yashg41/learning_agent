@@ -20,8 +20,18 @@ frontend_backup_*/
 # Per-user feedback overrides (written at runtime, keyed by learner email)
 feedback/users/
 
-# Local Claude Code config (machine-specific)
-.claude/
+# Local Claude Code config (machine-specific).
+#
+# Ignore the contents rather than the directory itself: git will not descend
+# into an excluded directory, so a `!` rule for anything inside `.claude/`
+# would never be reached. Excluding `.claude/*` instead leaves the directory
+# walkable so the negations below can take effect.
+.claude/*
+# The tutoring agent loads these at runtime via setting_sources=["project"] in
+# backend/agent.py, which makes them application code rather than local config.
+# Without them a fresh clone gets the Demo pane and the save_demo tool but no
+# instructions, and the feature silently does nothing.
+!.claude/skills/
 
 # Stray serialized data — runtime state must never be committed.
 # Config files that legitimately need these extensions are re-included below.
@@ -30,6 +40,9 @@ feedback/users/
 !package.json
 !package-lock.json
 !tsconfig.json
+# Skill assets are versioned alongside their SKILL.md — the blanket *.json rule
+# above would otherwise drop a bundled data file without any warning.
+!.claude/skills/**/*.json
 
 # OS cruft
 .DS_Store

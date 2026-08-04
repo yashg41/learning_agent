@@ -244,6 +244,11 @@ body.is-resizing-panes .notes-scroll { pointer-events: none; }
    can't fight the pointer capture. Idle blocks keep normal scrolling. */
 .notes-canvas.is-dragging .nb-block { touch-action: none; }
 
+/* The editor owns its own gestures — drag-to-select text, and touch scrolling
+   within a long block. Without this the canvas's drag handling swallows them. */
+.nb-block.is-editing { touch-action: auto; }
+.nb-edit { touch-action: auto; user-select: text; cursor: text; }
+
 .notes-pages {
     position: absolute;
     inset: 0;

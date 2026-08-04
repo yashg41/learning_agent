@@ -596,6 +596,92 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             logger.error(f"get_feedback error: {e}", exc_info=True)
             return _error_result(f"Error loading feedback: {e}")
 
+    @tool(
+        "save_demo",
+        "Save a self-contained interactive HTML demo so the learner can open "
+        "and play with it. Call this ONLY when the learner has explicitly "
+        "asked to see, visualize, or interact with something — never "
+        "volunteer a demo. The HTML must be a complete document with all CSS "
+        "and JS inline: it runs in a sandboxed frame with no network access, "
+        "so any external URL makes it render blank.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short name for the demo, e.g. 'Consistent hashing ring'",
+                },
+                "html": {
+                    "type": "string",
+                    "description": (
+                        "Complete self-contained HTML document. Inline all CSS "
+                        "and JS. No CDN links, external fonts, or remote images."
+                    ),
+                },
+                "concept_id": {
+                    "type": "string",
+                    "description": "Concept this demonstrates, e.g. 'consistent_hashing'",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One line telling the learner what to try first",
+                },
+            },
+            "required": ["title", "html"],
+        },
+    )
+    async def save_demo_tool(args):
+        """Store a demo and return a reference to it.
+
+        Deliberately returns metadata only, never the HTML: the tool result
+        lands in the conversation transcript, and echoing a few hundred lines
+        back would be re-sent to the model on every later turn and slow replay.
+        The frontend fetches the HTML separately and renders it inside a
+        sandboxed iframe — it is never injected into the chat DOM.
+        """
+        from backend.demos import save_demo as store_demo
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            meta = store_demo(
+                email=email,
+                title=args.get("title", ""),
+                html=args.get("html", ""),
+                concept_id=args.get("concept_id", ""),
+                summary=args.get("summary", ""),
+            )
+            from backend.demos import missing_element_ids
+
+            payload = {
+                "demo_id": meta["id"],
+                "title": meta["title"],
+                "status": "saved",
+                "note": "The demo is now open in the learner's Demo pane. "
+                        "Tell them briefly what to try.",
+            }
+
+            # Saved, but likely broken on first click. A warning rather than a
+            # rejection: an id can legitimately be created at runtime, so
+            # refusing a working demo would be worse than flagging a suspect
+            # one. If it is a real mismatch, fix it and call save_demo again.
+            missing = missing_element_ids(args.get("html", ""))
+            if missing:
+                payload["warning"] = (
+                    "getElementById looks up "
+                    + ", ".join(sorted(missing))
+                    + " but no element has that id. If these are not created at "
+                      "runtime the demo will throw on first click — fix the ids "
+                      "and save again."
+                )
+
+            return _text_result(json.dumps(payload))
+        except ValueError as e:
+            # Actionable on purpose — the model can fix the HTML and retry.
+            return _error_result(f"Demo rejected: {e}")
+        except Exception as e:
+            logger.error(f"save_demo error: {e}", exc_info=True)
+            return _error_result(f"Error saving demo: {e}")
+
     # =====================================================================
     # Create MCP Server
     # =====================================================================
@@ -615,6 +701,7 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             update_learner_profile_tool,
             generate_quiz_question_tool,
             get_feedback_tool,
+            save_demo_tool,
         ],
     )
 

@@ -1,0 +1,144 @@
+/* Demo pane — sandboxed interactive demos beside the chat.
+ *
+ * Kept out of styles.css for the same reason notes.css is: these selectors
+ * serve one pane on one page, and styles.css is shared with graph.html and
+ * chroma.html. */
+
+.demo-pane {
+    flex: 1;
+    /* Matches PANE_MIN in notes.js so the divider's clamp and the CSS
+       minimum agree — otherwise the drag stops before the CSS floor and the
+       last few pixels feel stuck. */
+    min-width: 320px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid var(--border-strong);
+    background: var(--bg-primary);
+}
+
+.demo-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+}
+
+.demo-picker {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-tertiary);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 5px 8px;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.demo-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.demo-header-actions .header-btn { padding: 5px 8px; }
+
+/* Caption strip: what the demo is and what to try. Collapses when empty so a
+   demo saved without a summary doesn't leave a blank band. */
+.demo-caption {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+}
+
+.demo-caption:has(#demo-title:empty):has(#demo-summary:empty) { display: none; }
+
+.demo-title {
+    display: block;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-bright);
+}
+
+.demo-summary {
+    display: block;
+    font-size: var(--text-2xs);
+    color: var(--text-muted);
+    margin-top: 1px;
+}
+
+.demo-body {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    background: var(--bg-primary);
+}
+
+/* The frame is the security boundary — see demo-pane.js. White background so
+   a demo that sets no background of its own is still readable rather than
+   showing through to the app's dark surface. */
+.demo-frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #fff;
+}
+
+.demo-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: var(--space-5);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+}
+
+.demo-toast {
+    position: absolute;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    background: var(--bg-overlay);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 8px 14px;
+    font-size: var(--text-xs);
+    box-shadow: var(--shadow-lg);
+    z-index: 10;
+    max-width: 90%;
+    text-align: center;
+}
+
+.demo-toast.is-error { border-color: var(--error); color: var(--error); }
+
+/* Tool card variant: a save_demo call would otherwise dump several hundred
+   lines of HTML into the card's JSON detail view. */
+.tool-card.is-demo .tool-detail { display: none; }
+
+.demo-open-btn {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    cursor: pointer;
+    margin-left: auto;
+}
+
+.demo-open-btn:hover { background: var(--accent-hover); }

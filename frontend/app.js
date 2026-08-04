@@ -5,6 +5,7 @@ let currentEmail = "";
 let currentSessionId = null;
 let isStreaming = false;
 
+
 // =====================================================================
 // Theme
 //
@@ -700,6 +701,43 @@ function addToolCard(toolName, toolInput, toolUseId, container) {
         summary = `${toolInput.score}/${toolInput.total}`;
     } else if (displayName === "update_learner_profile") {
         summary = toolInput.level || "profile update";
+    } else if (displayName === "save_demo") {
+        summary = toolInput.title || "interactive demo";
+    }
+
+    // A demo's tool_input holds the entire HTML document. Dumping that into
+    // the expandable JSON view would bury the conversation in markup, so show
+    // a title and a way back to the pane instead.
+    if (displayName === "save_demo") {
+        div.classList.add("is-demo");
+        div.innerHTML = `
+            <div class="tool-header">
+                <span class="tool-icon">▶</span>
+                <span class="tool-name">demo</span>
+                <span class="tool-summary">${escapeHtml(summary)}</span>
+                <button class="demo-open-btn" type="button">Open</button>
+            </div>
+        `;
+        const btn = div.querySelector(".demo-open-btn");
+        if (btn) {
+            const cardTitle = toolInput.title || "";
+            const cardConcept = toolInput.concept_id || "";
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                // Open THIS card's demo, resolved server-side from the args
+                // the call was made with. Previously this only opened the
+                // pane, so it showed whatever was last loaded — clicking an
+                // older card gave the wrong demo.
+                if (typeof openDemoByTitle === "function") {
+                    openDemoByTitle(cardTitle, cardConcept);
+                } else if (typeof toggleDemo === "function") {
+                    toggleDemo(true);
+                }
+            };
+        }
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return;
     }
 
     div.innerHTML = `
@@ -1119,6 +1157,16 @@ class ChatController {
                                 assistantDiv.innerHTML = renderMarkdown(assistantText);
                             }
                             addToolCard(event.tool_name, event.tool_input, event.tool_use_id, this.messagesEl);
+                            // Open the demo from the CALL, not the result: the
+                            // SDK never delivers a tool_result event for MCP
+                            // tools (transcripts contain tool_call but no
+                            // tool_result at all), so keying off the result
+                            // meant this never ran. The call carries the title,
+                            // which is enough to find the demo once saved.
+                            if (this.isMain && cleanToolName(event.tool_name) === "save_demo"
+                                && typeof onDemoSaved === "function") {
+                                onDemoSaved(null, (event.tool_input || {}).title);
+                            }
                             // Reset assistant div for post-tool text
                             assistantDiv = null;
                             assistantText = "";
@@ -1129,7 +1177,8 @@ class ChatController {
                             break;
 
                         case "tool_result":
-                            // Optionally update tool card
+                            // Not emitted for MCP tools in practice — the demo
+                            // pane opens from the tool_call above instead.
                             break;
 
                         case "result":
@@ -2044,6 +2093,10 @@ function toggleNotebook() {
         && typeof toggleNotes === "function") {
         toggleNotes(false);
     }
+    if (notebookOpen && typeof demoOpen !== "undefined" && demoOpen
+        && typeof toggleDemo === "function") {
+        toggleDemo(false);
+    }
     if (notebookOpen && document.querySelectorAll(".cell").length === 0) {
         loadCells();
     }
@@ -2252,6 +2305,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Notes canvas. Guarded so app.js keeps working if notes.js fails to load.
     if (typeof initNotes === "function") initNotes();
+    if (typeof initDemoPane === "function") initDemoPane();
 
     // Side-chat window: drag/resize handlers and its own auto-resizing input.
     initSideChatWindow();

@@ -55,6 +55,34 @@ MCP_TOOL_NAMES = [
     "mcp__learning-tools__update_learner_profile",
     "mcp__learning-tools__generate_quiz_question",
     "mcp__learning-tools__get_feedback",
+    "mcp__learning-tools__save_demo",
+]
+# Note: skills do NOT need a "Skill" entry here. Verified against the bundled
+# CLI — a skill loads and runs with an MCP-only allowlist and no permission
+# denials. Skill bodies are injected as context, not invoked as a tool.
+
+# Built-in tools the tutor must never reach. This is the real restriction:
+# `permission_mode="bypassPermissions"` skips the check that consults
+# allowed_tools, so the allowlist above is advisory in practice, while
+# disallowed_tools is enforced in every permission mode.
+#
+# Without this the tutor happily shells out — it was seen writing a demo to
+# /tmp and leaving `python3 -m http.server 8000` running, which exposed that
+# directory on the network. A tutoring agent has no business running commands
+# or touching files; everything it legitimately needs is an MCP tool.
+DENIED_TOOL_NAMES = [
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "Read",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "Task",
 ]
 
 # Shared episodic memory instance (initialized once)
@@ -301,6 +329,23 @@ async def run_agent_internal(
         options = ClaudeAgentOptions(
             mcp_servers={"learning-tools": mcp_server},
             allowed_tools=MCP_TOOL_NAMES,
+            # Loads .claude/ from PROJECT_ROOT — specifically skills/, which is
+            # how the tutor learns to build interactive demos. The SDK default
+            # is None, which makes the CLI load nothing from disk, so without
+            # this a skill file is silently ignored.
+            #
+            # Only "project": "user" would pull in ~/.claude settings belonging
+            # to whoever runs the server, which has nothing to do with the
+            # learner and would vary by machine.
+            setting_sources=["project"],
+            # allowed_tools alone does NOT restrict anything under
+            # bypassPermissions — that mode skips the permission check the
+            # allowlist is consulted by. Observed in practice: the tutor wrote
+            # an HTML file to /tmp and started `python3 -m http.server 8000`
+            # while "restricted" to MCP tools. disallowed_tools is enforced
+            # regardless of permission mode, so the deny list is what actually
+            # holds the line.
+            disallowed_tools=DENIED_TOOL_NAMES,
             permission_mode="bypassPermissions",
             model=settings.MODEL_NAME,
             env={"ANTHROPIC_API_KEY": settings.ANTHROPIC_API_KEY},

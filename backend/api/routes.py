@@ -1292,3 +1292,60 @@ async def notes_capabilities():
     """
     from backend.pdfimport import is_available
     return {"pdf_import": is_available()}
+
+
+# --- Demo Endpoints ---
+#
+# Interactive HTML demos the tutor builds via the save_demo MCP tool. There is
+# deliberately no route that serves a demo as text/html: the HTML comes back
+# inside a JSON field and the client injects it into a sandboxed iframe via
+# srcdoc. Serving it directly would give demo JS a same-origin URL on this app.
+
+
+@router.get("/demos/{email}")
+async def list_demos_route(email: str):
+    """List a learner's saved demos for the picker."""
+    from backend.demos import list_demos
+    return {"demos": list_demos(email)}
+
+
+@router.get("/demos/{email}/resolve")
+async def resolve_demo_route(email: str, title: str = "", concept_id: str = ""):
+    """Find the demo a chat tool-card refers to, and return it ready to render.
+
+    Declared before /{demo_id} so "resolve" isn't captured as an id — FastAPI
+    matches routes in declaration order.
+
+    Returns the full document rather than just an id, so opening a demo from a
+    message is one request instead of a resolve-then-fetch round trip.
+    """
+    from backend.demos import get_demo, resolve_demo
+
+    entry = resolve_demo(email, title=title, concept_id=concept_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Demo not found")
+    demo = get_demo(email, entry["id"])
+    if demo is None:
+        raise HTTPException(status_code=404, detail="Demo not found")
+    return demo
+
+
+@router.get("/demos/{email}/{demo_id}")
+async def get_demo_route(email: str, demo_id: str):
+    """Full demo including its HTML, for rendering into the iframe."""
+    from backend.demos import get_demo
+
+    demo = get_demo(email, demo_id)
+    if demo is None:
+        raise HTTPException(status_code=404, detail="Demo not found")
+    return demo
+
+
+@router.delete("/demos/{email}/{demo_id}")
+async def delete_demo_route(email: str, demo_id: str):
+    """Delete a demo."""
+    from backend.demos import delete_demo
+
+    if not delete_demo(email, demo_id):
+        raise HTTPException(status_code=404, detail="Demo not found")
+    return {"ok": True}

@@ -13,6 +13,7 @@
     <!-- After styles.css: the notes pane overrides a few shared button rules
          and should win without !important. -->
     <link rel="stylesheet" href="/static/notes.css">
+    <link rel="stylesheet" href="/static/demo-pane.css">
     <script>
         // Applied before first paint so the page never flashes the wrong theme.
         // ?theme= wins (useful for screenshots), then the saved choice, then
@@ -85,6 +86,8 @@
                                 title="Open code runner">&gt;_ Run Code</button>
                         <button id="notes-btn" class="header-btn" onclick="toggleNotes()"
                                 title="Notes canvas (⌘E)">&#9998; Notes</button>
+                        <button id="demo-btn" class="header-btn" onclick="toggleDemo()"
+                                title="Interactive demos — ask the tutor to build one">&#9654; Demo</button>
                         <button class="rail-toggle" id="toggle-right" onclick="toggleRail('right')"
                                 title="Hide panel (⌘])">⊟</button>
                     </div>
@@ -221,6 +224,33 @@
 
                 <input type="file" id="notes-pdf-input" accept="application/pdf,.pdf" hidden>
             </div>
+
+            <!-- Demo pane (hidden by default). Holds interactive demos the
+                 tutor builds via the save_demo tool, each rendered in a
+                 sandboxed iframe created at runtime by demo-pane.js — the
+                 frame is deliberately not in the markup, so it can be
+                 destroyed and rebuilt to stop a previous demo's timers. -->
+            <div class="demo-pane" id="demo-pane" style="display:none">
+                <div class="demo-header">
+                    <select class="demo-picker" id="demo-picker" onchange="onDemoPicked()"
+                            title="Switch demo"></select>
+                    <div class="demo-header-actions">
+                        <button class="header-btn" onclick="reloadDemo()"
+                                title="Restart this demo">&#8635;</button>
+                        <button class="header-btn" onclick="deleteDemo()"
+                                title="Delete this demo">&#128465;</button>
+                        <button class="header-btn" onclick="toggleDemo()"
+                                title="Hide demos">&times;</button>
+                    </div>
+                </div>
+                <div class="demo-caption">
+                    <span class="demo-title" id="demo-title"></span>
+                    <span class="demo-summary" id="demo-summary"></span>
+                </div>
+                <div class="demo-body" id="demo-body">
+                    <div class="demo-empty" id="demo-empty"></div>
+                </div>
+            </div>
         </div>
 
         <!-- Right Panel (Knowledge Dashboard) -->
@@ -338,5 +368,8 @@
     <!-- After app.js: notes.js uses renderMarkdown/escapeHtml and reads the
          currentEmail / currentSessionId globals it declares. -->
     <script src="/static/notes.js"></script>
+    <!-- After notes.js: reuses its pane-divider helpers (syncPaneSplit) and
+         cooperates with toggleNotes for pane exclusivity. -->
+    <script src="/static/demo-pane.js"></script>
 </body>
 </html>
