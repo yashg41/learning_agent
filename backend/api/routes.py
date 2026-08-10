@@ -1,6 +1,6 @@
 """API endpoints for the Python Learning Agent."""
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from urllib.parse import quote
@@ -189,22 +189,184 @@ class RunCodeRequest(BaseModel):
     email: str
     code: str
     timeout: float | None = None
+    # Python only today. Present so a second runtime is a registry entry
+    # rather than a signature change through the whole stack.
+    language: str = "python"
 
 
 class ResetVenvRequest(BaseModel):
     email: str
 
 
+class InstallRequest(BaseModel):
+    email: str
+    packages: list[str]
+
+
+def _clamp_timeout(value: float | None) -> float:
+    from backend.sandbox import DEFAULT_TIMEOUT_SEC
+
+    return value if (value and 0 < value <= 300) else DEFAULT_TIMEOUT_SEC
+
+
+def _sse_response(event_generator):
+    return StreamingResponse(
+        event_generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disable proxy buffering, which would otherwise hold chunks back
+            # and defeat the point of streaming cell output.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _pump_sse(queue: asyncio.Queue, request: Request, cancel: asyncio.Event):
+    """Yield queued events as SSE frames until a terminal event arrives.
+
+    Also watches for client disconnect: a browser-side AbortController drops
+    the connection, and setting `cancel` is what turns that into a killpg of
+    the cell's process group instead of an orphan running to completion.
+    """
+    # Poll for disconnect on a short tick rather than only when the queue goes
+    # quiet. A cell that streams output keeps the queue busy, and a cell that
+    # streams nothing blocks the generator entirely — in both cases a
+    # keepalive-only check never fires, and the abandoned process runs to
+    # completion. This is the Stop button's actual kill path.
+    disconnect_poll = 1.0
+    idle = 0.0
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=disconnect_poll)
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    break
+                idle += disconnect_poll
+                if idle >= KEEPALIVE_SECONDS:
+                    idle = 0.0
+                    yield ": ping\n\n"
+                continue
+
+            idle = 0.0
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") in ("done", "error"):
+                return
+    finally:
+        # Starlette cancels this generator when the client goes away, so the
+        # loop above may never get to observe the disconnect itself — the
+        # CancelledError lands on whichever await is in flight. Signalling
+        # from `finally` covers both routes out, and is what actually kills
+        # the cell's process group when the learner hits Stop.
+        cancel.set()
+
+
 @router.post("/code/run")
 async def code_run(body: RunCodeRequest):
-    """Run a code cell in the user's per-user venv. Returns stdout/stderr."""
-    from backend.sandbox import run_code, DEFAULT_TIMEOUT_SEC
+    """Run a code cell and return the whole result at once.
 
-    timeout = body.timeout if (body.timeout and 0 < body.timeout <= 60) else DEFAULT_TIMEOUT_SEC
+    Kept alongside /code/run_stream: same core, useful for tests and any
+    non-browser caller that doesn't want to parse SSE.
+    """
+    from backend.sandbox import run_code, VenvError
+
     try:
-        return await run_code(body.email, body.code, timeout=timeout)
+        return await run_code(body.email, body.code,
+                              timeout=_clamp_timeout(body.timeout),
+                              language=body.language)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except VenvError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Python environment isn't ready — try 'Reset venv'. ({e})",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"runner failed: {e}")
+
+
+@router.post("/code/run_stream")
+async def code_run_stream(body: RunCodeRequest, request: Request):
+    """Run a code cell, streaming stdout/stderr as it is produced."""
+    from backend.sandbox import run_code, VenvError
+
+    queue: asyncio.Queue = asyncio.Queue()
+    cancel = asyncio.Event()
+
+    async def on_event(event: dict):
+        await queue.put(event)
+
+    async def run_and_signal_done():
+        try:
+            await run_code(body.email, body.code,
+                           timeout=_clamp_timeout(body.timeout),
+                           language=body.language,
+                           on_event=on_event, cancel=cancel)
+        except VenvError as e:
+            await queue.put({
+                "type": "error",
+                "message": f"Python environment isn't ready — try 'Reset venv'. ({e})",
+            })
+        except Exception as e:
+            logger.exception("code run failed")
+            await queue.put({"type": "error", "message": str(e)})
+
+    asyncio.create_task(run_and_signal_done())
+    return _sse_response(_pump_sse(queue, request, cancel))
+
+
+@router.post("/code/install")
+async def code_install(body: InstallRequest, request: Request):
+    """pip install into the user's venv, streaming pip's output."""
+    from backend.sandbox import install_packages, VenvError
+
+    queue: asyncio.Queue = asyncio.Queue()
+    cancel = asyncio.Event()
+
+    async def on_line(text: str):
+        await queue.put({"type": "install", "packages": body.packages, "line": text})
+
+    async def run_and_signal_done():
+        try:
+            result = await install_packages(body.email, body.packages, on_line=on_line)
+            await queue.put({"type": "done", **result})
+        except VenvError as e:
+            await queue.put({
+                "type": "error",
+                "message": f"Python environment isn't ready — try 'Reset venv'. ({e})",
+            })
+        except Exception as e:
+            logger.exception("install failed")
+            await queue.put({"type": "error", "message": str(e)})
+
+    asyncio.create_task(run_and_signal_done())
+    return _sse_response(_pump_sse(queue, request, cancel))
+
+
+@router.get("/code/artifacts/{email}/{run_id}/{filename}")
+async def code_artifact(email: str, run_id: str, filename: str):
+    """Serve a plot a cell produced.
+
+    Same containment discipline as get_upload below: everything is resolved
+    and then checked, so a traversal attempt lands outside the user's run
+    directory and is refused.
+    """
+    from fastapi.responses import FileResponse
+
+    from backend.sandbox import run_dir_for
+
+    base = os.path.realpath(run_dir_for(email, run_id))
+    target = os.path.realpath(os.path.join(base, filename))
+
+    # commonpath, not startswith: the latter says /a/b-evil is inside /a/b.
+    if target != base and os.path.commonpath([base, target]) != base:
+        raise HTTPException(status_code=404, detail="not found")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="not found")
+
+    return FileResponse(target)
 
 
 @router.post("/code/reset_venv")

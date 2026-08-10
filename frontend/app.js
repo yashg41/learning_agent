@@ -1764,6 +1764,72 @@ async function refreshKnowledge(email) {
     }
 }
 
+// =====================================================================
+// Progress groups — collapse state
+//
+// Held outside the DOM on purpose. renderProgress() replaces the panel's
+// innerHTML, and it runs after every chat turn (refreshKnowledge is called
+// from the streaming completion path among others), so state stored in the
+// markup would silently reset mid-lesson each time the tutor updated a
+// concept.
+// =====================================================================
+
+function collapsedGroupsKey() {
+    const email = getEmail();
+    return email ? `pymentor:progress-collapsed:${email}` : "pymentor:progress-collapsed:_anon";
+}
+
+function loadCollapsedGroups() {
+    try {
+        const raw = localStorage.getItem(collapsedGroupsKey());
+        return new Set(raw ? JSON.parse(raw) : []);
+    } catch (e) {
+        return new Set();
+    }
+}
+
+function saveCollapsedGroups(set) {
+    try {
+        localStorage.setItem(collapsedGroupsKey(), JSON.stringify([...set]));
+    } catch (e) {}
+}
+
+/**
+ * Collapse or expand one mastery group.
+ *
+ * Toggles the class on the existing element rather than re-rendering: a full
+ * re-render would rebuild the whole panel and lose the scroll position.
+ */
+function toggleConceptGroup(level) {
+    if (!level) return;
+    const collapsed = loadCollapsedGroups();
+    const nowCollapsed = !collapsed.has(level);
+    if (nowCollapsed) collapsed.add(level);
+    else collapsed.delete(level);
+    saveCollapsedGroups(collapsed);
+
+    const group = document.querySelector(`.concept-group.${level}`);
+    if (group) group.classList.toggle("is-collapsed", nowCollapsed);
+    const btn = group && group.querySelector(".group-toggle");
+    if (btn) {
+        btn.setAttribute("aria-expanded", String(!nowCollapsed));
+        const caret = btn.querySelector(".group-caret");
+        if (caret) caret.textContent = nowCollapsed ? "▸" : "▾";
+    }
+}
+
+function initProgressGroups() {
+    const container = document.getElementById("progress-content");
+    if (!container || container.dataset.groupsInit === "1") return;
+    container.dataset.groupsInit = "1";
+    // Delegated: the panel's innerHTML is replaced on every refresh, so a
+    // listener bound to the buttons themselves would be destroyed with them.
+    container.addEventListener("click", (e) => {
+        const btn = e.target.closest(".group-toggle");
+        if (btn) toggleConceptGroup(btn.dataset.group);
+    });
+}
+
 function renderProgress(data) {
     const concepts = data.concepts || {};
     const conceptList = Object.values(concepts);
@@ -1793,12 +1859,21 @@ function renderProgress(data) {
         </div>
     </div>`;
 
+    const collapsed = loadCollapsedGroups();
     for (const [level, items] of Object.entries(groups)) {
         if (items.length === 0) continue;
-        html += `<div class="concept-group ${level}">`;
-        html += `<h3>${level} <span class="count">(${items.length})</span></h3>`;
+        const isOpen = !collapsed.has(level);
+        html += `<div class="concept-group ${level}${isOpen ? "" : " is-collapsed"}">`;
+        // A real button, not a clickable heading: focusable and operable with
+        // Enter/Space without any extra key handling. The count stays outside
+        // the collapsible body so a closed group still says how much is in it.
+        html += `<button type="button" class="group-toggle" data-group="${level}"
+                         aria-expanded="${isOpen}">
+                    <span class="group-caret">${isOpen ? "▾" : "▸"}</span>
+                    ${level} <span class="count">(${items.length})</span>
+                 </button>`;
+        html += `<div class="concept-group-body">`;
         for (const c of items) {
-            const reviewDate = c.last_reviewed ? c.last_reviewed.substring(5, 10) : "";
             html += `
                 <div class="concept-item">
                     <div class="concept-dot ${level}"></div>
@@ -1806,7 +1881,7 @@ function renderProgress(data) {
                     <span class="concept-category">${escapeHtml(c.category || "")}</span>
                 </div>`;
         }
-        html += `</div>`;
+        html += `</div></div>`;
     }
 
     if (profile.strengths && profile.strengths.length > 0) {
@@ -2039,19 +2114,141 @@ function setPrefsStatus(text, isError) {
 let cellCounter = 0;
 let notebookOpen = false;
 
+/**
+ * POST `body` to `url` and invoke `onEvent` for each SSE `data:` frame.
+ *
+ * Pass an AbortSignal to cancel: dropping the connection is what the server
+ * watches for to kill the cell's process group, so this is also the Stop
+ * mechanism, not just a client-side tidy-up.
+ *
+ * The chat controller has its own copy of this loop. It isn't shared because
+ * that one's event handling is bound up with per-turn controller state; this
+ * helper serves the two code-runner call sites.
+ */
+async function streamSSE(url, body, onEvent, signal) {
+    const res = await fetch(`${API_BASE}${url}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+    });
+
+    if (!res.ok) {
+        // Prefer FastAPI's {"detail": "..."} over dumping the raw JSON blob at
+        // the learner, which is what the old runner did.
+        let detail = `${res.status} ${res.statusText}`;
+        try {
+            const parsed = JSON.parse(await res.text());
+            if (parsed && parsed.detail) detail = parsed.detail;
+        } catch {}
+        throw new Error(detail);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();   // keep the incomplete line
+
+        for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;   // skips ": ping"
+            let event;
+            try {
+                event = JSON.parse(line.slice(6));
+            } catch {
+                continue;
+            }
+            onEvent(event);
+        }
+    }
+}
+
+/**
+ * Buffers streamed text and flushes on an animation frame.
+ *
+ * A cell in a tight print loop emits thousands of chunks; appending to the
+ * DOM per chunk locks the tab up. Batching per frame keeps it responsive
+ * while still looking live.
+ */
+function makeOutputSink(pre) {
+    let pending = [];
+    let scheduled = false;
+
+    const flush = () => {
+        scheduled = false;
+        if (!pending.length) return;
+        const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+        for (const [stream, text] of pending) {
+            if (stream === "stderr") {
+                // A span, not a class on the whole block: qiskit and
+                // matplotlib write warnings to stderr routinely, and
+                // reddening all the output because of a warning is wrong.
+                const span = document.createElement("span");
+                span.className = "stream-err";
+                span.textContent = text;
+                pre.appendChild(span);
+            } else {
+                pre.appendChild(document.createTextNode(text));
+            }
+        }
+        pending = [];
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+    };
+
+    return {
+        write(stream, text) {
+            if (!text) return;
+            pending.push([stream, text]);
+            if (!scheduled) {
+                scheduled = true;
+                requestAnimationFrame(flush);
+            }
+        },
+        flush,
+    };
+}
+
 function notebookKey() {
     const email = getEmail();
     return email ? `pymentor:cells:${email}` : "pymentor:cells:_anon";
 }
 
-function saveCells() {
-    const cells = [...document.querySelectorAll(".cell")].map(el => ({
-        code: el.querySelector(".cell-textarea").value,
-        output: el.querySelector(".cell-output").textContent,
-        status: el.dataset.status || "",
-        isError: el.querySelector(".cell-output").classList.contains("error"),
-    }));
+// Cap on output persisted per cell. localStorage tops out around 5MB per
+// origin and setItem throws on overflow, which would silently lose the whole
+// notebook — so keep the tail of a chatty cell rather than all of it.
+const MAX_SAVED_OUTPUT = 20_000;
+
+let saveCellsTimer = null;
+
+function saveCellsNow() {
+    saveCellsTimer = null;
+    const cells = [...document.querySelectorAll(".cell")].map(el => {
+        const out = el.querySelector(".cell-output");
+        let text = out.textContent;
+        if (text.length > MAX_SAVED_OUTPUT) {
+            text = "... [earlier output trimmed]\n" + text.slice(-MAX_SAVED_OUTPUT);
+        }
+        return {
+            code: el.querySelector(".cell-textarea").value,
+            output: text,
+            status: el.dataset.status || "",
+            isError: out.classList.contains("error"),
+            images: [...el.querySelectorAll(".cell-image")].map(img => img.getAttribute("src")),
+        };
+    });
     try { localStorage.setItem(notebookKey(), JSON.stringify(cells)); } catch {}
+}
+
+/** Debounced: fires on every keystroke and, while streaming, every frame. */
+function saveCells() {
+    if (saveCellsTimer) return;
+    saveCellsTimer = setTimeout(saveCellsNow, 300);
 }
 
 function loadCells() {
@@ -2071,12 +2268,26 @@ function loadCells() {
             out.classList.remove("empty");
             if (c.isError) out.classList.add("error");
         }
+        for (const src of c.images || []) {
+            // Only the URL was persisted, never a data URI. The run directory
+            // is swept after an hour, so an old image 404s — that's fine, it
+            // just renders as a broken thumbnail on a stale cell.
+            appendCellImage(el, src);
+        }
         if (c.status) {
             el.dataset.status = c.status;
             const s = el.querySelector(".cell-status");
             s.textContent = c.status;
         }
     }
+}
+
+function appendCellImage(el, src) {
+    const img = document.createElement("img");
+    img.className = "cell-image";
+    img.src = src;
+    img.loading = "lazy";
+    el.appendChild(img);
 }
 
 function toggleNotebook() {
@@ -2118,19 +2329,25 @@ function addCell(initialCode = "") {
                 <button class="header-btn" data-action="delete">Delete</button>
             </div>
         </div>
-        <textarea class="cell-textarea" spellcheck="false" placeholder="# Python code — runs in your per-user venv"></textarea>
+        <textarea class="cell-textarea" spellcheck="false" placeholder="# Python — a fresh process each run, so variables don't carry between cells.&#10;# Need a package? Put %pip install <name> at the top."></textarea>
         <pre class="cell-output empty"></pre>
     `;
     container.appendChild(div);
     const ta = div.querySelector(".cell-textarea");
     ta.value = initialCode;
-    ta.addEventListener("input", saveCells);
+    ta.addEventListener("input", () => {
+        autoGrowCell(ta);
+        saveCells();
+    });
     ta.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             runCell(id);
+            return;
         }
+        handleEditorKeys(e, ta);
     });
+    autoGrowCell(ta);
     div.querySelector('[data-action="run"]').onclick = () => runCell(id);
     div.querySelector('[data-action="send"]').onclick = () => sendCellToChat(id);
     div.querySelector('[data-action="delete"]').onclick = () => deleteCell(id);
@@ -2143,6 +2360,29 @@ function deleteCell(id) {
     saveCells();
 }
 
+/** Cell timeout in seconds, from the notebook header control. */
+function cellTimeout() {
+    const sel = document.getElementById("cell-timeout");
+    const v = sel ? parseFloat(sel.value) : NaN;
+    return Number.isFinite(v) ? v : 15;
+}
+
+function setCellStatus(el, cls, text) {
+    const status = el.querySelector(".cell-status");
+    status.className = `cell-status ${cls}`;
+    status.textContent = text;
+    el.dataset.status = text;
+}
+
+/** Clear everything a previous run left behind on this cell. */
+function resetCellOutput(el) {
+    const out = el.querySelector(".cell-output");
+    out.textContent = "";
+    out.classList.remove("error", "empty");
+    el.querySelectorAll(".cell-image, .install-suggestion").forEach(n => n.remove());
+    return out;
+}
+
 async function runCell(id) {
     const email = getEmail();
     if (!email) {
@@ -2151,58 +2391,244 @@ async function runCell(id) {
     }
     const el = document.getElementById(id);
     if (!el) return;
-    const code = el.querySelector(".cell-textarea").value;
-    const out = el.querySelector(".cell-output");
-    const status = el.querySelector(".cell-status");
 
-    out.textContent = "";
-    out.classList.remove("error");
-    out.classList.remove("empty");
-    status.className = "cell-status running";
-    status.textContent = "Running...";
-    el.dataset.status = "Running...";
+    // Second click on a running cell is Stop. Aborting drops the HTTP
+    // connection; the server notices and kills the cell's process group.
+    if (el._abort) {
+        el._abort.abort();
+        return;
+    }
+
+    const code = el.querySelector(".cell-textarea").value;
+    const out = resetCellOutput(el);
+    const sink = makeOutputSink(out);
+    const runBtn = el.querySelector('[data-action="run"]');
+
+    const controller = new AbortController();
+    el._abort = controller;
+    runBtn.textContent = "Stop";
+    runBtn.classList.add("is-stop");
+    setCellStatus(el, "running", "Running...");
+
+    let sawOutput = false;
+    let finished = null;
+
+    const finish = () => {
+        el._abort = null;
+        runBtn.textContent = "Run";
+        runBtn.classList.remove("is-stop");
+        sink.flush();
+    };
 
     try {
-        const res = await fetch(`${API_BASE}/api/code/run`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, code }),
-        });
-        if (!res.ok) {
-            const detail = await res.text();
-            out.textContent = `[runner error ${res.status}] ${detail}`;
-            out.classList.add("error");
-            status.className = "cell-status fail";
-            status.textContent = `error (${res.status})`;
-            el.dataset.status = status.textContent;
-            saveCells();
-            return;
+        await streamSSE("/api/code/run_stream",
+            { email, code, timeout: cellTimeout() },
+            (event) => {
+                switch (event.type) {
+                    case "start":
+                        if (!event.venv_ready) {
+                            setCellStatus(el, "running", "Preparing environment...");
+                        }
+                        break;
+                    case "venv":
+                    case "install":
+                        if (event.line) { sink.write("stdout", event.line); sawOutput = true; }
+                        break;
+                    case "stdout":
+                    case "stderr":
+                        sink.write(event.type, event.text);
+                        sawOutput = true;
+                        break;
+                    case "image":
+                        appendCellImage(el, event.src);
+                        break;
+                    case "error":
+                        sink.write("stderr", event.message);
+                        sawOutput = true;
+                        setCellStatus(el, "fail", "runner error");
+                        out.classList.add("error");
+                        break;
+                    case "done":
+                        finished = event;
+                        break;
+                }
+            },
+            controller.signal);
+
+        finish();
+
+        if (finished) {
+            const failed = finished.exit_code !== 0 || finished.timed_out;
+            if (failed) out.classList.add("error");
+            if (!sawOutput) out.textContent = "(no output)";
+            let label;
+            if (finished.cancelled) label = "stopped";
+            else if (finished.timed_out) label = "timeout";
+            else if (failed) label = `exit ${finished.exit_code}`;
+            else label = "ok";
+            setCellStatus(el, failed ? "fail" : "ok",
+                          `${label} · ${finished.duration_ms}ms`);
+
+            // The reason this whole feature exists: turn a dead end into a
+            // click. A missing import becomes an install button.
+            if (finished.suggestion) {
+                renderInstallSuggestion(el, finished.suggestion);
+            }
         }
-        const data = await res.json();
-        const stderr = data.stderr || "";
-        const stdout = data.stdout || "";
-        let combined = stdout;
-        if (stderr.trim()) {
-            combined = (stdout ? stdout + "\n" : "") + stderr;
-        }
-        if (!combined) combined = "(no output)";
-        out.textContent = combined;
-        const failed = data.exit_code !== 0 || data.timed_out;
-        if (failed) out.classList.add("error");
-        status.className = `cell-status ${failed ? "fail" : "ok"}`;
-        status.textContent = failed
-            ? (data.timed_out ? "timeout" : `exit ${data.exit_code}`) + ` · ${data.duration_ms}ms`
-            : `ok · ${data.duration_ms}ms`;
-        el.dataset.status = status.textContent;
-        saveCells();
+        saveCellsNow();
     } catch (err) {
-        out.textContent = `Connection error: ${err.message}`;
-        out.classList.add("error");
-        status.className = "cell-status fail";
-        status.textContent = "network error";
-        el.dataset.status = status.textContent;
-        saveCells();
+        finish();
+        if (err.name === "AbortError") {
+            // The server saw the disconnect and killed the process; it can't
+            // tell us so over the socket it just lost.
+            sink.write("stderr", "\n[stopped]");
+            sink.flush();
+            setCellStatus(el, "fail", "stopped");
+        } else {
+            sink.write("stderr", `\n${err.message}`);
+            sink.flush();
+            out.classList.add("error");
+            setCellStatus(el, "fail", "error");
+        }
+        saveCellsNow();
     }
+}
+
+/** The one-click fix for a ModuleNotFoundError. */
+function renderInstallSuggestion(el, suggestion) {
+    const box = document.createElement("div");
+    box.className = "install-suggestion";
+
+    const label = document.createElement("span");
+    label.textContent = suggestion.module === suggestion.package
+        ? `Missing module '${suggestion.module}'.`
+        : `Missing module '${suggestion.module}' — provided by '${suggestion.package}'.`;
+
+    const btn = document.createElement("button");
+    btn.className = "header-btn";
+    btn.textContent = `Install ${suggestion.package}`;
+    btn.onclick = () => installForCell(el, suggestion.package);
+
+    box.appendChild(label);
+    box.appendChild(btn);
+    el.appendChild(box);
+}
+
+async function installForCell(el, pkg) {
+    const email = getEmail();
+    if (!email) return;
+
+    const out = resetCellOutput(el);
+    const sink = makeOutputSink(out);
+    setCellStatus(el, "running", `Installing ${pkg}...`);
+
+    let ok = false;
+    try {
+        await streamSSE("/api/code/install", { email, packages: [pkg] },
+            (event) => {
+                if (event.type === "install" && event.line) {
+                    sink.write("stdout", event.line);
+                } else if (event.type === "error") {
+                    sink.write("stderr", event.message);
+                } else if (event.type === "done") {
+                    ok = !!event.ok;
+                }
+            });
+        sink.flush();
+    } catch (err) {
+        sink.write("stderr", `\n${err.message}`);
+        sink.flush();
+    }
+
+    if (ok) {
+        setCellStatus(el, "ok", "installed · re-running");
+        await runCell(el.id);
+    } else {
+        out.classList.add("error");
+        setCellStatus(el, "fail", "install failed");
+        saveCellsNow();
+    }
+}
+
+// =====================================================================
+// Cell editor ergonomics
+//
+// Deliberately a plain textarea with a keydown handler rather than
+// CodeMirror/Ace: those need a bundler or a CDN, and this app has neither a
+// build step nor a guarantee of network access.
+// =====================================================================
+
+const INDENT = "    ";
+
+/** Grow the textarea to fit its content so a long cell isn't a scrollbox. */
+function autoGrowCell(ta) {
+    ta.style.height = "auto";
+    ta.style.height = Math.min(Math.max(ta.scrollHeight, 80), 600) + "px";
+}
+
+/**
+ * Insert text at the cursor via execCommand where available.
+ *
+ * Assigning to .value directly wipes the browser's native undo stack, which
+ * is far more annoying than not having Tab support at all.
+ */
+function insertText(ta, text) {
+    if (document.execCommand) {
+        if (document.execCommand("insertText", false, text)) return;
+    }
+    const { selectionStart: s, selectionEnd: e } = ta;
+    ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
+    ta.selectionStart = ta.selectionEnd = s + text.length;
+}
+
+function handleEditorKeys(e, ta) {
+    const { selectionStart: start, selectionEnd: end, value } = ta;
+
+    if (e.key === "Tab") {
+        e.preventDefault();
+        const multiline = value.slice(start, end).includes("\n");
+        if (!multiline && !e.shiftKey) {
+            insertText(ta, INDENT);
+        } else {
+            // Indent/dedent every touched line, keeping the selection over
+            // the same lines afterwards.
+            const from = value.lastIndexOf("\n", start - 1) + 1;
+            const toRaw = value.indexOf("\n", end);
+            const to = toRaw === -1 ? value.length : toRaw;
+            const block = value.slice(from, to);
+            const shifted = block.split("\n").map(line => {
+                if (e.shiftKey) {
+                    if (line.startsWith(INDENT)) return line.slice(INDENT.length);
+                    return line.replace(/^[ \t]{1,4}/, "");
+                }
+                return INDENT + line;
+            }).join("\n");
+            ta.setSelectionRange(from, to);
+            insertText(ta, shifted);
+            ta.setSelectionRange(from, from + shifted.length);
+        }
+    } else if (e.key === "Enter" && !e.shiftKey) {
+        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+        const line = value.slice(lineStart, start);
+        const indent = (line.match(/^[ \t]*/) || [""])[0];
+        // A trailing colon opens a block, so the next line goes one deeper.
+        const deeper = /:\s*$/.test(line) ? INDENT : "";
+        if (!indent && !deeper) return;
+        e.preventDefault();
+        insertText(ta, "\n" + indent + deeper);
+    } else if (e.key === "Backspace" && start === end) {
+        // Delete a whole indent level when sitting on one.
+        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+        const before = value.slice(lineStart, start);
+        if (before.length >= INDENT.length && /^[ ]+$/.test(before)
+            && before.length % INDENT.length === 0) {
+            e.preventDefault();
+            ta.setSelectionRange(start - INDENT.length, start);
+            insertText(ta, "");
+        }
+    }
+
+    autoGrowCell(ta);
 }
 
 function sendCellToChat(id) {
@@ -2304,6 +2730,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // Notes canvas. Guarded so app.js keeps working if notes.js fails to load.
+    initProgressGroups();
     if (typeof initNotes === "function") initNotes();
     if (typeof initDemoPane === "function") initDemoPane();
 

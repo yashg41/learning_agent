@@ -195,10 +195,13 @@ body.is-resizing-panes .notes-scroll { pointer-events: none; }
 .notes-scroll {
     flex: 1;
     overflow-y: auto;
-    /* Horizontal scrolling exists only for zoom. At 100% the canvas is
-       exactly the pane width so no bar appears; zoomed in it is genuinely
-       wider and the right-hand side would otherwise be unreachable. */
     overflow-x: auto;
+    /* Without this a two-finger sideways drag that reaches the canvas edge
+       chains up to the browser, which reads it as swipe-to-go-back and
+       navigates away from the app — losing whatever was on screen. `contain`
+       stops the chaining while leaving scrolling inside the element normal;
+       `none` would also suppress overscroll here, which is not wanted. */
+    overscroll-behavior-x: contain;
     position: relative;
     background: var(--bg-primary);
 }
@@ -403,6 +406,7 @@ body.is-resizing-panes .notes-scroll { pointer-events: none; }
     padding: 8px;
     border-radius: var(--radius-sm);
     overflow-x: auto;
+    overscroll-behavior-x: contain;   /* don't let a wide snippet swipe back */
 }
 .nb-body a { color: var(--accent); }
 .nb-body img { max-width: 100%; }
@@ -449,6 +453,7 @@ body.is-resizing-panes .notes-scroll { pointer-events: none; }
     margin: 0;
     padding: 8px 10px;
     overflow: auto;
+    overscroll-behavior: contain;
     flex: 1;
     background: none;
 }

@@ -146,8 +146,13 @@
             <!-- Notebook pane (hidden by default; toggled by Run Code button) -->
             <div class="notebook-pane" id="notebook-pane" style="display:none">
                 <div class="notebook-header">
-                    <span>Code Runner <span class="notebook-sub">(per-user venv · qiskit installed)</span></span>
+                    <span>Code Runner <span class="notebook-sub">(per-user venv · each cell runs fresh — variables don't carry over)</span></span>
                     <div class="notebook-actions">
+                        <select class="cell-timeout" id="cell-timeout" title="Per-cell time limit">
+                            <option value="15" selected>15s</option>
+                            <option value="60">60s</option>
+                            <option value="300">5m</option>
+                        </select>
                         <button class="header-btn" onclick="addCell()" title="Add a new cell">+ Cell</button>
                         <button class="header-btn" onclick="resetVenv()" title="Wipe and recreate this user's venv">Reset venv</button>
                         <button class="header-btn" onclick="toggleNotebook()" title="Hide code runner">&times;</button>
@@ -178,6 +183,8 @@
 
                 <div class="notes-toolbar" id="notes-toolbar">
                     <button class="nb-tool is-active" data-tool="select" title="Select (V)">&#9655;</button>
+                    <button class="nb-tool" data-tool="hand"
+                            title="Move the canvas — drag to pan, nothing gets selected (H)">&#9995;</button>
                     <span class="nb-tool-sep"></span>
                     <button class="nb-tool" data-tool="text" title="Text (T)">T</button>
                     <button class="nb-tool" data-tool="sticky" title="Sticky note (S)">&#9635;</button>

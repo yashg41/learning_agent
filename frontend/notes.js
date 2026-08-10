@@ -31,6 +31,10 @@ let spaceHeld = false;
 const NOTES_MIN_CANVAS_H = 1200;
 const NOTES_GROW_STEP = 600;
 const NOTES_GROW_MARGIN = 160;
+// How much wider than the pane the board is, so there is room to pan sideways
+// at any zoom. Applies to the canvas element only — pageScale() and
+// rescaleForWidth() keep measuring the pane, never this. See applyZoom().
+const NOTES_CANVAS_WIDTH_FACTOR = 2;
 const DRAG_THRESHOLD = 3;
 const SAVE_DEBOUNCE = 800;
 const SAVE_MAX_WAIT = 5000;
@@ -1600,15 +1604,24 @@ function applyZoom() {
     // rescale check can never disagree about how wide "the pane" is.
     const modelW = canvasWidth();
 
-    // Zoomed out, a canvas of exactly modelW would occupy only `zoom` of the
-    // pane and the grid would stop in mid-air. Extend it so the *scaled*
-    // result still fills the viewport.
+    // The canvas is deliberately wider than the pane so there is somewhere to
+    // pan sideways at any zoom — at exactly pane width there is no horizontal
+    // scroll range at 100% and the gesture does nothing.
     //
-    // Safe now in a way an earlier attempt was not: canvasWidth() measures the
-    // scroll container, never this element, so the extra width cannot be read
-    // back as a pane resize. Height gets the same treatment so the grid
-    // reaches the bottom of a short note too.
-    const fillW = zoom < 1 ? Math.ceil(modelW / zoom) : modelW;
+    // This width is for the ELEMENT only. Every layout calculation —
+    // canvasWidth(), pageScale(), rescaleForWidth() — keeps using the pane
+    // width via canvasWidth(), which measures the scroll container and never
+    // this element. That separation is load-bearing: when the canvas's own
+    // width fed back into the measurement, rescaleForWidth() read it as a
+    // pane resize and multiplied every block's coordinates on each pass
+    // (677px → 15014px in a dozen frames, corrupting the note).
+    const boardW = modelW * NOTES_CANVAS_WIDTH_FACTOR;
+
+    // Zoomed out, a canvas of exactly boardW would occupy only `zoom` of the
+    // pane and the grid would stop in mid-air. Extend it so the *scaled*
+    // result still fills the viewport. Height gets the same treatment so the
+    // grid reaches the bottom of a short note too.
+    const fillW = zoom < 1 ? Math.ceil(boardW / zoom) : boardW;
     canvas.style.width = fillW + "px";
 
     // Height: at least the note's own height, but extended when zooming out
@@ -1637,7 +1650,11 @@ function applyZoom() {
         // the extra canvas exists only so the grid reaches the edges, and
         // counting it would invent scroll space below the content.
         wrap.style.height = Math.round(note.canvas_height * zoom) + "px";
-        wrap.style.width = zoom > 1 ? Math.round(modelW * zoom) + "px" : "";
+        // Reserve the scaled board, but never less than the canvas element
+        // itself: below 1.0 the element is widened by 1/zoom so the grid still
+        // fills the viewport, and a wrapper narrower than that would clip it
+        // and leave nothing to pan across.
+        wrap.style.width = Math.round(Math.max(boardW * zoom, fillW * zoom)) + "px";
     }
     const label = document.getElementById("notes-zoom-level");
     if (label) label.textContent = Math.round(zoom * 100) + "%";
@@ -1706,6 +1723,15 @@ function setTool(tool, sticky) {
     document.querySelectorAll(".nb-tool").forEach(el => {
         el.classList.toggle("is-active", el.dataset.tool === tool);
     });
+
+    // Grab cursor while the hand is armed. Space-to-pan sets the same class
+    // independently, so only clear it when space is not also being held —
+    // otherwise ending a space-pan with the hand tool on drops the cursor.
+    const scroll = scrollEl();
+    if (scroll) {
+        if (tool === "hand") scroll.classList.add("can-pan");
+        else if (!spaceHeld) scroll.classList.remove("can-pan");
+    }
 }
 
 /**
@@ -1745,10 +1771,21 @@ function round1(n) { return Math.round(n * 10) / 10; }
 function onCanvasPointerDown(e) {
     if (!note || notesBusy) return;
 
-    // Pan with the middle button, or space held, or ⌥/alt — the gestures
-    // people already use in map and design tools. Zoomed in, dragging the
-    // canvas is more natural than reaching for the scrollbars.
-    if (e.button === 1 || spaceHeld || e.altKey) {
+    // Pan with the hand tool, the middle button, space held, or ⌥/alt. The
+    // modifiers are the gestures map and design tools already use; the hand
+    // tool is the version that needs no key held and no trackpad gesture the
+    // browser might claim for itself.
+    //
+    // This branch returns, so everything below — selection, marquee, block
+    // creation, enterEdit — is skipped while the hand is active. Pure pan mode
+    // falls out of the control flow rather than needing a guard per feature.
+    // An open editor keeps its own pointer events even with the hand armed:
+    // the textarea is the more specific target, and panning from inside it
+    // would make text unselectable for no benefit.
+    const inEditor = editing && e.target.closest(".nb-edit");
+
+    if (!inEditor
+        && (e.button === 1 || spaceHeld || e.altKey || activeTool === "hand")) {
         const scroll = scrollEl();
         if (!scroll) return;
         e.preventDefault();
@@ -1770,7 +1807,7 @@ function onCanvasPointerDown(e) {
     // to place the caret, or dragging to select text. Handling it here closed
     // the editor and started a block drag instead, so the caret could not be
     // moved with the mouse and selecting a line dragged the whole block.
-    if (editing && e.target.closest(".nb-edit")) return;
+    if (inEditor) return;
 
     if (editing) { exitEdit(); }
 
@@ -2060,6 +2097,10 @@ function nearArrow(a, pt, tol) {
 
 function onCanvasDblClick(e) {
     if (!note) return;
+    // dblclick is its own listener and does not pass through the pointerdown
+    // pan branch, so the hand tool has to be honoured explicitly or a stray
+    // double-click would still open an editor mid-pan.
+    if (activeTool === "hand") return;
     // Double-click inside the editor selects a word — leave it to the
     // textarea rather than re-entering edit mode and collapsing the caret.
     if (editing && e.target.closest(".nb-edit")) return;
@@ -2196,7 +2237,7 @@ function onNotesKeydown(e) {
         return;
     }
     // Single-key tool shortcuts, matching the toolbar order.
-    const tools = { v: "select", t: "text", s: "sticky", c: "code",
+    const tools = { v: "select", h: "hand", t: "text", s: "sticky", c: "code",
                     r: "rect", o: "ellipse", d: "diamond", a: "arrow" };
     const tool = tools[e.key.toLowerCase()];
     if (tool && !meta) { setTool(tool, e.shiftKey); }
@@ -2457,13 +2498,19 @@ async function initNotes() {
         if (e.code !== "Space") return;
         spaceHeld = false;
         const s = scrollEl();
-        if (s) s.classList.remove("can-pan");
+        // Keep the grab cursor if the hand tool is what is arming it.
+        if (s && activeTool !== "hand") s.classList.remove("can-pan");
     });
     // A lost keyup (tab switch mid-drag) would otherwise leave pan mode stuck.
     window.addEventListener("blur", () => {
         spaceHeld = false;
         const s = scrollEl();
-        if (s) s.classList.remove("can-pan", "is-panning");
+        if (s) {
+            s.classList.remove("is-panning");
+            // A lost keyup would otherwise strand pan mode, but the hand tool
+            // is a deliberate state that should survive tabbing away.
+            if (activeTool !== "hand") s.classList.remove("can-pan");
+        }
     });
 
     // Annotations are stored in absolute canvas coordinates while pages scale

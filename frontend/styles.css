@@ -18,6 +18,12 @@ body {
     color: var(--text-dim);
     height: 100vh;
     overflow: hidden;
+    /* Backstop for the whole app: a horizontal two-finger drag that reaches
+       the end of any inner scroller chains outward, and the browser reads it
+       as swipe-to-go-back — navigating away and losing unsaved work. Stopping
+       it here covers every scroller, including ones added later that forget
+       to set it themselves. */
+    overscroll-behavior-x: contain;
     -webkit-font-smoothing: antialiased;
 }
 
@@ -421,6 +427,7 @@ code, pre, kbd, samp,
     color: var(--text-dim);
     white-space: pre-wrap;
     overflow-x: auto;
+    overscroll-behavior-x: contain;   /* don't swipe-navigate the app away */
     max-height: 280px;
     overflow-y: auto;
 }
@@ -432,6 +439,48 @@ code, pre, kbd, samp,
 
 .cell-output.empty {
     display: none;
+}
+
+/* stderr inside an otherwise-fine run: qiskit and matplotlib emit warnings
+   there routinely, so mark the lines rather than the whole block. */
+.stream-err {
+    color: var(--error);
+}
+
+.cell-image {
+    max-width: 100%;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: #fff;   /* Agg renders transparent; white keeps axes legible */
+    align-self: flex-start;
+}
+
+.install-suggestion {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.header-btn.is-stop {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+.cell-timeout {
+    background: var(--bg-primary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 3px 6px;
 }
 
 .cell-status {
@@ -657,6 +706,7 @@ code, pre, kbd, samp,
     padding: var(--space-3);
     margin: var(--space-3) 0;
     overflow-x: auto;
+    overscroll-behavior-x: contain;   /* don't swipe-navigate the app away */
 }
 
 .message.assistant pre code {
@@ -974,7 +1024,10 @@ code, pre, kbd, samp,
     margin-bottom: 16px;
 }
 
-.concept-group h3 {
+/* Was an <h3>; now a button so it can be focused and toggled from the
+   keyboard. Reset the button chrome so it still reads as a heading. */
+.concept-group .group-toggle {
+    font-family: inherit;
     font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
@@ -983,16 +1036,40 @@ code, pre, kbd, samp,
     display: flex;
     align-items: center;
     gap: 6px;
+    width: 100%;
+    padding: 2px 0;
+    background: none;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
 }
 
-.concept-group h3 .count {
+.concept-group .group-toggle .count {
     font-weight: 400;
     color: var(--text-muted);
 }
 
-.concept-group.mastered h3 { color: var(--mastery-mastered); }
-.concept-group.practiced h3 { color: var(--mastery-practiced); }
-.concept-group.introduced h3 { color: var(--mastery-introduced); }
+.concept-group .group-caret {
+    font-size: 9px;
+    width: 9px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.concept-group .group-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+.concept-group.mastered .group-toggle { color: var(--mastery-mastered); }
+.concept-group.practiced .group-toggle { color: var(--mastery-practiced); }
+.concept-group.introduced .group-toggle { color: var(--mastery-introduced); }
+
+/* The heading and its count stay visible when collapsed — a closed group
+   should still tell you how much is inside. */
+.concept-group.is-collapsed .concept-group-body { display: none; }
+.concept-group.is-collapsed .group-toggle { margin-bottom: 0; }
 
 .concept-item {
     display: flex;
