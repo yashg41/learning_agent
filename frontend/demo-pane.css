@@ -50,6 +50,18 @@
 
 .demo-header-actions .header-btn { padding: 5px 8px; }
 
+.demo-zoom {
+    font-size: var(--text-2xs);
+    color: var(--text-dim);
+    min-width: 38px;
+    text-align: center;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
+
+.demo-zoom:hover { color: var(--accent); }
+
 /* Caption strip: what the demo is and what to try. Collapses when empty so a
    demo saved without a summary doesn't leave a blank band. */
 .demo-caption {
@@ -80,17 +92,29 @@
     position: relative;
     min-height: 0;
     background: var(--bg-primary);
+    /* Zoomed in, the scaled frame is larger than the pane — pan to the rest
+       rather than clipping it. */
+    overflow: auto;
 }
 
 /* The frame is the security boundary — see demo-pane.js. White background so
    a demo that sets no background of its own is still readable rather than
    showing through to the app's dark surface. */
+/* --demo-zoom is set by demo-pane.js and defaults to 1 so an un-zoomed frame
+   still gets a valid width/height. The frame is sized at 100%/zoom and then
+   scaled back down by the same factor: the on-screen box stays exactly the
+   pane, while the demo's own layout believes it has 1/zoom the room. That is
+   what makes zooming out reveal MORE of the demo (a wider CSS viewport) rather
+   than just shrinking the same crop into a corner — which is the whole point
+   for a demo that is too big. */
 .demo-frame {
     display: block;
-    width: 100%;
-    height: 100%;
+    width: calc(100% / var(--demo-zoom, 1));
+    height: calc(100% / var(--demo-zoom, 1));
     border: 0;
     background: #fff;
+    transform: scale(var(--demo-zoom, 1));
+    transform-origin: 0 0;
 }
 
 .demo-empty {
@@ -142,3 +166,291 @@
 }
 
 .demo-open-btn:hover { background: var(--accent-hover); }
+
+/* --- Build-job chip states ---------------------------------------------
+   A demo is built in the background, so its chip is the only progress signal
+   the learner gets. No toast and no pane badge on purpose: the right column is
+   exclusive (Notes/Notebook/Demo), so any "view it now" affordance would
+   destroy whatever they are currently reading. */
+
+/* .tool-header sets no line-height, so at 11px the line box is shorter than
+   the glyphs and descenders (the "p" in "demo", the "g" in "building") sit on
+   the edge. Give the demo chip's row room, and leave space below for the
+   2px progress strip. */
+.tool-card.is-demo .tool-header {
+    line-height: 1.6;
+    min-height: 22px;
+}
+
+.demo-chip-status {
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+    margin-left: auto;
+    padding-left: 8px;
+    white-space: nowrap;
+}
+
+/* Building: a slow indeterminate sweep under the chip. Movement is what
+   distinguishes "working" from "stuck" during a ~60s build.
+
+   Note there is no `overflow: hidden` here. An earlier version clipped the
+   card to contain a sliding element, which also cropped the descenders on
+   "demo" and "building"; the sweep below stays inside the card on its own. */
+.tool-card.is-demo.is-building {
+    position: relative;
+    padding-bottom: 10px;
+}
+
+/* A gradient that slides across a fixed-width strip: no element leaves the
+   card, so nothing needs clipping and the text is never cropped. */
+.tool-card.is-demo.is-building::after {
+    content: "";
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    bottom: 1px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        transparent 25%,
+        var(--accent) 50%,
+        transparent 75%,
+        transparent 100%
+    );
+    background-size: 250% 100%;
+    animation: demo-chip-sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes demo-chip-sweep {
+    0%   { background-position: 150% 0; }
+    100% { background-position: -50% 0; }
+}
+
+.tool-card.is-demo.is-ready { border-color: var(--accent); }
+
+/* One-time pulse when a build lands: loud enough to notice in a static
+   transcript, over quickly enough not to nag. */
+.tool-card.is-demo.just-finished {
+    animation: demo-chip-pulse 1.2s ease-out 2;
+}
+
+@keyframes demo-chip-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+}
+
+.tool-card.is-demo.is-failed {
+    border-color: var(--error);
+}
+
+.tool-card.is-demo.is-failed .tool-name,
+.tool-card.is-demo.is-failed .demo-chip-status {
+    color: var(--error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tool-card.is-demo.is-building::after,
+    .tool-card.is-demo.just-finished {
+        animation: none;
+    }
+}
+
+/* --- Ask-the-tutor affordances ---------------------------------------- */
+
+.demo-ask-btn {
+    /* Text rather than a glyph — three glyph buttons already sit beside it. */
+    width: auto;
+    padding: 0 10px;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* Shown only while something in the demo is highlighted. */
+.demo-selection-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    font-size: var(--text-2xs);
+    flex-shrink: 0;
+}
+
+.demo-selection-label { color: var(--text-muted); flex-shrink: 0; }
+
+.demo-selection-text {
+    color: var(--text-bright);
+    font-family: var(--font-mono, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.demo-selection-ask {
+    margin-left: auto;
+    flex-shrink: 0;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.demo-selection-ask:hover { background: var(--accent-hover); }
+
+/* The staged reference chip, shown in the main composer's attach strip so it
+   behaves like any other thing pending on the next message. */
+.attach-demo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 260px;
+    padding: 4px 6px 4px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-bright);
+    font-size: var(--text-2xs);
+    line-height: 1.6;
+}
+
+.attach-demo-chip span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* Inline and in flow — unlike .attach-thumb-remove, which is absolutely
+   positioned for the corner of an image thumbnail and would sit on top of
+   this chip's label. */
+.attach-demo-remove {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 16px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.attach-demo-remove:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-bright);
+}
+
+/* --- Region capture ---------------------------------------------------
+   The drag surface lives in THIS document, above the frame, so a demo that
+   handles its own pointer events (dragging graph nodes) is not disturbed
+   while a region is being chosen. */
+
+.demo-crop-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    cursor: crosshair;
+    background: rgba(0, 0, 0, 0.35);
+    touch-action: none;   /* pointer events only — no scroll-hijack on tablet */
+}
+
+.demo-crop-hint {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    color: var(--text-bright);
+    font-size: var(--text-2xs);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.demo-crop-box {
+    position: absolute;
+    border: 2px solid var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+    pointer-events: none;
+}
+
+/* --- Builder composer, docked under the demo -------------------------- */
+
+.demo-chat {
+    border-top: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+}
+
+.demo-chat-log {
+    max-height: 120px;
+    overflow-y: auto;
+    padding: 8px 12px 0;
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+}
+
+.demo-chat-log:empty { display: none; }
+
+.demo-chat-line { color: var(--text-muted); }
+.demo-chat-line.is-user { color: var(--text-bright); }
+.demo-chat-line.is-user::before { content: "› "; color: var(--accent); }
+.demo-chat-line.is-error { color: var(--error); }
+.demo-chat-line.is-ok { color: var(--accent); }
+
+.demo-chat-input {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 8px 12px;
+}
+
+.demo-chat-input input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-primary);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: var(--text-2xs);
+}
+
+.demo-chat-input input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.demo-chat-input input:disabled { opacity: 0.6; }
+
+.demo-chat-input button#demo-chat-send {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.demo-chat-input button#demo-chat-send:hover { background: var(--accent-hover); }
+.demo-chat-input button#demo-chat-send:disabled { opacity: 0.5; cursor: default; }

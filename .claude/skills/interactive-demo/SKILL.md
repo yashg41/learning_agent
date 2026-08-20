@@ -1,24 +1,28 @@
 ---
 name: interactive-demo
 description: >-
-  Build a self-contained interactive HTML demo that lets the learner play with
-  a concept they cannot picture from words alone. Use ONLY when the learner
-  explicitly asks to see, visualise, or interact with something — "show me",
-  "make a demo", "can you visualise this", "build something interactive",
-  "I'm confused, can you show it". Never volunteer a demo unprompted; if they
-  only asked for an explanation, explain in prose instead.
+  How to construct a self-contained interactive HTML demo. This is the DEMO
+  BUILDER's skill: it applies when you have been asked to produce or change a
+  demo and have save_demo/update_demo available. If you are the tutor talking
+  to a learner, you do not build demos yourself — call request_demo and carry
+  on teaching.
 ---
 
 # Interactive demo builder
 
 Build a small, self-contained HTML page that makes one concept tangible, then
-save it with the `save_demo` tool. It opens in a pane beside the chat.
+store it. It opens in a pane beside the learner's chat.
 
-## When to build one
+## Who this is for
 
-Only after the learner has explicitly asked. If they asked "explain consistent
-hashing", explain it — do not build a demo. If they then say "show me" or "I'm
-still confused, can you make something I can play with", build one.
+You are the builder agent, running in your own session. A background job
+brought you here because the learner asked to see something.
+
+**If you are the tutor** — i.e. you are mid-conversation with a learner —
+stop. Call `request_demo(title, concept_id, request)` and say one sentence
+about what is coming. Writing the HTML inline would freeze the learner's
+composer for the ~60s it takes, which is the whole reason builds moved to the
+background. You do not have `save_demo`.
 
 A demo is worth it when a concept has **moving parts the learner is failing to
 connect**: what happens to keys when a shard is added, how a window slides, how
@@ -143,15 +147,21 @@ frame is sandboxed, so nothing surfaces on the page.
 
 ## Saving
 
-Call `save_demo` with:
+For a NEW demo, call `save_demo` with:
 
 - `title` — short, e.g. "Consistent hashing ring"
 - `html` — the complete document
-- `concept_id` — e.g. `consistent_hashing`, matching the concept you are tracking
+- `concept_id` — e.g. `consistent_hashing`, matching the concept being tracked
 - `summary` — one line telling them what to try first
 
-Then say one or two sentences about what to try. Do not paste the HTML into the
-chat: it is already open in their pane, and the code is not the lesson.
+For a CHANGE to an existing demo, call `get_demo_html(demo_id)` first, then
+`update_demo(demo_id, html, ...)` with the full replacement. Keep everything
+that already worked — apply the requested change, do not start over.
+`update_demo` keeps the demo's id and its place in the learner's list, so never
+use `save_demo` for an edit; that would leave a duplicate behind.
+
+Then stop. Write no prose: you have no chat surface, and the tutor has already
+spoken to the learner. The tool call is your entire output.
 
 ## Worked patterns
 

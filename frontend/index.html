@@ -9,6 +9,9 @@
          styles.css consumes the variables these two define. -->
     <link rel="stylesheet" href="/static/tokens.css">
     <link rel="stylesheet" href="/api/palette.css">
+    <!-- Before styles.css: KaTeX ships its own .katex rules, and the overrides
+         in styles.css (sizing, overflow on wide equations) have to win. -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
     <link rel="stylesheet" href="/static/styles.css">
     <!-- After styles.css: the notes pane overrides a few shared button rules
          and should win without !important. -->
@@ -242,6 +245,28 @@
                     <select class="demo-picker" id="demo-picker" onchange="onDemoPicked()"
                             title="Switch demo"></select>
                     <div class="demo-header-actions">
+                        <!-- Scales the frame from the outside. The demo is
+                             sandboxed and opaque-origin, so this document
+                             cannot set a zoom inside it. -->
+                        <button class="header-btn" id="demo-zoom-out" onclick="demoZoomBy(-1)"
+                                title="Zoom out">&minus;</button>
+                        <span class="demo-zoom" id="demo-zoom-level" onclick="demoZoomReset()"
+                              title="Click to reset to 100%">100%</span>
+                        <button class="header-btn" id="demo-zoom-in" onclick="demoZoomBy(1)"
+                                title="Zoom in">+</button>
+                        <!-- Text, not a glyph: three glyph buttons already sit
+                             here and a fourth would be unreadable. -->
+                        <button class="header-btn demo-ask-btn" onclick="askTutorAboutDemo()"
+                                title="Ask the tutor about this demo">Ask tutor</button>
+                        <!-- Sends a picture of the demo AND its identity. A
+                             system screenshot would reach the chat as an
+                             anonymous image with no link to the demo. -->
+                        <button class="header-btn" onclick="screenshotDemoForChat()"
+                                title="Send a snapshot of this demo to the chat">&#128247;</button>
+                        <button class="header-btn" onclick="startRegionCapture()"
+                                title="Send just part of this demo — drag a box">&#9635;</button>
+                        <button class="header-btn" id="demo-pin-btn" onclick="pinDemoToChat()"
+                                title="Bookmark this demo in the transcript">&#128204;</button>
                         <button class="header-btn" onclick="reloadDemo()"
                                 title="Restart this demo">&#8635;</button>
                         <button class="header-btn" onclick="deleteDemo()"
@@ -254,8 +279,29 @@
                     <span class="demo-title" id="demo-title"></span>
                     <span class="demo-summary" id="demo-summary"></span>
                 </div>
+                <!-- Appears while something inside the demo is highlighted.
+                     The frame reports its own selection over postMessage —
+                     this document cannot read into a sandboxed frame. -->
+                <div class="demo-selection-bar" id="demo-selection-bar" style="display:none">
+                    <span class="demo-selection-label">Selected:</span>
+                    <span class="demo-selection-text" id="demo-selection-text"></span>
+                    <button class="demo-selection-ask" onclick="askTutorAboutDemo()">Ask tutor about this</button>
+                </div>
                 <div class="demo-body" id="demo-body">
                     <div class="demo-empty" id="demo-empty"></div>
+                </div>
+                <!-- Talk to the builder about THIS demo. Docked here rather
+                     than floating: a floating window would cover the very
+                     thing being edited, and the demo is a work artifact, not
+                     a tangent (which is what the side-chat window is for). -->
+                <div class="demo-chat" id="demo-chat" style="display:none">
+                    <div class="demo-chat-log" id="demo-chat-log"></div>
+                    <div class="demo-chat-input">
+                        <input type="text" id="demo-chat-text"
+                               placeholder="Edit this demo — “add a reset button”. Not a chat."
+                               onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDemoEdit();}">
+                        <button id="demo-chat-send" onclick="sendDemoEdit()">Send</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -371,6 +417,22 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <!-- Rich rendering for tutor prose. All three are optional at runtime:
+         enrichMessage() feature-detects each one, so a CDN outage costs the
+         typesetting, not the message. Versions are pinned for the same reason
+         marked is — a silent major bump would change how every reply renders. -->
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+    <!-- Mermaid is ESM-only from v10, so it cannot be a classic <script> like
+         the others. Hang it on window so app.js (classic) can reach it, and
+         set a flag the renderer waits on — module execution is deferred, so
+         an early message can otherwise render before mermaid exists. -->
+    <script type="module">
+        import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs";
+        window.mermaid = mermaid;
+        window.dispatchEvent(new Event("mermaid-ready"));
+    </script>
     <script src="/static/app.js"></script>
     <!-- After app.js: notes.js uses renderMarkdown/escapeHtml and reads the
          currentEmail / currentSessionId globals it declares. -->

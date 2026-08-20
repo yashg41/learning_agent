@@ -17,6 +17,19 @@ router = APIRouter(prefix="/api")
 # How long the SSE generator waits for an event before emitting a heartbeat.
 KEEPALIVE_SECONDS = 15
 
+# Strong references to in-flight background tasks. asyncio only holds a weak
+# reference to a running task, so a bare create_task() can be garbage-collected
+# mid-flight — which tears down the SDK transport under a live agent turn.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_tracked(coro) -> asyncio.Task:
+    """create_task, but the task is kept alive until it finishes."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
 
 # Ceiling on a single decoded attachment. The browser enforces its own limit
 # for a fast error, but that's a UX affordance — this is the actual control.
@@ -43,6 +56,11 @@ class ChatRequest(BaseModel):
     # Images attached to THIS turn only. Sent to the model as content blocks
     # and written to disk; the transcript keeps paths, never base64.
     attachments: list[Attachment] | None = None
+    # A demo the learner is asking about, staged from the Demo pane:
+    # {"demo_id": "d_xxx", "selection": {"text", "tag", "ids"}}. The server
+    # turns this into a structural digest — the client never decides what the
+    # model sees, and the html is never sent.
+    demo_ref: dict | None = None
 
 
 def _validate_attachments(attachments: list[Attachment] | None) -> list[Attachment]:
@@ -114,13 +132,14 @@ async def chat_stream(body: ChatRequest):
                 fork_from=body.fork_from,
                 set_active=body.set_active,
                 attachments=[a.model_dump() for a in attachments],
+                demo_ref=body.demo_ref,
             )
         except Exception as e:
             await event_queue.put({"type": "error", "content": str(e)})
         finally:
             await event_queue.put({"type": "done"})
 
-    asyncio.create_task(run_and_signal_done())
+    _spawn_tracked(run_and_signal_done())
 
     async def event_generator():
         while True:
@@ -313,7 +332,7 @@ async def code_run_stream(body: RunCodeRequest, request: Request):
             logger.exception("code run failed")
             await queue.put({"type": "error", "message": str(e)})
 
-    asyncio.create_task(run_and_signal_done())
+    _spawn_tracked(run_and_signal_done())
     return _sse_response(_pump_sse(queue, request, cancel))
 
 
@@ -341,7 +360,7 @@ async def code_install(body: InstallRequest, request: Request):
             logger.exception("install failed")
             await queue.put({"type": "error", "message": str(e)})
 
-    asyncio.create_task(run_and_signal_done())
+    _spawn_tracked(run_and_signal_done())
     return _sse_response(_pump_sse(queue, request, cancel))
 
 
@@ -367,6 +386,45 @@ async def code_artifact(email: str, run_id: str, filename: str):
         raise HTTPException(status_code=404, detail="not found")
 
     return FileResponse(target)
+
+
+@router.get("/code/verified/{email}/{run_id}")
+async def code_verified_source(email: str, run_id: str):
+    """The exact source the tutor executed for `run_id`.
+
+    This is what closes the verification gap. The tutor used to run a snippet
+    and then RETYPE it into chat, and a real session showed the retyped copy
+    drifting from what actually ran — it grew an `export_text` call that had
+    never been executed, and that call was the one that crashed for the
+    learner. Serving cell.py from the run directory means the code the learner
+    sees never passes back through the model: sandbox -> disk -> browser.
+
+    Reads the durable archive under the user's data dir, NOT the run
+    directory: scratch lives in /tmp and is swept hourly, while a saved
+    conversation can cite a run weeks later.
+
+    Same containment discipline as code_artifact above: resolve, then check.
+    A run_id reaching here came from a chat message, so it is attacker-shaped
+    input even in a single-user app.
+    """
+    from backend.codejobs import _verified_dir, verified_path
+
+    base = os.path.realpath(_verified_dir(email))
+    target = os.path.realpath(verified_path(email, run_id))
+
+    # commonpath, not startswith: the latter says /a/b-evil is inside /a/b.
+    if os.path.commonpath([base, target]) != base:
+        raise HTTPException(status_code=404, detail="not found")
+    if not os.path.isfile(target):
+        # Never archived, or a run that failed. The frontend falls back to
+        # rendering the placeholder as inert text.
+        raise HTTPException(status_code=404, detail="not found")
+
+    try:
+        with open(target, encoding="utf-8") as f:
+            return {"run_id": run_id, "code": f.read()}
+    except OSError:
+        raise HTTPException(status_code=404, detail="not found")
 
 
 @router.post("/code/reset_venv")
@@ -443,7 +501,7 @@ async def get_knowledge_graph(email: str):
     """
     from backend.agent import _get_user_data_dir
     from backend.knowledge import (
-        KnowledgeStore, CURRICULUM_GRAPH, CATEGORY_COLORS, TRACK_COLORS, category_label,
+        KnowledgeStore, CURRICULUM_GRAPH, CATEGORY_COLORS, TRACK_COLORS,
     )
 
     user_dir = _get_user_data_dir(email)
@@ -484,12 +542,40 @@ async def get_knowledge_graph(email: str):
         for prereq in info["prereqs"]:
             edges.append({"source": prereq, "target": concept_id})
 
+    # Concepts the tutor taught that the fixed curriculum never listed. Without
+    # this the graph shows only CURRICULUM_GRAPH, so anything learned past the
+    # built-in syllabus is recorded in the knowledge file but invisible here.
+    categories = store.categories()
+    for concept_id, user_data in user_concepts.items():
+        if concept_id in CURRICULUM_GRAPH:
+            continue
+        category = user_data.get("category", "")
+        nodes.append({
+            "id": concept_id,
+            "name": user_data.get("name") or concept_id.replace("_", " ").title(),
+            "category": category,
+            "track": user_data.get("track", "custom"),
+            "color": categories.get(category, {}).get("color", "#565f89"),
+            "mastery": user_data.get("mastery", "not_started"),
+            "review_count": user_data.get("review_count", 0),
+            "last_reviewed": user_data.get("last_reviewed", ""),
+            "feeds_tracks": [],
+            "is_bridge": False,
+            "is_custom": True,
+        })
+        # Only to prereqs that exist as nodes — a dangling edge would leave the
+        # force layout referencing a node id it never received.
+        known = set(CURRICULUM_GRAPH) | set(user_concepts)
+        for prereq in user_data.get("prerequisites", []):
+            if prereq in known:
+                edges.append({"source": prereq, "target": concept_id})
+
     return {
         "nodes": nodes,
         "edges": edges,
         "categories": [
-            {"id": cat, "name": category_label(cat), "color": color}
-            for cat, color in CATEGORY_COLORS.items()
+            {"id": cat, "name": meta["label"], "color": meta["color"]}
+            for cat, meta in categories.items()
         ],
         "track_colors": TRACK_COLORS,
         "profile": data.get("profile", {}),
@@ -541,6 +627,13 @@ async def get_user_memory(email: str):
 
 class SessionCreateRequest(BaseModel):
     name: str = ""
+    # A derived session names its origin so the sidebar can nest it instead of
+    # listing it flat. "" keeps the plain-main default.
+    kind: str = ""
+    parent_session_id: str = ""
+    # Register an id the agent already minted (a fork) rather than inventing
+    # one. Empty means "create a fresh session", the "+" button's behaviour.
+    session_id: str = ""
 
 
 class SessionRenameRequest(BaseModel):
@@ -605,13 +698,31 @@ async def list_sessions(email: str):
 
 @router.post("/sessions/{email}")
 async def create_session(email: str, body: SessionCreateRequest):
-    """Create a new empty session for a user."""
+    """Create a new empty session, or register one the agent already minted.
+
+    The second case is what a side chat needs. Its session id only exists once
+    the SDK forks, and the agent's own save_user_session runs after the turn
+    completes — so the turn-1 rename PATCH would hit a row that is not there
+    yet and 404. Registering the id here as soon as session_init reports it
+    closes that gap; save_user_session updates in place, so the agent's later
+    save is harmless.
+
+    A derived session never becomes active: it is a background conversation,
+    and stealing the pointer would change which chat the user returns to.
+    """
     import uuid
     from backend.memory import save_user_session
 
-    session_id = str(uuid.uuid4())
+    session_id = body.session_id or str(uuid.uuid4())
     name = body.name or "New Session"
-    save_user_session(email, session_id, name=name)
+    save_user_session(
+        email,
+        session_id,
+        name=name,
+        kind=body.kind,
+        parent_session_id=body.parent_session_id,
+        set_active=not body.kind,
+    )
     return {"session_id": session_id, "name": name}
 
 
@@ -1510,4 +1621,114 @@ async def delete_demo_route(email: str, demo_id: str):
 
     if not delete_demo(email, demo_id):
         raise HTTPException(status_code=404, detail="Demo not found")
+    return {"ok": True}
+
+
+class EditDemoRequest(BaseModel):
+    """A change asked for by talking to the demo directly, not via the tutor."""
+    request: str
+
+
+@router.post("/demos/{email}/{demo_id}/edit")
+async def edit_demo_route(email: str, demo_id: str, body: EditDemoRequest):
+    """Ask the builder to change this demo. Returns a job immediately.
+
+    Same pipeline as a tutor-delegated change: both resume the demo's own
+    builder session, so an edit is incremental either way.
+    """
+    from backend.demojobs import start_demo_job
+    from backend.demos import get_demo
+
+    demo = get_demo(email, demo_id)
+    if demo is None:
+        raise HTTPException(status_code=404, detail="Demo not found")
+
+    request = (body.request or "").strip()
+    if not request:
+        raise HTTPException(status_code=400, detail="request is empty")
+
+    return start_demo_job(
+        email=email,
+        chat_session_id=demo.get("chat_session_id") or None,
+        title=demo.get("title", ""),
+        concept_id=demo.get("concept_id", ""),
+        request=request,
+        base_demo_id=demo_id,
+    )
+
+
+class PinDemoRequest(BaseModel):
+    demo_id: str
+
+
+@router.post("/sessions/{email}/{session_id}/pin-demo")
+async def pin_demo_route(email: str, session_id: str, body: PinDemoRequest):
+    """Leave a visible bookmark card for a demo in the transcript.
+
+    This is for the LEARNER, not the model. Turns written here go to
+    conversation.jsonl, which the model never reads — its context comes from
+    the SDK session alone. To put a demo in front of the tutor, stage it with
+    the "Ask tutor" button, which sends a digest in the prompt (see
+    run_agent's demo_ref).
+
+    Non-terminal, unlike the side-chat fold: the demo stays open and keeps its
+    builder session.
+    """
+    from backend.demos import get_demo_meta
+    from backend.memory import append_turn_to_session
+
+    # Metadata only — get_demo would read the whole html off disk just to
+    # throw it away.
+    demo = get_demo_meta(email, body.demo_id)
+    if demo is None:
+        raise HTTPException(status_code=404, detail="Demo not found")
+
+    turn = {
+        "type": "demo_pin",
+        "demo_id": demo["id"],
+        "title": demo.get("title", ""),
+        "summary": demo.get("summary", ""),
+        "version": demo.get("version", 1),
+    }
+    append_turn_to_session(email, session_id, turn)
+    return turn
+
+
+# --- Demo build jobs ---
+#
+# A demo is built by a background agent, so the chat turn that asked for it
+# finishes immediately. The frontend polls these to drive the chip from
+# "building" to "ready" — and to rebuild that state after a page refresh,
+# since a build outlives the request that started it.
+
+
+@router.get("/demo-jobs/{email}")
+async def list_demo_jobs_route(email: str):
+    from backend.demojobs import list_jobs
+
+    return {"jobs": list_jobs(email)}
+
+
+@router.get("/demo-jobs/{email}/{job_id}")
+async def get_demo_job_route(email: str, job_id: str):
+    from backend.demojobs import get_job
+
+    record = get_job(email, job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return record
+
+
+@router.post("/demo-jobs/{email}/{job_id}/cancel")
+async def cancel_demo_job_route(email: str, job_id: str):
+    """Stop a running build.
+
+    Cancellation is explicit only. Closing the tab deliberately does NOT
+    cancel: the learner should be able to walk away and find the demo waiting.
+    (The code runner does the opposite, where disconnect means Stop.)
+    """
+    from backend.demojobs import request_cancel
+
+    if not request_cancel(email, job_id):
+        raise HTTPException(status_code=404, detail="Job not found or already finished")
     return {"ok": True}

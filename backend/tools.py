@@ -1,6 +1,7 @@
 """MCP tool definitions for the Python Learning Agent.
 
-11 tools across memory, curriculum, quiz, and feedback systems:
+Tools across memory, curriculum, quiz, feedback, code execution and demos.
+The demo tools are documented at their definitions below; the rest:
 
 Episodic (ChromaDB):
   - search_past_conversations: Semantic search over past exchanges + summaries
@@ -19,8 +20,16 @@ Quiz + feedback:
     to agent so chat-text A/B/C/D positions are uniformly randomized.
   - get_feedback: Read aspect-scoped guidance (global + user-specific)
     before performing quiz / suggest / explain actions.
+
+Code execution:
+  - run_code: Run Python in the learner's venv and return its real output, so
+    the tutor verifies a snippet instead of predicting what it prints. Slow
+    work (installs, long fits) goes to a background job instead of holding
+    the chat turn — see codejobs.py.
+  - get_code_result: Collect a background run's output on a later turn.
 """
 
+import ast
 import json
 import logging
 import os
@@ -35,13 +44,55 @@ from backend.knowledge import KnowledgeStore
 
 logger = logging.getLogger(__name__)
 
+# Ceiling on one get_demo_source result. Everything a tool returns stays in the
+# SDK transcript and is re-sent on every later turn of the session, so this is
+# a permanent per-call cost, not a one-off. ~4000 chars ≈ 1000 tokens.
+MAX_DEMO_SOURCE_CHARS = 4000
+DEMO_SOURCE_CONTEXT_LINES = 12
 
-def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
+# Same reasoning for run_code: stdout lands in the transcript permanently. The
+# sandbox's own 50KB cap is sized for a human reading a notebook; this one is
+# sized for something re-sent on every subsequent turn.
+MAX_RUN_OUTPUT_CHARS = 3000
+
+# Mirror of agent.TOOL_RESULT_MAX_CHARS, the ceiling that module applies when
+# writing a tool result into the transcript. Duplicated rather than imported:
+# agent.py imports this module, so importing back would be a cycle. Keep the
+# two in step — run_code sizes its output against this so that verified_id
+# always survives the truncation (it did not, and the model retyped code
+# instead of citing it).
+TRANSCRIPT_RESULT_BUDGET = 2000
+
+# Shorter than the notebook's 15s. The learner is watching a reply compose, and
+# a verification snippet that needs longer than this is the wrong snippet.
+RUN_CODE_TIMEOUT_SEC = 10
+
+# Above this fraction of English (string literals + comments), a cell is a
+# lecture wearing a program's clothes. Set from real data rather than taste:
+# in one session the legitimate calls measured 11-34% and the abusive ones
+# 71-99%, so 0.6 sits in an empty gap. See prose_ratio().
+MAX_PROSE_RATIO = 0.6
+
+
+def create_learning_tools(
+    user_data_dir: str,
+    episodic: EpisodicMemory,
+    session_ctx: dict | None = None,
+    build_ctx: dict | None = None,
+):
     """Create in-process MCP tools for the learning agent.
 
     Args:
         user_data_dir: Path to the user's data directory (data/users/<email>/)
         episodic: Shared EpisodicMemory instance
+        session_ctx: Caller-owned dict that run_agent_internal fills with the
+            live session id. request_demo needs it to know which conversation
+            to fork, and the id does not exist when this factory is called.
+            None for the demo builder, which disables request_demo — a builder
+            must not be able to request another build.
+        build_ctx: Caller-owned dict for a demo build: carries the ids to stamp
+            onto saved demos, and receives back the demo_id that was written so
+            the job runner can tell whether the build actually produced one.
 
     Returns:
         McpSdkServerConfig for use in ClaudeAgentOptions.mcp_servers
@@ -241,13 +292,19 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
                 "category": {
                     "type": "string",
                     "description": (
-                        "Category of the concept. Pick the one that fits best. "
+                        "REQUIRED. Snake_case category id. Prefer an existing one: "
                         "Python: fundamentals, control_flow, data_structures, functions, oop, "
                         "error_handling, file_io, modules, testing, data_processing, advanced. "
                         "ML: ml_core, ml_supervised, ml_unsupervised, ml_eval. "
                         "Deep learning: dl_basics, dl_architectures. "
                         "LLM / RAG: llm_core, llm_rag. "
-                        "MLOps: ops_serving, ops_monitoring."
+                        "MLOps: ops_serving, ops_monitoring. "
+                        "Quantum: qc_foundations, qc_qiskit, qc_algorithms, qc_advanced. "
+                        "System design: sd_foundations, sd_principles, sd_components, "
+                        "sd_data, sd_distributed, sd_architecture. "
+                        "If none fits, invent one — keep the track prefix so it "
+                        "groups correctly (e.g. ml_ensembles) and it is registered "
+                        "automatically. Never omit this field."
                     ),
                 },
                 "mastery": {
@@ -597,6 +654,283 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             return _error_result(f"Error loading feedback: {e}")
 
     @tool(
+        "run_code",
+        "Execute Python in the learner's virtualenv and see its real output. "
+        "Use this to CHECK YOURSELF before showing the learner a snippet whose "
+        "result you would otherwise be predicting.\n\n"
+        "Do NOT call this to format prose. If the code is only print() "
+        "statements containing text you wrote, you already know the output and "
+        "running it proves nothing — write it in your reply instead.\n\n"
+        "Each call is a FRESH process with no shared state, so every snippet "
+        "must be self-contained. A clean run returns a verified_id, which is "
+        "how you show the code to the learner WITHOUT retyping it.\n\n"
+        "Full mechanics — the verified:<id> placeholder syntax, %pip install, "
+        "background runs, reading the result — are in the `code-execution` "
+        "skill. Load it before your first run of a conversation.",
+        {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Complete, self-contained Python program. Include every "
+                        "import; nothing persists from earlier calls."
+                    ),
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": (
+                        "One line on what you are checking, e.g. 'confirm the "
+                        "split threshold before explaining it'. Recorded with "
+                        "the run for debugging; the learner does not see it, "
+                        "so say anything they need to hear in your reply."
+                    ),
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run without waiting. Returns a job id immediately "
+                        "instead of the output; collect it later with "
+                        "get_code_result. Use for anything slow — a '%pip "
+                        "install' line, a real training loop, the first plot "
+                        "in a new environment — so the learner is not left "
+                        "watching a frozen composer. Default false."
+                    ),
+                },
+            },
+            "required": ["code"],
+        },
+    )
+    async def run_code_tool(args):
+        """Run a snippet in the learner's venv and hand back its real output.
+
+        Imported lazily: sandbox pulls in the venv machinery, and the demo
+        builder loads this module too without ever running code.
+
+        The result is deliberately trimmed. Everything a tool returns stays in
+        the transcript and is re-sent on every later turn, so a runaway loop
+        printing 50KB would become a permanent per-turn cost. The sandbox caps
+        output at MAX_OUTPUT_BYTES; we cap tighter, keeping the head and tail
+        because a traceback's useful line is at the end.
+        """
+        from backend.sandbox import run_code, VenvError
+
+        try:
+            code = (args.get("code") or "").strip()
+            if not code:
+                return _error_result("code is required")
+
+            ratio = prose_ratio(code)
+            if ratio > MAX_PROSE_RATIO and not computes_nothing(code):
+                # Real computation is in here, but it is buried in an essay.
+                # Refusing the whole cell rather than running it keeps the
+                # lecture out of the transcript; the model can resubmit just
+                # the part that computes.
+                return _error_result(
+                    f"Not run: {ratio:.0%} of this cell is English text in "
+                    f"strings and comments, not code. The explanation belongs "
+                    f"in your reply as prose — send only the lines that "
+                    f"actually compute something, and write the teaching "
+                    f"around them in chat."
+                )
+
+            if computes_nothing(code):
+                # Refuse rather than run: the output would be the model's own
+                # text handed back to it, and it would then live in the
+                # transcript forever. Says what to do instead, so this costs
+                # one corrected turn rather than a retry loop.
+                return _error_result(
+                    "Not run: this code computes nothing — it only prints text "
+                    "you wrote, so its output is already known to you and "
+                    "verifies nothing. Put explanations, summaries, "
+                    "corrections and comparisons directly in your reply as "
+                    "prose. Use run_code only when real computation decides "
+                    "the answer (fitting a model, checking a threshold, "
+                    "comparing actual values)."
+                )
+
+            email = _email_from_dir(user_data_dir)
+
+            if args.get("background"):
+                from backend.codejobs import start_code_job
+
+                record = start_code_job(email, code, args.get("purpose", ""))
+                return _text_result(json.dumps({
+                    "job_id": record["job_id"],
+                    "state": record["state"],
+                    "note": (
+                        "Running in the background — the chat is not blocked. "
+                        "Keep teaching, then call get_code_result with this "
+                        "job_id to collect the output. Do not describe what "
+                        "the code prints until you have it."
+                    ),
+                }, default=str))
+
+            result = await run_code(email, code, timeout=RUN_CODE_TIMEOUT_SEC)
+
+            # Key order is load-bearing. agent.py truncates a tool result to
+            # TOOL_RESULT_MAX_CHARS before writing it to the transcript, and
+            # the transcript is what the model re-reads when it composes the
+            # reply. With verified_id last, a run with sizable stdout pushed it
+            # past the cut: the model saw no id to cite and fell back to
+            # retyping the code — the exact drift the placeholder exists to
+            # prevent. Observed twice in one session at exactly 2000 chars.
+            # Anything the model must ACT on goes first; bulk output last.
+            payload = {}
+            if result["exit_code"] == 0:
+                # The handle the model shows the learner instead of retyping the
+                # code. Only for a clean run: pointing at a snippet that crashed
+                # would present the crash as a worked example. See the tool
+                # description for the placeholder syntax.
+                from backend.codejobs import save_verified
+
+                save_verified(email, result["run_id"], code)
+                payload["verified_id"] = result["run_id"]
+                # Spelled out in the result, not just the tool description:
+                # the description is read once at the top of the turn, while
+                # this sits right where the model decides what to write next.
+                # It ignored the placeholder twice with the id available.
+                payload["show_this_code_by_writing"] = (
+                    f"```verified:{result['run_id']}\n```"
+                )
+                payload["do_not"] = (
+                    "Do not paste the code into your reply. The line above IS "
+                    "the code block the learner sees."
+                )
+            payload["exit_code"] = result["exit_code"]
+            payload["duration_ms"] = result["duration_ms"]
+            if result["timed_out"]:
+                payload["timed_out"] = True
+                # A dead end otherwise: the model sees only that it was killed.
+                # Name the escape hatch so a misjudged fast-path call costs one
+                # retry rather than the verification being abandoned. First use
+                # of matplotlib in a fresh venv hits this too — the font cache
+                # build alone can exceed the budget — and it succeeds on the
+                # retry, so the advice holds for both causes.
+                payload["hint"] = (
+                    f"Killed at {RUN_CODE_TIMEOUT_SEC}s. If the work is "
+                    f"genuinely slow (installs, big fits, first plot in a new "
+                    f"environment), resubmit with background=true. Otherwise "
+                    f"shrink it — fewer rows, fewer iterations."
+                )
+            if result["images"]:
+                # Names only. The bytes are served over HTTP to the learner;
+                # the model cannot see them and does not need to.
+                payload["images"] = [img["name"] for img in result["images"]]
+            if result["suggestion"] and "hint" not in payload:
+                # The run died on a missing import. Tell the model the exact
+                # magic line to retry with, so it fixes this in one more call
+                # instead of guessing the PyPI name (sklearn is the trap).
+                #
+                # Only when nothing else set a hint. A timeout exits -15, which
+                # is non-zero, so a killed cell that had already printed a
+                # ModuleNotFoundError sets BOTH — and this used to overwrite
+                # the timeout advice, sending the model back to the inline path
+                # to be killed again instead of to background=true.
+                pkg = result["suggestion"]["package"]
+                payload["hint"] = (
+                    f"Missing module. Retry with '%pip install {pkg}' as the "
+                    f"first line of the cell."
+                )
+            # Last, and budgeted: whatever room the fixed-size fields above
+            # leave is what output may occupy, so a chatty cell can never push
+            # verified_id out of the stored transcript again.
+            #
+            # Budgeted ONCE across both streams, not once each. Sizing them
+            # independently let a cell with large stdout AND stderr reach ~3400
+            # chars against a 2000 budget, so verified_id survived only by
+            # being first in the dict rather than because the cap worked.
+            # stderr is filled first: when a run fails, the traceback is what
+            # the model needs, and stdout is usually the less useful half.
+            room = max(200, TRANSCRIPT_RESULT_BUDGET - len(json.dumps(payload)) - 200)
+            stderr = _clip_output(result["stderr"], room)
+            payload["stdout"] = _clip_output(
+                result["stdout"], max(200, room - len(stderr))
+            )
+            payload["stderr"] = stderr
+
+            # Then check the REAL serialized length: JSON escaping (\n, quotes)
+            # inflates output past any character-count estimate. Trim from the
+            # already-clipped strings by slicing, NOT by re-clipping — a second
+            # _clip_output pass re-inserts its "[N chars trimmed]" marker and
+            # can leave the string the same length, which made an earlier
+            # version of this loop spin forever inside the request handler.
+            for _ in range(3):
+                over = len(json.dumps(payload, default=str)) - TRANSCRIPT_RESULT_BUDGET
+                if over <= 0:
+                    break
+                longest = max(("stdout", "stderr"), key=lambda k: len(payload[k]))
+                keep = max(100, len(payload[longest]) - over - 32)
+                payload[longest] = payload[longest][:keep] + "\n... [trimmed]"
+            return _text_result(json.dumps(payload, default=str))
+        except VenvError as e:
+            return _error_result(f"Environment is not usable: {e}")
+        except Exception as e:
+            logger.error(f"run_code error: {e}", exc_info=True)
+            return _error_result(f"Error running code: {e}")
+
+    @tool(
+        "get_code_result",
+        "Collect the output of a background run started by run_code. If the "
+        "state is still 'queued' or 'building' it is not finished — carry on "
+        "teaching and check again on a later turn rather than waiting, and do "
+        "not describe what the code prints until you have the real output.",
+        {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id run_code returned.",
+                },
+            },
+            "required": ["job_id"],
+        },
+    )
+    async def get_code_result_tool(args):
+        """Read a background run's record.
+
+        Returns the same output shape as the inline path once the job reaches
+        a terminal state, so the model does not have to learn two formats.
+        """
+        from backend.codejobs import get_job
+        from backend.demojobs import TERMINAL
+
+        try:
+            job_id = (args.get("job_id") or "").strip()
+            if not job_id:
+                return _error_result("job_id is required")
+
+            email = _email_from_dir(user_data_dir)
+            record = get_job(email, job_id)
+            if record is None:
+                return _error_result(f"No such job: {job_id}")
+
+            payload = {"job_id": job_id, "state": record["state"]}
+            if record["state"] not in TERMINAL:
+                payload["note"] = (
+                    "Still running. Keep teaching and check again later."
+                )
+            else:
+                payload.update({
+                    "stdout": record.get("stdout", ""),
+                    "stderr": record.get("stderr", ""),
+                    "exit_code": record.get("exit_code"),
+                    "duration_ms": record.get("duration_ms"),
+                })
+                if record.get("run_id"):
+                    payload["verified_id"] = record["run_id"]
+                if record.get("timed_out"):
+                    payload["timed_out"] = True
+                if record.get("images"):
+                    payload["images"] = record["images"]
+                if record.get("error"):
+                    payload["error"] = record["error"]
+            return _text_result(json.dumps(payload, default=str))
+        except Exception as e:
+            logger.error(f"get_code_result error: {e}", exc_info=True)
+            return _error_result(f"Error reading job: {e}")
+
+    @tool(
         "save_demo",
         "Save a self-contained interactive HTML demo so the learner can open "
         "and play with it. Call this ONLY when the learner has explicitly "
@@ -641,15 +975,34 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
         """
         from backend.demos import save_demo as store_demo
 
+        # Only the builder may write a demo. allowed_tools is advisory under
+        # bypassPermissions (that mode skips the check it feeds), and the model
+        # was observed reaching save_demo anyway via the skill — which put 18KB
+        # of HTML back inside the chat turn, the exact freeze this design
+        # removes. build_ctx is present only for builder runs, so it is the
+        # real boundary.
+        if build_ctx is None:
+            return _error_result(
+                "save_demo is not available here. Call request_demo(title, "
+                "concept_id, request) instead — a background builder writes "
+                "the demo so the learner is not blocked. Do not write HTML."
+            )
+
         try:
             email = _email_from_dir(user_data_dir)
+            build = build_ctx or {}
             meta = store_demo(
                 email=email,
                 title=args.get("title", ""),
                 html=args.get("html", ""),
                 concept_id=args.get("concept_id", ""),
                 summary=args.get("summary", ""),
+                # Stamped by the job runner, which knows both ids. This is what
+                # makes the demo refinable later.
+                builder_session_id=build.get("builder_session_id", ""),
+                chat_session_id=build.get("chat_session_id", ""),
             )
+            build["demo_id"] = meta["id"]
             from backend.demos import missing_element_ids
 
             payload = {
@@ -682,6 +1035,326 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             logger.error(f"save_demo error: {e}", exc_info=True)
             return _error_result(f"Error saving demo: {e}")
 
+    @tool(
+        "get_demo_html",
+        "Read the current HTML of a demo you are about to change. Call this "
+        "before update_demo so you edit the existing demo rather than "
+        "rewriting it from memory.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {"type": "string", "description": "The demo to read"},
+            },
+            "required": ["demo_id"],
+        },
+    )
+    async def get_demo_html_tool(args):
+        """Return a demo's HTML. Builder-only — never in the tutor's allowlist.
+
+        The tutor must not call this: a demo can be up to MAX_DEMO_BYTES, and
+        pulling that into the chat transcript would re-send it to the model on
+        every subsequent turn.
+        """
+        from backend.demos import get_demo
+
+        # Builder-only: a demo can be up to MAX_DEMO_BYTES, and pulling that
+        # into the tutor's transcript would re-send it on every later turn.
+        if build_ctx is None:
+            return _error_result("get_demo_html is only available to the demo builder.")
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            demo = get_demo(email, args.get("demo_id", ""))
+            if demo is None:
+                return _error_result(f"No demo with id {args.get('demo_id')!r}")
+            return _text_result(demo["html"])
+        except Exception as e:
+            logger.error(f"get_demo_html error: {e}", exc_info=True)
+            return _error_result(f"Error reading demo: {e}")
+
+    @tool(
+        "update_demo",
+        "Replace the HTML of an existing demo, keeping its id and its place "
+        "in the learner's list. Use this for every change to a demo that "
+        "already exists — never save_demo, which would create a duplicate.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {"type": "string", "description": "The demo to update"},
+                "html": {
+                    "type": "string",
+                    "description": (
+                        "Complete replacement HTML document, self-contained. "
+                        "Keep the parts that already worked."
+                    ),
+                },
+                "title": {"type": "string", "description": "Optional new title"},
+                "summary": {
+                    "type": "string",
+                    "description": "One line on what changed and what to try",
+                },
+            },
+            "required": ["demo_id", "html"],
+        },
+    )
+    async def update_demo_tool(args):
+        """Edit a demo in place so refinement does not churn the demo list."""
+        from backend.demos import update_demo as store_update
+
+        if build_ctx is None:
+            return _error_result(
+                "update_demo is not available here. Call request_demo with "
+                "base_demo_id set to change an existing demo."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            build = build_ctx or {}
+            meta = store_update(
+                email=email,
+                demo_id=args.get("demo_id", ""),
+                html=args.get("html", ""),
+                title=args.get("title", ""),
+                summary=args.get("summary", ""),
+                builder_session_id=build.get("builder_session_id", ""),
+            )
+            if meta is None:
+                return _error_result(f"No demo with id {args.get('demo_id')!r}")
+            build["demo_id"] = meta["id"]
+            return _text_result(json.dumps({
+                "demo_id": meta["id"],
+                "version": meta["version"],
+                "status": "updated",
+            }))
+        except ValueError as e:
+            return _error_result(f"Demo rejected: {e}")
+        except Exception as e:
+            logger.error(f"update_demo error: {e}", exc_info=True)
+            return _error_result(f"Error updating demo: {e}")
+
+    @tool(
+        "get_demo_source",
+        "Read the parts of a demo's code that mention a name — a function, an "
+        "element id, or a label the learner pointed at. Use it when the "
+        "learner asks why something in a demo behaves as it does and the "
+        "structure you were given is not enough. Returns matching excerpts "
+        "only, never the whole file: pass a specific query like 'resetBtn'.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {"type": "string", "description": "The demo to read"},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "A function name, element id, or literal string to "
+                        "find. Required — this never returns the whole file."
+                    ),
+                },
+            },
+            "required": ["demo_id", "query"],
+        },
+    )
+    async def get_demo_source_tool(args):
+        """Slice a demo's source around a query. Tutor-only.
+
+        The builder has get_demo_html for the whole document; the tutor must
+        never pull that in, because everything in a tool result stays in the
+        SDK transcript and is re-sent on every later turn of the session. A
+        17KB demo would cost ~4200 tokens per turn for the rest of the
+        conversation. The char cap below is the real protection — it is
+        enforced here and no prompt can talk its way past it.
+        """
+        from backend.demos import _read_json, _html_path, _meta_path, _ID_ATTR, _FN_DECL
+
+        if session_ctx is None:
+            return _error_result(
+                "get_demo_source is not available here. If you are the demo "
+                "builder, call get_demo_html for the full document."
+            )
+
+        demo_id = (args.get("demo_id") or "").strip()
+        query = (args.get("query") or "").strip()
+        if not query:
+            return _error_result(
+                "query is required — name a function, element id, or label to "
+                "look for. This tool never returns the whole demo."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            if _read_json(_meta_path(email, demo_id)) is None:
+                return _error_result(f"No demo with id {demo_id!r}")
+            path = _html_path(email, demo_id)
+            if not os.path.isfile(path):
+                return _error_result(f"No source on disk for {demo_id!r}")
+            with open(path, encoding="utf-8") as f:
+                html = f.read()
+
+            lines = html.splitlines()
+            needle = query.lower()
+            hits = [i for i, line in enumerate(lines) if needle in line.lower()]
+
+            if not hits:
+                # The name not existing is often itself the answer, so say what
+                # does exist rather than just reporting nothing.
+                ids = sorted(set(_ID_ATTR.findall(html)))[:20]
+                fns = sorted(set(_FN_DECL.findall(html)))[:20]
+                return _error_result(
+                    f"Nothing in the demo mentions {query!r}. "
+                    f"Element ids present: {', '.join(ids) or 'none'}. "
+                    f"Functions defined: {', '.join(fns) or 'none'}."
+                )
+
+            # Merge overlapping context windows so a dense match doesn't repeat
+            # the same lines several times over.
+            windows: list[list[int]] = []
+            for i in hits:
+                lo = max(0, i - DEMO_SOURCE_CONTEXT_LINES)
+                hi = min(len(lines), i + DEMO_SOURCE_CONTEXT_LINES + 1)
+                if windows and lo <= windows[-1][1]:
+                    windows[-1][1] = max(windows[-1][1], hi)
+                else:
+                    windows.append([lo, hi])
+
+            chunks = []
+            for lo, hi in windows:
+                body = "\n".join(
+                    f"{n + 1:4} | {lines[n]}" for n in range(lo, hi)
+                )
+                chunks.append(f"--- lines {lo + 1}-{hi} ---\n{body}")
+
+            out = "\n\n".join(chunks)
+            truncated = len(out) > MAX_DEMO_SOURCE_CHARS
+            if truncated:
+                out = out[:MAX_DEMO_SOURCE_CHARS] + "\n…[truncated — narrow your query]"
+
+            return _text_result(
+                f"{len(hits)} line(s) match {query!r} in {demo_id}:\n\n{out}"
+            )
+        except Exception as e:
+            logger.error(f"get_demo_source error: {e}", exc_info=True)
+            return _error_result(f"Error reading demo source: {e}")
+
+    @tool(
+        "search_demos",
+        "Find demos this learner built earlier, by title or concept. Use it "
+        "when they refer to a demo that is not listed in 'Demos in This "
+        "Session' — e.g. 'that hashing demo from last week'.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words from the title or concept. Omit to list recent demos.",
+                },
+            },
+            "required": [],
+        },
+    )
+    async def search_demos_tool(args):
+        """Titles and ids only — deliberately never the HTML."""
+        from backend.demos import list_demos
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            query = (args.get("query") or "").strip().lower()
+            entries = list_demos(email)
+            if query:
+                terms = query.split()
+                entries = [
+                    e for e in entries
+                    if any(
+                        t in f"{e.get('title','')} {e.get('concept_id','')}".lower()
+                        for t in terms
+                    )
+                ]
+            return _text_result(json.dumps({
+                "demos": [
+                    {
+                        "demo_id": e["id"],
+                        "title": e["title"],
+                        "concept_id": e.get("concept_id"),
+                        "version": e.get("version", 1),
+                    }
+                    for e in entries[:20]
+                ]
+            }))
+        except Exception as e:
+            logger.error(f"search_demos error: {e}", exc_info=True)
+            return _error_result(f"Error searching demos: {e}")
+
+    @tool(
+        "request_demo",
+        "Ask the demo builder to construct an interactive demo in the "
+        "background. Returns immediately — do NOT write any HTML yourself. "
+        "Call this ONLY when the learner explicitly asked to see, visualise "
+        "or interact with something. To change a demo that already exists, "
+        "pass its base_demo_id.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short name, e.g. 'Gradient descent steps'",
+                },
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What to build or change, in detail: what the learner "
+                        "is confused about, which values matter, what they "
+                        "should be able to manipulate."
+                    ),
+                },
+                "concept_id": {
+                    "type": "string",
+                    "description": "Concept this demonstrates, e.g. 'gradient_descent'",
+                },
+                "base_demo_id": {
+                    "type": "string",
+                    "description": "Set ONLY when changing an existing demo.",
+                },
+            },
+            "required": ["title", "request"],
+        },
+    )
+    async def request_demo_tool(args):
+        """Queue a background build and return a job id straight away.
+
+        The whole point is that this returns in microseconds. Generation used
+        to happen inline, which meant the learner's composer stayed disabled
+        for the ~60s it took the model to write the HTML.
+        """
+        from backend.demojobs import start_demo_job
+
+        if session_ctx is None:
+            return _error_result(
+                "request_demo is not available here. If you are the demo "
+                "builder, call save_demo or update_demo directly."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            job = start_demo_job(
+                email=email,
+                chat_session_id=session_ctx.get("session_id"),
+                title=args.get("title", ""),
+                concept_id=args.get("concept_id", ""),
+                request=args.get("request", ""),
+                base_demo_id=(args.get("base_demo_id") or "").strip() or None,
+            )
+            return _text_result(json.dumps({
+                "job_id": job["job_id"],
+                "status": "building",
+                "note": (
+                    "Building in the background. Say ONE sentence about what "
+                    "it will show, then carry on teaching — do not wait for "
+                    "it and do not write any HTML."
+                ),
+            }))
+        except Exception as e:
+            logger.error(f"request_demo error: {e}", exc_info=True)
+            return _error_result(f"Error requesting demo: {e}")
+
     # =====================================================================
     # Create MCP Server
     # =====================================================================
@@ -701,7 +1374,14 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
             update_learner_profile_tool,
             generate_quiz_question_tool,
             get_feedback_tool,
+            run_code_tool,
+            get_code_result_tool,
             save_demo_tool,
+            update_demo_tool,
+            get_demo_html_tool,
+            search_demos_tool,
+            get_demo_source_tool,
+            request_demo_tool,
         ],
     )
 
@@ -713,6 +1393,138 @@ def create_learning_tools(user_data_dir: str, episodic: EpisodicMemory):
 def _email_from_dir(user_data_dir: str) -> str:
     """Extract email from user data directory path (last segment)."""
     return os.path.basename(user_data_dir)
+
+
+def prose_ratio(code: str) -> float:
+    """Fraction of the cell that is English rather than program.
+
+    Counts string-literal contents and comment text against total length.
+
+    Why a ratio and not just computes_nothing(): once pure-prose cells were
+    refused, the model started appending a real computation to the bottom of
+    the same essay. A 250-line cell whose last 40 lines fit a RandomForest is
+    not a verification — it is a lecture with a fig leaf, and the whole thing
+    lands in the transcript forever.
+
+    Measured across a real session: legitimate calls run 11-34% prose, the
+    abusive ones 71-99%. There is no overlap, which is what makes a threshold
+    honest here rather than arbitrary.
+
+    Comments are counted because ast discards them, so text moved from a
+    docstring into `#` lines would otherwise slip through untouched — the
+    obvious next place for prose to hide.
+    """
+    if not code.strip():
+        return 0.0
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Let the sandbox report it; a broken cell is a real result.
+        return 0.0
+
+    prose = sum(
+        len(n.value) for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    )
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            prose += len(stripped)
+    return prose / len(code)
+
+
+def computes_nothing(code: str) -> bool:
+    """True if this cell can only echo text the model already wrote.
+
+    Guards a real misuse: asked to check a learner's understanding of entropy,
+    the tutor sent 22 print() calls containing a hand-written essay, ran it,
+    and read its own words back. Nothing was verified — a subprocess used as a
+    text formatter — and the output then sat in the transcript being re-sent
+    on every later turn. Four such calls in one session cost ~25KB.
+
+    "Only print statements" is too narrow: the essay had its text parked in
+    variables first. The real property is that NOTHING is computed — no
+    imports, no control flow, no calls but print, no attribute or subscript
+    access. Under those limits the output is a pure function of literals the
+    model typed, so running it cannot teach the model anything.
+
+    Deliberately conservative. A cell doing real work trips one of these
+    checks immediately, so a false positive would need code that computes
+    nothing at all — which is exactly the case being refused. Verified against
+    a full session: 4/18 calls flagged, every genuine computation untouched.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Let the sandbox report the syntax error; that is a real result.
+        return False
+    if not tree.body:
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                             ast.For, ast.AsyncFor, ast.While, ast.If, ast.Try,
+                             ast.With, ast.AsyncWith, ast.comprehension)):
+            return False
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "print":
+                continue
+            return False
+        if isinstance(node, (ast.Subscript, ast.Attribute)):
+            return False
+        # An f-string placeholder evaluates something: f"{2+2}" is a result
+        # the model has not seen.
+        if isinstance(node, ast.FormattedValue):
+            return False
+        # Numeric arithmetic is a result the model has not seen; string
+        # building is not. `"\n" + "=" * 80` is banner punctuation and stays
+        # allowed, while `6 * 7` makes the cell a genuine question.
+        if isinstance(node, ast.BinOp) and not _is_string_building(node):
+            return False
+    return True
+
+
+def _is_string_building(node: ast.AST) -> bool:
+    """True for expressions that only concatenate or repeat string literals.
+
+    Recursive because banners nest: `"\\n" + "=" * 80` is an Add whose right
+    side is a Mult. Anything numeric fails here and is treated as computation.
+    """
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, ast.BinOp):
+        left, right = node.left, node.right
+        if isinstance(node.op, ast.Add):
+            return _is_string_building(left) and _is_string_building(right)
+        if isinstance(node.op, ast.Mult):
+            # "=" * 80 or 80 * "=", but never 6 * 7.
+            str_side = _is_string_building(left) or _is_string_building(right)
+            int_side = (isinstance(left, ast.Constant)
+                        and isinstance(left.value, int)) or (
+                        isinstance(right, ast.Constant)
+                        and isinstance(right.value, int))
+            return str_side and int_side
+    return False
+
+
+def _clip_output(text: str, limit: int = MAX_RUN_OUTPUT_CHARS) -> str:
+    """Trim run output, keeping both ends.
+
+    A traceback puts its one useful line last, so a head-only truncation would
+    reliably discard the reason the run failed.
+
+    `limit` lets the caller shrink this further to fit a budget — run_code
+    sizes it against what is left of the transcript allowance, so bulk output
+    can never displace the fields the model has to act on.
+    """
+    if not text or len(text) <= limit:
+        return text
+    half = limit // 2
+    dropped = len(text) - (half * 2)
+    return f"{text[:half]}\n... [{dropped} chars trimmed] ...\n{text[-half:]}"
 
 
 def _text_result(text: str) -> dict:

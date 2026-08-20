@@ -22,6 +22,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -43,6 +44,10 @@ VENV_SCHEMA = 1
 
 # Run directories older than this are swept on the next run.
 RUN_DIR_TTL_SEC = 3600
+
+# Ephemeral run files live outside the project tree — see _scratch_dir. Kept as
+# a module constant so tests can point it somewhere else.
+SCRATCH_ROOT = Path(tempfile.gettempdir()) / "pymentor-scratch"
 
 # Artifacts (plots) a cell may hand back.
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp"}
@@ -103,7 +108,20 @@ def _venv_dir(email: str) -> Path:
 
 
 def _scratch_dir(email: str) -> Path:
-    p = Path(USERS_DIR) / _safe_email(email) / "scratch"
+    """Ephemeral per-run files, deliberately OUTSIDE the project tree.
+
+    These directories hold cell.py and sitecustomize.py, written on every
+    execution. While they lived under data/ they were inside uvicorn's reload
+    scope and matched its default "*.py" filter, so running a cell restarted
+    the server and killed any in-flight agent turn (see run.py). run.py now
+    also narrows reload_dirs; keeping scratch out of the tree means no future
+    widening of that watch can reintroduce the failure.
+
+    Unlike the venv (which stays under data/ — it is expensive to rebuild and
+    users expect it to persist), scratch is throwaway: _sweep_run_dirs drops
+    anything older than RUN_DIR_TTL_SEC, so a temp location loses nothing.
+    """
+    p = SCRATCH_ROOT / _safe_email(email)
     p.mkdir(parents=True, exist_ok=True)
     return p
 

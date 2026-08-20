@@ -9,7 +9,6 @@ import json
 import os
 import re
 import logging
-from pathlib import Path
 
 from backend.config import settings
 from backend.memory import USERS_DIR, _safe_email, save_summary, get_summary, get_session_dir
@@ -23,12 +22,17 @@ def _get_claude_project_dir() -> str:
     Must match the slug the bundled CLI derives from `options.cwd`
     (see backend.agent.PROJECT_ROOT). The CLI replaces every non-alnum
     char — including underscore — with a dash.
+
+    Rooted at agent.CLAUDE_CONFIG_DIR, which is what the CLI is given as
+    CLAUDE_CONFIG_DIR. These two must agree: if this looked in ~/.claude while
+    the CLI wrote elsewhere, session_exists_in_claude would answer False for
+    every session and each one would silently fall back to a full replay.
     """
-    from backend.agent import PROJECT_ROOT
+    from backend.agent import CLAUDE_CONFIG_DIR, PROJECT_ROOT
     project_slug = re.sub(r"[^a-zA-Z0-9\-]", "-", PROJECT_ROOT)
     if project_slug.startswith("-"):
         project_slug = project_slug[1:]
-    return os.path.join(str(Path.home()), ".claude", "projects", f"-{project_slug}")
+    return os.path.join(CLAUDE_CONFIG_DIR, "projects", f"-{project_slug}")
 
 
 def session_exists_in_claude(session_id: str) -> bool:

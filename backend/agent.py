@@ -13,8 +13,9 @@ import time
 from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage
 # StreamEvent carries partial-message deltas. It is part of the SDK's Message
 # union but is NOT re-exported from the top-level package, so import it from
-# .types directly.
-from claude_agent_sdk.types import StreamEvent
+# .types directly. UserMessage/ToolResultBlock are how tool results actually
+# arrive — see the UserMessage branch in run_agent_internal.
+from claude_agent_sdk.types import StreamEvent, ToolResultBlock, UserMessage
 
 from backend.config import settings
 from backend.episodic import EpisodicMemory
@@ -27,7 +28,8 @@ from backend.memory import (
     get_session_dir,
     _safe_email,
 )
-from backend.prompts import build_system_prompt
+from backend.demos import demo_digest, format_session_demos
+from backend.prompts import DEMO_BUILDER_PROMPT, build_system_prompt
 from backend.replay import (
     session_exists_in_claude,
     session_exists_in_memory,
@@ -35,12 +37,48 @@ from backend.replay import (
     check_and_save_compact,
 )
 from backend.tools import create_learning_tools
+from backend.transcripts import archive_session
 
 logger = logging.getLogger(__name__)
 
 # Project root — pinned so the bundled CLI always derives the same
-# ~/.claude/projects/<slug>/ regardless of where run.py was launched from.
+# projects/<slug>/ regardless of where run.py was launched from.
 PROJECT_ROOT = os.path.realpath(os.path.dirname(os.path.dirname(__file__)))
+
+# Root of the bundled CLI's own state — session transcripts, todos, debug logs.
+#
+# This is ~/.claude and CANNOT currently be moved into the project. Setting the
+# CLI's CLAUDE_CONFIG_DIR does relocate the transcripts, but it also makes the
+# CLI treat the install as brand new and unauthenticated: subscription
+# credentials live in the macOS Keychain, and the CLI stops finding them.
+# Verified directly — same binary, same keychain, the env var alone is the
+# difference:
+#
+#   claude -p "say ok"                        -> ok
+#   CLAUDE_CONFIG_DIR=... claude -p "say ok"  -> Not logged in · Please run /login
+#
+# Copying ~/.claude.json (oauthAccount, userID) into the new dir does not fix
+# it. Revisit if the app moves to a real ANTHROPIC_API_KEY, where keychain
+# lookup is not involved — the env var may well work there.
+#
+# Consequence to keep in mind: app state is split. The UI renders from
+# data/users/<email>/sessions/, while `--resume` reads the CLI's copy here.
+# Deleting one leaves the chat looking intact while the model has lost every
+# prior turn. replay.py's _get_claude_project_dir must agree with this value.
+CLAUDE_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def _cli_env() -> dict:
+    """Environment for the CLI subprocess.
+
+    Shared by both option branches so the two cannot drift.
+    """
+    return {"ANTHROPIC_API_KEY": settings.ANTHROPIC_API_KEY}
+
+# Tool results are persisted to the transcript and replayed on every session
+# load, so a verbose one (or a whole demo payload echoed back) would bloat the
+# file permanently. Enough to carry an error message and a small JSON result.
+TOOL_RESULT_MAX_CHARS = 2000
 
 # MCP tool names (must match mcp__<server-name>__<tool-name> convention)
 MCP_TOOL_NAMES = [
@@ -55,11 +93,41 @@ MCP_TOOL_NAMES = [
     "mcp__learning-tools__update_learner_profile",
     "mcp__learning-tools__generate_quiz_question",
     "mcp__learning-tools__get_feedback",
-    "mcp__learning-tools__save_demo",
+    # Runs Python in the learner's own venv. Unlike every other tool here this
+    # one executes model-authored code as a subprocess — acceptable only
+    # because the notebook already gives the same venv the same reach, and this
+    # app is single-user by design (see the security note in sandbox.py).
+    "mcp__learning-tools__run_code",
+    "mcp__learning-tools__get_code_result",
+    # The tutor requests a demo; it does not write one. save_demo/update_demo
+    # belong to the builder (DEMO_BUILDER_TOOL_NAMES) — keeping them off this
+    # list stops the tutor emitting 30KB of HTML inside a chat turn, which is
+    # what used to block the composer for a minute.
+    "mcp__learning-tools__request_demo",
+    "mcp__learning-tools__search_demos",
+    # Reads slices of a demo's source when the learner asks about one. Capped
+    # and query-required — the tutor never gets the whole document.
+    "mcp__learning-tools__get_demo_source",
+    # Built-ins, not MCP: the tutor's only route to anything newer than the
+    # model's cutoff. Listed here for accuracy even though the allowlist is
+    # advisory under bypassPermissions — what actually admits them is their
+    # absence from DENIED_TOOL_NAMES.
+    "WebSearch",
+    "WebFetch",
 ]
 # Note: skills do NOT need a "Skill" entry here. Verified against the bundled
 # CLI — a skill loads and runs with an MCP-only allowlist and no permission
 # denials. Skill bodies are injected as context, not invoked as a tool.
+
+# The builder is a single-purpose agent: read the demo it is editing, write it
+# back, and nothing else. Narrower than MCP_TOOL_NAMES so a build cannot wander
+# into quiz or profile tools. Advisory under bypassPermissions (see below), so
+# the builder prompt says the same thing in words.
+DEMO_BUILDER_TOOL_NAMES = [
+    "mcp__learning-tools__save_demo",
+    "mcp__learning-tools__update_demo",
+    "mcp__learning-tools__get_demo_html",
+]
 
 # Built-in tools the tutor must never reach. This is the real restriction:
 # `permission_mode="bypassPermissions"` skips the check that consults
@@ -69,7 +137,14 @@ MCP_TOOL_NAMES = [
 # Without this the tutor happily shells out — it was seen writing a demo to
 # /tmp and leaving `python3 -m http.server 8000` running, which exposed that
 # directory on the network. A tutoring agent has no business running commands
-# or touching files; everything it legitimately needs is an MCP tool.
+# or touching the filesystem.
+#
+# WebSearch/WebFetch are deliberately NOT denied. The tutor teaches libraries
+# that move faster than the model's cutoff, and its only other route to ground
+# truth is running code — which cannot answer "what is current" for an API it
+# has never seen. The cost is that fetched pages land in the transcript and are
+# re-sent every later turn, so the prompt tells it to look up and summarise
+# rather than quote at length.
 DENIED_TOOL_NAMES = [
     "Bash",
     "BashOutput",
@@ -80,9 +155,13 @@ DENIED_TOOL_NAMES = [
     "Read",
     "Glob",
     "Grep",
-    "WebFetch",
-    "WebSearch",
     "Task",
+    # The bundled CLI already refuses this one, but only after the model has
+    # spent a turn calling it. The tutor reaches for it because the memory
+    # prompt tells it to track progress; denying it up front keeps it out of
+    # the tool list entirely, so the model records progress via the semantic
+    # memory tools instead of rediscovering the refusal each curriculum.
+    "TodoWrite",
 ]
 
 # Shared episodic memory instance (initialized once)
@@ -112,6 +191,7 @@ async def run_agent(
     fork_from: str | None = None,
     set_active: bool = True,
     attachments: list[dict] | None = None,
+    demo_ref: dict | None = None,
 ) -> str | None:
     """Run the learning agent for a user.
 
@@ -134,11 +214,34 @@ async def run_agent(
             Side-chats pass False so opening one doesn't hijack the main chat.
         attachments: Images for THIS turn, as [{data, content_type, filename}]
             with base64 `data`. Already validated by the route.
+        demo_ref: {"demo_id": str, "selection": {...}} when the learner asked
+            about a demo. A structural digest is prepended to the prompt; the
+            model never sees the demo's html unless it calls get_demo_source.
 
     Returns the session_id.
     """
     user_data_dir = _get_user_data_dir(email)
     episodic = _get_episodic()
+
+    # Put the referenced demo in front of the model. This goes into the PROMPT,
+    # not the transcript file — conversation.jsonl is never read back into the
+    # model's context, so a reference recorded there alone would be invisible.
+    if demo_ref and demo_ref.get("demo_id"):
+        digest = demo_digest(
+            email, demo_ref["demo_id"], demo_ref.get("selection")
+        )
+        if digest:
+            prompt = (
+                "[The learner is asking about this demo, open in their Demo "
+                "pane. You cannot see it running — this is its structure.\n\n"
+                f"{digest}\n\n"
+                "If you need the actual code to answer, call "
+                "get_demo_source(demo_id, query) with a specific name. Do not "
+                "paste the demo's code back at them.]\n\n"
+                f"{prompt}"
+            )
+        else:
+            logger.warning(f"demo_ref {demo_ref['demo_id']} not found for {email}")
 
     # Write attachments to disk before the SDK call so the transcript can
     # record paths. The base64 goes to the model but is never persisted.
@@ -164,14 +267,19 @@ async def run_agent(
     # Load Tier 2: Recent episodic memory → inject into system prompt
     recent_episodes = episodic.format_for_system_prompt(email, n=5)
 
-    # Build system prompt with injected memory state
-    system_prompt = build_system_prompt(knowledge_state, recent_episodes)
-
     # Look up existing session (Tier 1). A fork explicitly opts out of the
     # active-session fallback: it must branch from the session it was given,
     # never from whatever happens to be active.
     if not session_id and not fork_from:
         session_id = get_active_session(email)
+
+    # Built here rather than earlier because the demo list is scoped to the
+    # resolved session id, which the lookup above is what determines.
+    system_prompt = build_system_prompt(
+        knowledge_state,
+        recent_episodes,
+        format_session_demos(email, session_id),
+    )
 
     placeholder_session_id = None  # Track pre-created sessions that need ID replacement
     do_fork = False
@@ -212,6 +320,11 @@ async def run_agent(
     else:
         logger.info(f"New user {email} — creating fresh session")
 
+    # Tools read this to learn which conversation invoked them. request_demo
+    # needs it to know which session the builder should fork; its presence is
+    # also what marks this run as "the tutor" rather than "the builder".
+    session_ctx: dict = {"session_id": session_id}
+
     # Run the SDK query
     result_session_id = await run_agent_internal(
         prompt=prompt,
@@ -223,6 +336,7 @@ async def run_agent(
         fork_session=do_fork,
         attachments=attachments,
         saved_attachments=saved_attachments,
+        session_ctx=session_ctx,
     )
 
     # Save session mapping
@@ -233,8 +347,72 @@ async def run_agent(
             logger.info(f"Replaced placeholder {placeholder_session_id} → {result_session_id}")
         save_user_session(email, result_session_id, set_active=set_active)
         check_and_save_compact(email, result_session_id)
+        # Mirror the CLI's transcript into the project so data/ stays portable.
+        # Best-effort by design — see transcripts.archive_session.
+        archive_session(email, result_session_id)
 
     return result_session_id
+
+
+async def run_demo_builder(
+    email: str,
+    request: str,
+    chat_session_id: str | None = None,
+    resume_builder_session: str | None = None,
+    on_event=None,
+    build_ctx: dict | None = None,
+) -> str | None:
+    """Build (or refine) a demo in a session of its own. Returns its session id.
+
+    This is a second agent, not the tutor. It exists because writing 5-30KB of
+    HTML takes ~60s, and doing that inside the chat turn froze the composer for
+    the whole minute.
+
+    Context comes from *forking* the chat session rather than from a prose
+    brief: a summary of a twenty-turn conversation produces a generic demo,
+    whereas a fork inherits the actual discussion. The fork writes to a new
+    session id, so the tutor's transcript is never appended to — which is also
+    what makes running this concurrently with a live chat turn safe.
+
+    On a refinement, we resume the builder's own previous session instead,
+    which still holds both that conversation and the HTML it wrote. That makes
+    "add a reset button" an incremental edit rather than a full regeneration.
+
+    email is deliberately NOT passed to run_agent_internal: that is what gates
+    MemoryStore construction and _extract_and_save_exchange, so the builder
+    gets tools without writing into the learner's conversation transcript or
+    polluting episodic memory with half-written HTML.
+    """
+    from backend.replay import session_exists_in_claude
+
+    user_data_dir = _get_user_data_dir(email)
+
+    if resume_builder_session and session_exists_in_claude(resume_builder_session):
+        resume, fork = resume_builder_session, False
+    elif chat_session_id and session_exists_in_claude(chat_session_id):
+        resume, fork = chat_session_id, True
+    else:
+        # No usable context — the builder still works, it just has only the
+        # request text to go on.
+        resume, fork = None, False
+        logger.info("Demo builder starting with no session context")
+
+    # The builder's own session id is only known once the SDK reports init,
+    # which is before any tool runs — so routing it through build_ctx lets
+    # save_demo/update_demo stamp it onto the demo as they write it.
+    return await run_agent_internal(
+        prompt=request,
+        session_id=resume,
+        fork_session=fork,
+        system_prompt=DEMO_BUILDER_PROMPT,
+        user_data_dir=user_data_dir,
+        on_event=on_event,
+        email=None,
+        allowed_tools=DEMO_BUILDER_TOOL_NAMES,
+        # None so a builder cannot recursively request another demo.
+        session_ctx=None,
+        build_ctx=build_ctx,
+    )
 
 
 def _unwrap_exception(exc: BaseException) -> BaseException:
@@ -309,6 +487,9 @@ async def run_agent_internal(
     fork_session: bool = False,
     attachments: list[dict] | None = None,
     saved_attachments: list[dict] | None = None,
+    allowed_tools: list[str] | None = None,
+    session_ctx: dict | None = None,
+    build_ctx: dict | None = None,
 ) -> str | None:
     """Internal SDK call — runs query() and streams events.
 
@@ -320,15 +501,25 @@ async def run_agent_internal(
     attachments: base64 images for this turn, sent to the model as content
     blocks. saved_attachments: the same images' on-disk metadata, recorded to
     the transcript. Split because base64 must never be persisted.
+
+    allowed_tools: narrow the MCP allowlist for this run. The demo builder
+    uses it so a build cannot wander into quiz or profile tools.
+
+    session_ctx: a caller-owned dict this run writes its session id into, as
+    soon as the SDK reports it. Tools close over the same dict, which is the
+    only way a tool handler can learn which chat session invoked it — the id
+    does not exist yet when the options are built.
     """
     episodic = _get_episodic()
 
     # Create MCP tools
     if user_data_dir:
-        mcp_server = create_learning_tools(user_data_dir, episodic)
+        mcp_server = create_learning_tools(
+            user_data_dir, episodic, session_ctx, build_ctx
+        )
         options = ClaudeAgentOptions(
             mcp_servers={"learning-tools": mcp_server},
-            allowed_tools=MCP_TOOL_NAMES,
+            allowed_tools=allowed_tools or MCP_TOOL_NAMES,
             # Loads .claude/ from PROJECT_ROOT — specifically skills/, which is
             # how the tutor learns to build interactive demos. The SDK default
             # is None, which makes the CLI load nothing from disk, so without
@@ -348,7 +539,7 @@ async def run_agent_internal(
             disallowed_tools=DENIED_TOOL_NAMES,
             permission_mode="bypassPermissions",
             model=settings.MODEL_NAME,
-            env={"ANTHROPIC_API_KEY": settings.ANTHROPIC_API_KEY},
+            env=_cli_env(),
             cwd=PROJECT_ROOT,
             include_partial_messages=True,
         )
@@ -356,7 +547,7 @@ async def run_agent_internal(
         options = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             model=settings.MODEL_NAME,
-            env={"ANTHROPIC_API_KEY": settings.ANTHROPIC_API_KEY},
+            env=_cli_env(),
             cwd=PROJECT_ROOT,
             include_partial_messages=True,
         )
@@ -401,6 +592,14 @@ async def run_agent_internal(
                     f"Session ID: {captured_session_id} "
                     f"(SDK handshake took {time.monotonic() - query_started:.2f}s)"
                 )
+
+                # Tools close over these dicts, so writing them here is what
+                # lets a tool handler know which session called it. build_ctx
+                # must be set before any tool runs, which init precedes.
+                if session_ctx is not None and captured_session_id:
+                    session_ctx["session_id"] = captured_session_id
+                if build_ctx is not None and captured_session_id:
+                    build_ctx["builder_session_id"] = captured_session_id
 
                 # Initialize conversation memory (writes to session dir)
                 if captured_session_id and email:
@@ -478,17 +677,62 @@ async def run_agent_internal(
                 if memory:
                     memory.record_event(event_dict)
 
-            # Tool results
-            elif hasattr(message, "type") and message.type == "tool_result":
-                event_dict = {
-                    "type": "tool_result",
-                    "tool_use_id": getattr(message, "tool_use_id", ""),
-                    "content": str(getattr(message, "content", "")),
-                }
-                if on_event:
-                    await on_event(event_dict)
-                if memory:
-                    memory.record_event(event_dict)
+            # Tool results.
+            #
+            # These arrive as ToolResultBlocks inside a UserMessage — NOT as a
+            # top-level message with .type == "tool_result". UserMessage is a
+            # dataclass with fields (content, uuid, parent_tool_use_id,
+            # tool_use_result) and no `.type` at all, so the previous
+            # hasattr(message, "type") check never matched and every tool
+            # result was silently dropped.
+            #
+            # That blindness is why three save_demo calls failing with
+            # "Stream closed" produced no log line, no SSE event and no
+            # transcript record — the UI showed a successful-looking demo chip
+            # for a demo that was never written.
+            elif isinstance(message, UserMessage):
+                blocks = message.content if isinstance(message.content, list) else []
+                for block in blocks:
+                    if not isinstance(block, ToolResultBlock):
+                        continue
+
+                    raw = block.content
+                    if isinstance(raw, list):
+                        # Content blocks: [{"type": "text", "text": ...}, ...]
+                        text = "".join(
+                            b.get("text", "") for b in raw if isinstance(b, dict)
+                        )
+                    else:
+                        text = str(raw or "")
+
+                    # is_error is set by the CLI for transport failures (e.g.
+                    # "Stream closed") and by our own _error_result helper in
+                    # tools.py. It is NOT set when a tool handler raises and
+                    # the SDK converts the exception to text, so a bare
+                    # bool(block.is_error) under-reports. Treat our own error
+                    # prefixes as failures too, so the UI and the log agree.
+                    is_error = bool(block.is_error) or text.startswith(
+                        ("Demo rejected:", "Error ")
+                    )
+                    if is_error:
+                        logger.error(
+                            f"Tool result error (tool_use_id={block.tool_use_id}): "
+                            f"{text[:500]}"
+                        )
+
+                    event_dict = {
+                        "type": "tool_result",
+                        "tool_use_id": block.tool_use_id,
+                        "is_error": is_error,
+                        # Capped because this now lands in conversation.jsonl:
+                        # a tool like save_demo can return a large payload, and
+                        # the transcript is replayed on every session load.
+                        "content": text[:TOOL_RESULT_MAX_CHARS],
+                    }
+                    if on_event:
+                        await on_event(event_dict)
+                    if memory:
+                        memory.record_event(event_dict)
 
     except BaseException as exc:
         # Unwrap ExceptionGroup/TaskGroup to get the real error

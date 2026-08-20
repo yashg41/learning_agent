@@ -29,6 +29,9 @@ function applyTheme(t, persist = true) {
     if (persist) {
         try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
     }
+    // Rendered diagrams are baked SVG — they hold the old theme's colours
+    // until redrawn, which leaves them unreadable on the opposite theme.
+    if (typeof rerenderMermaidForTheme === "function") rerenderMermaidForTheme();
 }
 
 function toggleTheme() {
@@ -178,16 +181,488 @@ function initAttachments(chatFor, { inputEl, dropZone, attachBtnEl, attachInputE
 // Markdown Renderer (delegates to marked.js loaded in index.html)
 // =====================================================================
 
+// A $$…$$ span, non-greedy so consecutive formulas do not merge into one.
+const MATH_SPAN_RE = /\$\$[\s\S]+?\$\$/g;
+
+/**
+ * Render markdown, holding $$…$$ spans out of the parser.
+ *
+ * LaTeX and markdown fight over the same punctuation, and markdown wins
+ * because it runs first:
+ *
+ *   `_` — a formula with two subscripts (`\text{IG}_{\text{node}}` … `\sum_{`)
+ *         reads as an emphasis pair, so marked emits <em> INSIDE the span.
+ *         That splits the formula across elements and KaTeX's text-node walk
+ *         never sees a whole $$…$$, leaving the raw source on screen.
+ *   `\%`, `\_` — escapable punctuation, so marked strips the backslash and
+ *         KaTeX then fails on the bare character.
+ *
+ * Both are fixed by never letting the parser see the math. Spans come out
+ * first, a placeholder holds their position, and they go back verbatim
+ * afterwards. Verified against marked 12.
+ */
 function renderMarkdown(text) {
     if (!text) return "";
     if (typeof marked === "undefined") return escapeHtml(text);
-    return marked.parse(text, { breaks: true, gfm: true });
+
+    const spans = [];
+    // The placeholder must survive markdown untouched and never occur in real
+    // text: letters and digits only, no punctuation for the parser to act on.
+    const held = text.replace(MATH_SPAN_RE, (m) => {
+        spans.push(m);
+        return `x0mathspan${spans.length - 1}endx0`;
+    });
+
+    let html = marked.parse(held, { breaks: true, gfm: true });
+    if (spans.length) {
+        html = html.replace(/x0mathspan(\d+)endx0/g, (_, i) => spans[Number(i)]);
+    }
+    return html;
 }
 
 function escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = text;
     return div.innerHTML;
+}
+
+// =====================================================================
+// Rich rendering — math, diagrams, syntax highlighting
+//
+// renderMarkdown returns a STRING, but typesetting and diagram rendering
+// need a live element. So this is a second pass: call enrichMessage() on
+// the element right after any `innerHTML = renderMarkdown(...)` write.
+//
+// Deltas are deliberately rendered as plain textContent while streaming
+// (see the assistant_delta case), so everything here only ever sees a
+// COMPLETE block. That is what makes it affordable — no reparsing on
+// every token, and no half-open $$ or ``` to trip over.
+//
+// Every step is optional at runtime and individually guarded. These are
+// three CDN libraries on the critical path of the only surface the app
+// has; a failed load or a throw on odd model output must cost the
+// typesetting, never the message. The finally-block that calls this can
+// soft-lock the composer permanently if it throws.
+// =====================================================================
+
+/**
+ * Enrich a rendered assistant message in place. Idempotent and safe to
+ * call on any element — each step no-ops if its library is absent.
+ */
+function enrichMessage(el) {
+    if (!el) return;
+    renderMathIn(el);
+    renderMermaidIn(el);
+    expandVerifiedIn(el);
+    highlightCodeIn(el);
+    addRunButtonsIn(el);
+}
+
+// $$…$$ is the ONLY math delimiter, and that is a deliberate, tested
+// choice rather than a default:
+//
+//   \(…\) and \[…\] cannot work here at all. marked treats the backslash
+//   as escaped punctuation and strips it, so KaTeX receives a bare "(x^2)"
+//   and never sees a delimiter. Verified against marked 12.
+//
+//   Single $…$ works, but cannot be told apart from currency. "$5,000" is
+//   safe, yet "from $5 to $10" renders as one math span, and — worse — a
+//   price earlier in a sentence swallows the delimiter of real math later
+//   in it. Heuristics to separate the two (require a closing $, reject
+//   money-shaped bodies) each broke a legitimate case: "$2x + 1 = 5$" or
+//   "$0.001$", both ordinary in this app's subject matter.
+//
+// $$ is unambiguous — no one writes a price with two dollar signs — and it
+// costs nothing, because the display/inline distinction is recovered below
+// from where the model put the math rather than from the delimiter.
+const MATH_BASE = {
+    // Load-bearing: without this, a `$` in a shell snippet or an f-string
+    // opens a math span and eats the rest of the block.
+    ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+    // Bad LaTeX shows as red source instead of aborting the pass — one
+    // malformed formula must not cost the rest of the message.
+    throwOnError: false,
+};
+
+const MATH_SOLO_RE = /^\$\$[\s\S]+\$\$$/;
+
+/**
+ * Typeset $$…$$ spans.
+ *
+ * A block whose entire text is one formula is rendered as centred display
+ * math; anything mixed into a sentence stays inline on the prose baseline.
+ * KaTeX picks that per call, not per delimiter, so this runs in two passes:
+ * the solo blocks first, then everything still unrendered.
+ */
+// Second line of defence, for when the MODEL writes a bare character rather
+// than an escaped one. renderMarkdown now holds math spans out of the parser,
+// so marked no longer strips backslashes — but nothing stops the model from
+// writing `100%` or `\text{a_b}` in the first place, and both break KaTeX:
+//   %  opens a LaTeX comment, swallowing the rest of the line including the
+//      closing brace -> "Unexpected end of input, expected '}'".
+//   _  bare inside \text{} is a parse error -> "Expected 'EOF', got '_'".
+// Idempotent, so correctly-escaped input passes through unchanged.
+// `%` is a comment anywhere in math, so it is always escaped. `_` is NOT:
+// outside \text{} it is legitimate subscript syntax and `x_1` must survive
+// untouched — only a bare `_` INSIDE a \text{} group is an error, which is
+// exactly where snake_case feature names land.
+const MATH_PERCENT_RE = /(?<!\\)%/g;
+const MATH_TEXT_GROUP_RE = /\\text\{([^{}]*)\}/g;
+
+/**
+ * Re-escape LaTeX syntax characters inside $$…$$ spans.
+ *
+ * Percentages and snake_case feature names are both completely ordinary in
+ * this app's subject matter ("62%", "sociability_score"), so this fires on
+ * routine content rather than exotic input.
+ *
+ * Only rewrites between $$ pairs: a bare % or _ in prose is not math and must
+ * be left exactly as written. Already-escaped characters are skipped, so
+ * running this pass twice cannot produce `\\%`.
+ */
+function escapeMathSyntax(text) {
+    if (text.indexOf("$$") === -1) return text;
+    const parts = text.split("$$");
+    // Odd indices are inside a span. An even part count means the last $$ was
+    // unclosed — a streaming fragment — so leave that trailing part alone.
+    const lastInside = parts.length % 2 === 0 ? parts.length - 2 : parts.length - 1;
+    for (let i = 1; i <= lastInside; i += 2) {
+        parts[i] = parts[i]
+            .replace(MATH_PERCENT_RE, "\\%")
+            .replace(MATH_TEXT_GROUP_RE, (m, inner) =>
+                `\\text{${inner.replace(/(?<!\\)_/g, "\\_")}}`);
+    }
+    return parts.join("$$");
+}
+
+function renderMathIn(el) {
+    if (typeof renderMathInElement === "undefined") return;
+    try {
+        // Fix up the source before KaTeX sees it. Walks text nodes only, and
+        // skips the same tags MATH_BASE ignores, so a % in a code block stays
+        // literal.
+        el.querySelectorAll("p, li, td, th").forEach(block => {
+            block.childNodes.forEach(node => {
+                if (node.nodeType !== 3) return;  // text nodes only
+                const fixed = escapeMathSyntax(node.nodeValue);
+                if (fixed !== node.nodeValue) node.nodeValue = fixed;
+            });
+        });
+        el.querySelectorAll("p, li, td, th").forEach(block => {
+            const t = block.textContent.trim();
+            // The second test rejects "$$a$$ and $$b$$", which matches the
+            // regex but is two inline formulas, not one display block.
+            if (!MATH_SOLO_RE.test(t) || t.indexOf("$$", 2) !== t.length - 2) return;
+            renderMathInElement(block, {
+                ...MATH_BASE,
+                delimiters: [{ left: "$$", right: "$$", display: true }],
+            });
+        });
+        renderMathInElement(el, {
+            ...MATH_BASE,
+            delimiters: [{ left: "$$", right: "$$", display: false }],
+        });
+    } catch (e) {
+        console.warn("math render failed", e);
+    }
+}
+
+/**
+ * Syntax-highlight fenced code.
+ *
+ * Skips mermaid (that fence is a diagram, not code) and anything already
+ * processed — enrichMessage runs again on the same element when a turn
+ * ends on the finally pass.
+ */
+function highlightCodeIn(el) {
+    if (typeof hljs === "undefined") return;
+    el.querySelectorAll("pre code").forEach(block => {
+        if (block.classList.contains("language-mermaid")) return;
+        if (block.dataset.highlighted) return;
+        try {
+            hljs.highlightElement(block);
+        } catch (e) {
+            block.dataset.highlighted = "failed";
+        }
+    });
+}
+
+/**
+ * Replace ```verified:<run_id> placeholders with the code that actually ran.
+ *
+ * Why the indirection: the tutor used to verify a snippet and then RETYPE it
+ * into its reply, and a real session caught the retyped copy drifting from
+ * what ran — it gained an export_text call that had never been executed, and
+ * that call was the one that crashed for the learner. Now the model only
+ * names a run; the source travels sandbox -> disk -> here, never back through
+ * the model, so it cannot drift.
+ *
+ * Async, so the fetched block misses this turn's highlight/button pass — both
+ * are re-run on arrival. Both are idempotent and flag-guarded, so the blocks
+ * already on screen are untouched.
+ */
+function expandVerifiedIn(el) {
+    const email = getEmail();
+    promoteBareVerifiedRefs(el);
+    el.querySelectorAll("pre code").forEach(block => {
+        const cls = Array.from(block.classList)
+            .find(c => c.startsWith("language-verified:"));
+        if (!cls) return;
+        const pre = block.parentElement;
+        if (!pre || pre.dataset.verifiedState) return;
+
+        const runId = cls.slice("language-verified:".length).trim();
+        // Ids come from a chat message, so treat them as untrusted: this is
+        // the shape _new_run_dir produces, and anything else never reaches
+        // the network.
+        if (!/^run_\d+_[a-f0-9]+$/.test(runId) || !email) {
+            markVerifiedUnavailable(pre, block);
+            return;
+        }
+
+        pre.dataset.verifiedState = "loading";
+        block.textContent = "Loading verified code…";
+
+        fetch(`${API_BASE}/api/code/verified/${encodeURIComponent(email)}/${encodeURIComponent(runId)}`)
+            .then(res => res.ok ? res.json() : Promise.reject(res.status))
+            .then(data => {
+                pre.dataset.verifiedState = "ready";
+                // textContent, never innerHTML: this is source, and the block
+                // must show it literally rather than parse it as markup.
+                block.textContent = data.code || "";
+                block.className = "language-python";
+                pre.classList.add("is-verified");
+                // Both helpers select "pre code" — a <code> with a <pre>
+                // ANCESTOR — so they must be handed the pre's PARENT. Passing
+                // `pre` itself matches nothing (it would need a <pre> nested
+                // inside a <pre>), which left verified blocks unhighlighted
+                // and without a run button.
+                //
+                // The blocks that existed when enrichMessage ran are already
+                // done; their dataset guards make this re-run a no-op.
+                const scope = pre.parentElement || pre;
+                highlightCodeIn(scope);
+                addRunButtonsIn(scope);
+            })
+            .catch(() => markVerifiedUnavailable(pre, block));
+    });
+}
+
+/**
+ * Rescue a placeholder the model wrote as prose instead of a fenced block.
+ *
+ * Observed in the wild: the tutor emitted `verified:run_...` on its own line,
+ * so marked produced a <p> (and GFM autolinked it, since "verified:" parses as
+ * a URL scheme) — it reached the learner as a dead blue link with no code.
+ * The run itself was fine; only the citation was malformed.
+ *
+ * Rewriting it here rather than only tightening the prompt: the instruction is
+ * one line in a long system prompt, and a missed fence should degrade to the
+ * right output instead of a broken link.
+ */
+function promoteBareVerifiedRefs(el) {
+    const RE = /^\s*(?:```)?\s*verified:(run_\d+_[a-f0-9]+)\s*(?:```)?\s*$/;
+    el.querySelectorAll("p").forEach(p => {
+        const m = (p.textContent || "").match(RE);
+        if (!m) return;
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.className = `language-verified:${m[1]}`;
+        pre.appendChild(code);
+        p.replaceWith(pre);
+    });
+}
+
+/**
+ * A placeholder we could not resolve — expired, never archived, or malformed.
+ * Says so plainly rather than leaving "Loading…" forever or, worse, showing
+ * nothing where the learner expected code.
+ */
+function markVerifiedUnavailable(pre, block) {
+    pre.dataset.verifiedState = "missing";
+    pre.classList.add("is-verified-missing");
+    block.className = "";
+    block.textContent =
+        "This code sample is no longer available. Ask and I'll run it again.";
+}
+
+/**
+ * Put a "Run in code runner" button on every Python block the tutor wrote.
+ *
+ * The tutor has already executed this code before showing it (see run_code in
+ * backend/tools.py), so the button hands the learner something known to work
+ * rather than a snippet that merely looks right. Both sides share one venv
+ * per user, so a package installed during that verification is already there.
+ *
+ * Same contract as highlightCodeIn: enrichMessage re-runs on the finally pass
+ * of a streamed turn, so the dataset flag is what stops a second button being
+ * appended to a block that already has one.
+ */
+function addRunButtonsIn(el) {
+    el.querySelectorAll("pre code").forEach(block => {
+        if (block.classList.contains("language-mermaid")) return;
+        const pre = block.parentElement;
+        if (!pre || pre.dataset.runButton) return;
+
+        // Only Python. hljs may add its own classes, so read the language off
+        // the fence's class list rather than trusting a single attribute.
+        const isPython = Array.from(block.classList).some(c =>
+            c === "language-python" || c === "language-py");
+        if (!isPython) return;
+
+        pre.dataset.runButton = "1";
+        pre.classList.add("has-run-btn");
+
+        const btn = document.createElement("button");
+        btn.className = "header-btn code-run-btn";
+        btn.type = "button";
+        btn.textContent = "Run in code runner";
+        btn.title = "Copy this into a new notebook cell";
+        btn.onclick = () => {
+            // textContent, not innerHTML: hljs has wrapped the source in spans
+            // by now, and innerHTML would carry that markup into the cell.
+            sendCodeToRunner(block.textContent || "");
+        };
+        pre.appendChild(btn);
+    });
+}
+
+/**
+ * Seed a notebook cell with code from chat and reveal it.
+ *
+ * The mirror of sendCellToChat: that carries a learner's cell into the
+ * conversation, this carries the tutor's snippet back out into the notebook.
+ */
+function sendCodeToRunner(code) {
+    if (!code.trim()) return;
+    // Open BEFORE adding: addCell sizes the textarea from scrollHeight, which
+    // a hidden pane reports as 0, so a cell added first opens up collapsed.
+    if (!notebookOpen) toggleNotebook();
+    const cell = addCell(code.replace(/\s+$/, ""));
+    saveCells();
+    if (cell) cell.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// --- Mermaid ---------------------------------------------------------
+// Diagrams are baked SVG, so they cannot follow a CSS variable when the
+// theme flips — applyTheme re-runs the whole pass instead. That only
+// works if the source survives rendering, hence data-mermaid-src on the
+// figure. See rerenderMermaidForTheme below.
+
+let mermaidReady = false;
+let mermaidSeq = 0;
+
+window.addEventListener("mermaid-ready", () => {
+    mermaidReady = true;
+    // A message may have rendered before the module finished loading;
+    // those left a placeholder figure behind, so sweep them now.
+    document.querySelectorAll("[data-mermaid-src]").forEach(fig => {
+        if (!fig.querySelector("svg")) drawMermaid(fig);
+    });
+});
+
+/**
+ * Mermaid's own theme variables, read from the live design tokens so a
+ * diagram matches the app in both themes rather than shipping its own
+ * palette. Re-read on every init — the values change with the theme.
+ */
+function mermaidThemeVars() {
+    const css = getComputedStyle(document.documentElement);
+    const v = n => css.getPropertyValue(n).trim();
+    return {
+        background: v("--bg-secondary"),
+        primaryColor: v("--bg-tertiary"),
+        primaryTextColor: v("--text-bright"),
+        primaryBorderColor: v("--border-strong"),
+        secondaryColor: v("--bg-secondary"),
+        tertiaryColor: v("--bg-secondary"),
+        lineColor: v("--text-muted"),
+        textColor: v("--text-dim"),
+        fontFamily: v("--font-sans") || "inherit",
+        fontSize: "14px",
+    };
+}
+
+function initMermaid() {
+    window.mermaid.initialize({
+        startOnLoad: false,
+        // The chat path feeds model output straight to marked, which has
+        // had no sanitizer since v8 (notes.js escapes first precisely
+        // because it is a stored surface; this one is not). Mermaid puts
+        // generated SVG into the main document, so strict mode — which
+        // strips scripts and click-bound JS from diagram source — is doing
+        // real work here, not ceremony.
+        securityLevel: "strict",
+        theme: "base",
+        themeVariables: mermaidThemeVars(),
+    });
+}
+
+/**
+ * Replace ```mermaid fences with rendered diagrams.
+ *
+ * The <pre> is swapped for a <figure data-mermaid-src> immediately, even
+ * if mermaid has not loaded yet — that keeps the source out of view and
+ * gives the ready-handler something to find.
+ */
+function renderMermaidIn(el) {
+    el.querySelectorAll("pre > code.language-mermaid").forEach(code => {
+        const pre = code.parentElement;
+        const fig = document.createElement("figure");
+        fig.className = "mermaid-figure";
+        fig.dataset.mermaidSrc = code.textContent;
+        pre.replaceWith(fig);
+        if (mermaidReady) drawMermaid(fig);
+    });
+}
+
+async function drawMermaid(fig) {
+    const src = fig.dataset.mermaidSrc || "";
+    try {
+        initMermaid();
+        const { svg } = await window.mermaid.render(`mmd-${++mermaidSeq}`, src);
+        fig.innerHTML = svg;
+        attachMermaidNodeClicks(fig);
+    } catch (e) {
+        // Invalid diagram syntax is a model mistake, not a page fault. Show
+        // the source back rather than an empty box, so the learner still
+        // sees what was meant — and mermaid's own error SVG never leaks in.
+        fig.classList.add("mermaid-failed");
+        const pre = document.createElement("pre");
+        pre.textContent = src;
+        fig.replaceChildren(pre);
+    }
+}
+
+/**
+ * Make diagram boxes clickable: fill the composer with a question about
+ * that node and focus it.
+ *
+ * Prefill only, never auto-send — a stray click on a diagram must not
+ * spend a turn.
+ */
+function attachMermaidNodeClicks(fig) {
+    fig.querySelectorAll(".node").forEach(node => {
+        node.classList.add("mermaid-node-clickable");
+        node.addEventListener("click", () => {
+            const label = (node.textContent || "").trim();
+            if (!label) return;
+            const input = document.getElementById("message-input");
+            if (!input) return;
+            input.value = `Tell me more about "${label}" in that diagram.`;
+            autoResizeInput(input);
+            input.focus();
+        });
+    });
+}
+
+/**
+ * Redraw every diagram on the page against the new theme's tokens.
+ * Called from applyTheme — SVG cannot inherit the variable change.
+ */
+function rerenderMermaidForTheme() {
+    if (!mermaidReady) return;
+    document.querySelectorAll("[data-mermaid-src]").forEach(drawMermaid);
 }
 
 // =====================================================================
@@ -214,6 +689,10 @@ async function onEmailChange() {
     if (!email) {
         document.getElementById("session-section").style.display = "none";
         updateLearnerChip("");
+        // Clearing the box is also a change of identity — the previous
+        // learner's demo must not stay on screen.
+        if (typeof demoOnEmailChange === "function") demoOnEmailChange();
+        getMainChat().setDemoRef(null);
         return;
     }
     currentEmail = email;
@@ -221,6 +700,15 @@ async function onEmailChange() {
     // panel, even though the notebook already used localStorage for cells.
     try { localStorage.setItem("pymentor:email", email); } catch (e) {}
     updateLearnerChip(email);
+
+    // Reset per-learner UI state BEFORE loading the new user's sessions, so
+    // nothing from the previous identity survives into the replay. Demos are
+    // isolated on disk but this module's state is not — see demoOnEmailChange.
+    if (typeof demoOnEmailChange === "function") demoOnEmailChange();
+    // A demo staged for the next message belongs to the previous learner, and
+    // its id means nothing under the new one.
+    getMainChat().setDemoRef(null);
+
     // Clear out sessions that were created by "+" and never used. Done here
     // rather than in loadSessions, which also runs after every turn.
     await pruneEmptySessions(email);
@@ -370,13 +858,51 @@ async function retitleSession(email, sessionId) {
         );
         if (!res.ok) return;
         const data = await res.json();
-        if (data.name) {
-            if (sessionId === currentSessionId) setChatTitle(data.name);
-            loadSessions(email);
+        if (!data.name) return;
+
+        if (sessionId === currentSessionId) setChatTitle(data.name);
+
+        // Patch just this row's label rather than calling loadSessions().
+        // A side chat can retitle itself now, and a full list reload from
+        // there would rebuild the main chat's message list mid-conversation.
+        const row = document.querySelector(
+            `.session-item[data-session-id="${sessionId}"] .session-name`);
+        if (row) {
+            row.textContent = data.name;
+            row.title = data.name;
         }
     } catch (e) {
         // Non-critical — the existing name stays.
     }
+}
+
+// Sessions already retitled (or judged not to need it) in this page load, so
+// switching back and forth between two chats cannot re-fire the LLM call.
+const backfilledTitles = new Set();
+
+/**
+ * Name a session that never got past the "New Session" default.
+ *
+ * Sessions created before side chats could retitle themselves are stuck with
+ * the server default; there is no migration, so they heal when opened. Guarded
+ * hard, because each call costs an LLM round-trip: only the default name, only
+ * once the conversation has a real subject, only once per page load.
+ */
+function backfillTitleIfDefault(email, sessionId, userTurnCount) {
+    if (!email || !sessionId) return;
+    if (backfilledTitles.has(sessionId)) return;
+    if (userTurnCount < RETITLE_AFTER_TURNS) return;
+
+    const row = document.querySelector(
+        `.session-item[data-session-id="${sessionId}"] .session-name`);
+    // No row yet (list still loading) means we cannot confirm the name is the
+    // default — skip rather than risk renaming a session the user named.
+    if (!row) return;
+    const name = (row.textContent || "").trim();
+    if (name && name !== "New Session" && name !== "Untitled Session") return;
+
+    backfilledTitles.add(sessionId);
+    retitleSession(email, sessionId);
 }
 
 /** Delete a session and its transcript, after confirming. */
@@ -525,6 +1051,8 @@ async function loadSessionHistory(email, sessionId) {
         loadedUserTurnCount = turns.filter(t => t.type === "user").length;
         if (mainChat) mainChat.turnCount = loadedUserTurnCount;
 
+        backfillTitleIfDefault(email, sessionId, loadedUserTurnCount);
+
         if (turns.length === 0) return;
 
         // Clear the empty state
@@ -587,6 +1115,26 @@ async function loadSessionHistory(email, sessionId) {
                         turn.tool_use_id || `hist-${turn.index}`
                     );
                     break;
+                case "tool_result":
+                    // Replayed so a tool that failed still looks failed after a
+                    // refresh. The card was rendered by the tool_call above and
+                    // is matched by tool_use_id.
+                    if (turn.is_error) {
+                        markToolCardFailed(
+                            turn.tool_use_id || `hist-${turn.index}`,
+                            turn.content,
+                            container,
+                        );
+                    } else {
+                        // Restores the chip's job id; resumeDemoJobs then
+                        // re-attaches any build still running.
+                        attachDemoJob(
+                            turn.tool_use_id || `hist-${turn.index}`,
+                            turn.content,
+                            container,
+                        );
+                    }
+                    break;
                 case "error":
                     flushAssistant();
                     addMessage(turn.content, "error");
@@ -596,6 +1144,11 @@ async function loadSessionHistory(email, sessionId) {
                     flushAssistant();
                     renderSideSummaryCard(turn, container);
                     break;
+                case "demo_pin":
+                    // A demo the learner added to the conversation.
+                    flushAssistant();
+                    renderDemoPinCard(turn, container);
+                    break;
                 case "side_chat_start":
                     // Boundary marker — the summary card carries the payload,
                     // so nothing to render here.
@@ -604,6 +1157,11 @@ async function loadSessionHistory(email, sessionId) {
         }
         // Flush any trailing assistant text
         flushAssistant();
+
+        // Chips are back in the DOM but nothing is watching them yet; a build
+        // outlives the request that started it, so re-attach to any still
+        // running. Must follow the replay — it matches on data-job-id.
+        if (typeof resumeDemoJobs === "function") resumeDemoJobs();
 
         // Scroll to bottom
         container.scrollTop = container.scrollHeight;
@@ -647,6 +1205,7 @@ function addMessage(content, type, container, attachments = null) {
     div.className = `message ${type}`;
     if (type === "assistant") {
         div.innerHTML = renderMarkdown(content);
+        enrichMessage(div);
     } else {
         div.textContent = content;
     }
@@ -701,8 +1260,27 @@ function addToolCard(toolName, toolInput, toolUseId, container) {
         summary = `${toolInput.score}/${toolInput.total}`;
     } else if (displayName === "update_learner_profile") {
         summary = toolInput.level || "profile update";
-    } else if (displayName === "save_demo") {
+    } else if (displayName === "save_demo" || displayName === "request_demo") {
         summary = toolInput.title || "interactive demo";
+    }
+
+    // A demo requested from the tutor is built in the background, so the chip
+    // starts in a building state and is driven to ready/failed by the job
+    // poller. It is the only completion signal — see demo-pane.js.
+    if (displayName === "request_demo") {
+        div.classList.add("is-demo", "is-building");
+        div.innerHTML = `
+            <div class="tool-header">
+                <span class="tool-icon">▶</span>
+                <span class="tool-name">demo</span>
+                <span class="tool-summary">${escapeHtml(summary)}</span>
+                <span class="demo-chip-status">building…</span>
+                <button class="demo-open-btn" type="button" style="display:none">Open</button>
+            </div>
+        `;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
     }
 
     // A demo's tool_input holds the entire HTML document. Dumping that into
@@ -737,7 +1315,7 @@ function addToolCard(toolName, toolInput, toolUseId, container) {
         }
         container.appendChild(div);
         container.scrollTop = container.scrollHeight;
-        return;
+        return div;
     }
 
     div.innerHTML = `
@@ -751,6 +1329,58 @@ function addToolCard(toolName, toolInput, toolUseId, container) {
     div.onclick = () => div.classList.toggle("expanded");
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+    return div;
+}
+
+/** Mark a tool card as failed, using the id addToolCard assigned it.
+ *
+ * Tool results were invisible until the backend started emitting them (the
+ * SDK delivers them inside a UserMessage, which agent.py used to drop), so a
+ * tool that failed still rendered as a successful-looking card. A save_demo
+ * that never wrote anything left an "Open" button that 404'd.
+ */
+function markToolCardFailed(toolUseId, reason, container) {
+    container = container || mainMessagesEl();
+    const scope = container.id || "chat-messages";
+    const card = document.getElementById(`tool-${scope}-${toolUseId}`);
+    if (!card || card.classList.contains("is-failed")) return;
+
+    card.classList.add("is-failed");
+
+    // An Open button on a demo that was never saved is a trap — remove it.
+    const openBtn = card.querySelector(".demo-open-btn");
+    if (openBtn) openBtn.remove();
+
+    const header = card.querySelector(".tool-header");
+    if (!header) return;
+    const note = document.createElement("span");
+    note.className = "tool-error";
+    note.textContent = (reason || "failed").split("\n")[0].substring(0, 120);
+    header.appendChild(note);
+}
+
+/** Bind a request_demo chip to its background build.
+ *
+ * The job id exists only in the tool RESULT — the call cannot know it — so the
+ * chip is matched back by tool_use_id and then handed to the job poller.
+ */
+function attachDemoJob(toolUseId, resultContent, container) {
+    if (!toolUseId || !resultContent) return;
+    container = container || mainMessagesEl();
+    const scope = container.id || "chat-messages";
+    const card = document.getElementById(`tool-${scope}-${toolUseId}`);
+    if (!card || !card.classList.contains("is-demo")) return;
+
+    let jobId = null;
+    try {
+        jobId = JSON.parse(resultContent).job_id || null;
+    } catch {
+        return;  // not a request_demo result
+    }
+    if (!jobId) return;
+
+    card.dataset.jobId = jobId;
+    if (typeof trackDemoJob === "function") trackDemoJob(jobId, card);
 }
 
 function addEventLog(event) {
@@ -886,6 +1516,10 @@ class ChatController {
         // Images staged for the NEXT turn, as {name, contentType, data}
         // where data is bare base64 (no data: prefix). Cleared on send.
         this.pendingAttachments = [];
+        // A demo the next message is about, staged from the Demo pane as
+        // {demo_id, title, selection}. Only the id and selection go to the
+        // server, which builds the digest — see run_agent's demo_ref.
+        this.pendingDemoRef = null;
         this.attachStripEl = attachStripEl;
         this.attachBtnEl = attachBtnEl;
         this.attachInputEl = attachInputEl;
@@ -964,10 +1598,48 @@ class ChatController {
 
             strip.appendChild(wrap);
         });
+
+        // A staged demo reference rides in the same strip as attachments, so
+        // it inherits the "you can see it before you send, and remove it"
+        // behaviour rather than being an invisible mode.
+        if (this.pendingDemoRef) {
+            const chip = document.createElement("div");
+            chip.className = "attach-demo-chip";
+
+            const label = document.createElement("span");
+            const sel = this.pendingDemoRef.selection;
+            label.textContent = sel && sel.text
+                ? `▶ ${sel.text.slice(0, 28)}`
+                : `▶ ${this.pendingDemoRef.title || "demo"}`;
+            label.title = this.pendingDemoRef.title || "";
+            chip.appendChild(label);
+
+            // Its own class, not .attach-thumb-remove: that one is absolutely
+            // positioned for the corner of a 56px image thumbnail, so on an
+            // inline chip it lands on top of the label.
+            const rm = document.createElement("button");
+            rm.className = "attach-demo-remove";
+            rm.textContent = "×";
+            rm.title = "Don't ask about this demo";
+            rm.onclick = (e) => {
+                e.stopPropagation();
+                this.setDemoRef(null);
+            };
+            chip.appendChild(rm);
+
+            strip.appendChild(chip);
+        }
+    }
+
+    /** Stage (or clear) a demo the next message is asking about. */
+    setDemoRef(ref) {
+        this.pendingDemoRef = ref;
+        this.renderAttachments();
     }
 
     clearAttachments() {
         this.pendingAttachments = [];
+        this.pendingDemoRef = null;
         this.renderAttachments();
         // Reset the picker too, or re-choosing the same file fires no change.
         if (this.attachInputEl) this.attachInputEl.value = "";
@@ -982,6 +1654,7 @@ class ChatController {
 
         const message = this.inputEl.value.trim();
         const attachments = this.pendingAttachments.slice();
+        const demoRef = this.pendingDemoRef;
         // An image on its own is a complete question ("what's wrong here?"),
         // so only bail when there's neither text nor an image.
         if (!message && !attachments.length) return;
@@ -1036,6 +1709,15 @@ class ChatController {
                     filename: a.name,
                 }));
             }
+            // Just the id and what was highlighted — the server builds the
+            // digest. Sending html from here would put ~4000 tokens into the
+            // transcript for the rest of the session.
+            if (demoRef && demoRef.demo_id) {
+                requestBody.demo_ref = {
+                    demo_id: demoRef.demo_id,
+                    selection: demoRef.selection || null,
+                };
+            }
 
             const res = await fetch(`${API_BASE}/api/chat/stream`, {
                 method: "POST",
@@ -1088,13 +1770,17 @@ class ChatController {
                                 if (this.isMain && typeof notesOnSessionChange === "function") {
                                     notesOnSessionChange(event.session_id);
                                 }
-                                // Auto-name the session with first message
-                                if (isFirstMessage) {
+                                // Auto-name the session with first message.
+                                // Side chats opt out: onSessionId has already
+                                // named this row after the tangent's topic, and
+                                // their opener is a seeded 'About "x" — ' prefix
+                                // that would make a worse name than the topic.
+                                if (isFirstMessage && this.isMain) {
                                     // An image-only opening turn has no text
                                     // to name from — don't PATCH a blank name.
                                     const sessionName = message.substring(0, 40)
                                         || (attachments.length ? "Image question" : "");
-                                    if (this.isMain) setChatTitle(sessionName);
+                                    setChatTitle(sessionName);
                                     try {
                                         await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(email)}/${event.session_id}`, {
                                             method: "PATCH",
@@ -1146,6 +1832,7 @@ class ChatController {
                             // Complete block — safe to parse markdown now.
                             assistantDiv.classList.remove("streaming");
                             assistantDiv.innerHTML = renderMarkdown(assistantText);
+                            enrichMessage(assistantDiv);
                             scrollChatIfPinned(this.messagesEl);
                             break;
 
@@ -1155,14 +1842,14 @@ class ChatController {
                             if (assistantDiv && assistantText) {
                                 assistantDiv.classList.remove("streaming");
                                 assistantDiv.innerHTML = renderMarkdown(assistantText);
+                                enrichMessage(assistantDiv);
                             }
                             addToolCard(event.tool_name, event.tool_input, event.tool_use_id, this.messagesEl);
-                            // Open the demo from the CALL, not the result: the
-                            // SDK never delivers a tool_result event for MCP
-                            // tools (transcripts contain tool_call but no
-                            // tool_result at all), so keying off the result
-                            // meant this never ran. The call carries the title,
-                            // which is enough to find the demo once saved.
+                            // A demo requested here is built in the background;
+                            // the chip is driven by the job poller once the
+                            // tool_result hands us a job_id. Legacy save_demo
+                            // cards (built inline, before background builds)
+                            // still resolve by title.
                             if (this.isMain && cleanToolName(event.tool_name) === "save_demo"
                                 && typeof onDemoSaved === "function") {
                                 onDemoSaved(null, (event.tool_input || {}).title);
@@ -1177,8 +1864,26 @@ class ChatController {
                             break;
 
                         case "tool_result":
-                            // Not emitted for MCP tools in practice — the demo
-                            // pane opens from the tool_call above instead.
+                            // These DO arrive for MCP tools; the backend used
+                            // to drop them because the SDK wraps them in a
+                            // UserMessage (no `.type`), so this looked dead.
+                            // Without it a failed tool renders as a success.
+                            if (event.is_error) {
+                                markToolCardFailed(
+                                    event.tool_use_id,
+                                    event.content,
+                                    this.messagesEl,
+                                );
+                            } else if (this.isMain) {
+                                // request_demo returns the job id here — the
+                                // call itself has no way to know it. This is
+                                // what binds the chip to the background build.
+                                attachDemoJob(
+                                    event.tool_use_id,
+                                    event.content,
+                                    this.messagesEl,
+                                );
+                            }
                             break;
 
                         case "result":
@@ -1210,9 +1915,11 @@ class ChatController {
                 if (assistantDiv && assistantText) {
                     assistantDiv.classList.remove("streaming");
                     assistantDiv.innerHTML = renderMarkdown(assistantText);
+                    enrichMessage(assistantDiv);
                     // Re-attach: every innerHTML write above destroys child
                     // nodes, so the launcher can only be added once the text
-                    // has settled.
+                    // has settled. Must follow enrichMessage for the same
+                    // reason — mermaid replaces nodes inside this subtree.
                     if (this.isMain) attachSideChatLauncher(assistantDiv);
                 }
 
@@ -1229,6 +1936,11 @@ class ChatController {
                         this.pendingAttachments = attachments;
                         this.renderAttachments();
                     }
+                    // Same for the demo reference — otherwise the retry asks
+                    // "why doesn't this work" about nothing in particular.
+                    if (demoRef && !this.pendingDemoRef) {
+                        this.setDemoRef(demoRef);
+                    }
                     addMessage("Your message was not sent — it's back in the box, press Send to retry.", "error", this.messagesEl);
                 }
             } finally {
@@ -1237,22 +1949,27 @@ class ChatController {
                 this.streaming = false;
                 this.inputEl.focus();
 
+                // Once a conversation has a real subject, replace the
+                // first-message title with one drawn from what was actually
+                // covered — an opener is often just "hi", and topics drift.
+                // Fire-and-forget: a failed retitle just leaves the old name.
+                //
+                // Deliberately OUTSIDE the isMain guard below. This is a POST
+                // that touches no DOM, so a side chat can rename itself without
+                // disturbing the main conversation — and it matters more here,
+                // since a tangent is otherwise stuck with its seeded topic.
+                if (currentEmail && this.turnCount === RETITLE_AFTER_TURNS && this.sessionId) {
+                    retitleSession(currentEmail, this.sessionId);
+                }
+
                 if (this.isMain) {
                     isStreaming = false;
                     setStatus(this.sessionId ? `Session: ${this.sessionId.substring(0, 8)}...` : "Ready", true);
-                    // Only the main chat refreshes the session list: it calls
+                    // These four are main-chat only: loadSessions calls
                     // loadSessionHistory, which wipes and rebuilds the main
                     // message list. Doing that from a side-chat would destroy
                     // the main conversation's DOM mid-stream.
                     if (currentEmail) {
-                        // Once a conversation has a real subject, replace the
-                        // first-message title with one drawn from what was
-                        // actually covered — an opener is often just "hi", and
-                        // topics drift. Fire-and-forget: a failed retitle just
-                        // leaves the original name.
-                        if (this.turnCount === RETITLE_AFTER_TURNS && this.sessionId) {
-                            retitleSession(currentEmail, this.sessionId);
-                        }
                         loadSessions(currentEmail);
                         refreshKnowledge(currentEmail);
                         refreshEpisodes(currentEmail);
@@ -1319,12 +2036,46 @@ function getSideChat() {
             inputEl: document.getElementById("side-chat-input"),
             sendBtnEl: document.getElementById("side-chat-send"),
             isMain: false,
+            onSessionId: registerSideChatSession,
             attachStripEl: document.getElementById("side-attach-strip"),
             attachBtnEl: document.getElementById("side-attach-btn"),
             attachInputEl: document.getElementById("side-attach-input"),
         });
     }
     return sideChat;
+}
+
+/**
+ * Give the forked side-chat session a row of its own, as soon as the SDK
+ * reports its id.
+ *
+ * Without this the tangent has no entry in user.json until the agent finishes
+ * the turn, so the generic first-message rename 404s and the session lands
+ * with the server default "New Session". Registering here also supplies the
+ * `kind` and `parent_session_id` the sidebar already knows how to nest — the
+ * topic label is the one openSideChat computed for the window header.
+ *
+ * Best-effort: a tangent that fails to register still works, it just reads as
+ * an ordinary session.
+ */
+async function registerSideChatSession(sessionId) {
+    if (!currentEmail || !sessionId) return;
+    try {
+        await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(currentEmail)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                session_id: sessionId,
+                name: sideChatTopic
+                    ? `Side: ${sideChatTopic.substring(0, 40)}`
+                    : "Side chat",
+                kind: "side_chat",
+                parent_session_id: sideChatParentId || "",
+            }),
+        });
+    } catch (e) {
+        // Non-critical — the tangent still runs, just unlabelled.
+    }
 }
 
 async function sendSideMessage() {
@@ -1566,6 +2317,39 @@ function renderSideSummaryCard(turn, container) {
         </div>
         <div class="side-summary-body">${renderMarkdown(turn.content || "")}</div>
     `;
+    container.appendChild(card);
+    // Interpolated into a template above rather than assigned to an
+    // element, so this can only be enriched once the card exists.
+    enrichMessage(card.querySelector(".side-summary-body"));
+    scrollChatIfPinned(container);
+    return card;
+}
+
+/** A demo the learner pinned into the conversation.
+ *
+ * Rendered like the demo chip so it reads as the same kind of object, and
+ * replayed from the transcript so it survives a refresh.
+ */
+function renderDemoPinCard(turn, container) {
+    container = container || mainMessagesEl();
+    const card = document.createElement("div");
+    card.className = "tool-card is-demo is-ready";
+    const version = (turn.version || 1) > 1 ? ` v${turn.version}` : "";
+    card.innerHTML = `
+        <div class="tool-header">
+            <span class="tool-icon">📌</span>
+            <span class="tool-name">demo</span>
+            <span class="tool-summary">${escapeHtml((turn.title || "demo") + version)}</span>
+            <button class="demo-open-btn" type="button">Open</button>
+        </div>
+    `;
+    const btn = card.querySelector(".demo-open-btn");
+    if (btn) {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            if (typeof openDemoById === "function") openDemoById(turn.demo_id);
+        };
+    }
     container.appendChild(card);
     scrollChatIfPinned(container);
     return card;

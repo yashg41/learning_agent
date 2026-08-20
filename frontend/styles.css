@@ -320,6 +320,41 @@ code, pre, kbd, samp,
     border-color: var(--accent);
 }
 
+/* A code block that came from a real verified run rather than the model's
+   retyping. The left edge is the tell: this exact source executed cleanly. */
+.is-verified {
+    border-left: 2px solid var(--accent);
+}
+
+/* Placeholder we could not resolve — never archived, or the id was malformed.
+   Muted and italic so it reads as an absence, not as code to copy. */
+.is-verified-missing {
+    border-left: 2px solid var(--border-strong);
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+/* "Run in code runner", sat in the corner of a tutor-written Python block.
+   Absolute so it overlays the code rather than reflowing it, and revealed on
+   hover so a wall of snippets is not also a wall of buttons. It also shows
+   while focused, so tabbing to it does not leave an invisible target. */
+.has-run-btn {
+    position: relative;
+}
+
+.code-run-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+}
+
+.has-run-btn:hover .code-run-btn,
+.code-run-btn:focus {
+    opacity: 1;
+}
+
 /* With both rails hidden the thread would stretch the full window and
    strand the text on the left, so cap and centre it. */
 .container.focused .chat-messages,
@@ -807,6 +842,28 @@ code, pre, kbd, samp,
     display: block;
 }
 
+/* A tool call that came back with is_error. Without this a failed call is
+   indistinguishable from a successful one — the state that let three
+   save_demo failures render as openable demo chips. */
+.tool-card.is-failed {
+    border-color: var(--error);
+}
+
+.tool-card.is-failed .tool-name,
+.tool-card.is-failed .tool-icon {
+    color: var(--error);
+}
+
+.tool-card .tool-error {
+    color: var(--error);
+    font-size: 10px;
+    margin-left: auto;
+    padding-left: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Chat input */
 .chat-input-area {
     padding: 12px 20px;
@@ -839,7 +896,11 @@ code, pre, kbd, samp,
     border-color: var(--accent);
 }
 
-.chat-input-area button {
+/* The Send button and friends in the input ROW. Deliberately not
+   `.chat-input-area button`: that also caught the small remove buttons on
+   staged attachments above it, painting them as full-size accent pills that
+   covered the thing they belong to. */
+.chat-input-area .chat-input-row > button {
     background: var(--accent);
     color: var(--bg-primary);
     border: none;
@@ -852,11 +913,11 @@ code, pre, kbd, samp,
     transition: background 0.15s;
 }
 
-.chat-input-area button:hover {
+.chat-input-area .chat-input-row > button:hover {
     background: var(--accent-hover);
 }
 
-.chat-input-area button:disabled {
+.chat-input-area .chat-input-row > button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
@@ -1550,7 +1611,10 @@ code, pre, kbd, samp,
     border-color: var(--accent);
 }
 
-.side-chat-input-area button {
+/* Scoped to the input row for the same reason as .chat-input-area above:
+   an unscoped descendant selector also repainted the small remove buttons on
+   staged attachments. */
+.side-chat-input-area .chat-input-row > button {
     padding: 8px 14px;
     font-family: inherit;
     font-size: 12px;
@@ -1955,4 +2019,110 @@ code, pre, kbd, samp,
 .session-item.is-branch {
     margin-left: var(--space-3);
     border-left: 1px dashed var(--border-strong);
+}
+
+/* =====================================================================
+   Rich rendering in tutor prose — math, diagrams, highlighted code
+
+   All three are driven by enrichMessage() in app.js. The token colours
+   below are derived from the existing accent/semantic variables rather
+   than lifted from a stock highlight.js theme: a stock theme ships its
+   own background and hardcoded hues, which fight the pre/code rules
+   above and only cover one theme. Deriving means both themes follow the
+   palette for free.
+   ===================================================================== */
+
+/* --- Syntax highlighting ------------------------------------------- */
+/* hljs sets .hljs on the <code>; the surrounding pre styling already
+   provides the surface, so the class must not repaint it. */
+.message.assistant pre code.hljs {
+    background: none;
+    padding: 0;
+    color: var(--text-dim);
+}
+
+.message.assistant .hljs-keyword,
+.message.assistant .hljs-selector-tag,
+.message.assistant .hljs-literal,
+.message.assistant .hljs-section { color: var(--accent-hover); }
+
+.message.assistant .hljs-string,
+.message.assistant .hljs-attr,
+.message.assistant .hljs-attribute,
+.message.assistant .hljs-addition { color: var(--success); }
+
+.message.assistant .hljs-number,
+.message.assistant .hljs-symbol,
+.message.assistant .hljs-bullet,
+.message.assistant .hljs-meta { color: var(--warning); }
+
+.message.assistant .hljs-title,
+.message.assistant .hljs-name,
+.message.assistant .hljs-built_in,
+.message.assistant .hljs-class .hljs-title { color: var(--text-bright); }
+
+.message.assistant .hljs-comment,
+.message.assistant .hljs-quote { color: var(--text-muted); font-style: italic; }
+
+.message.assistant .hljs-deletion,
+.message.assistant .hljs-variable,
+.message.assistant .hljs-template-variable { color: var(--error); }
+
+.message.assistant .hljs-emphasis { font-style: italic; }
+.message.assistant .hljs-strong { font-weight: 650; }
+
+/* --- Math ----------------------------------------------------------- */
+/* KaTeX sizes relative to its container; 1em keeps inline math on the
+   prose baseline instead of towering over it. */
+.message.assistant .katex { font-size: 1em; }
+
+/* A long derivation must scroll on its own rather than widening the
+   message column — same containment the pre rule uses. */
+.message.assistant .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    padding: var(--space-1) 0;
+    margin: var(--space-3) 0;
+}
+
+/* --- Mermaid diagrams ------------------------------------------------ */
+.message.assistant .mermaid-figure {
+    margin: var(--space-3) 0;
+    padding: var(--space-3);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    text-align: center;
+}
+
+.message.assistant .mermaid-figure svg {
+    max-width: 100%;
+    height: auto;
+}
+
+/* Invalid diagram source falls back to showing the source; it is already
+   inside the figure's surface, so strip the nested pre chrome. */
+.message.assistant .mermaid-figure.mermaid-failed pre {
+    background: none;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    text-align: left;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+}
+
+/* Clicking a node asks the tutor about that step. Only the hit area gets
+   the affordance — the arrows and labels between nodes are not clickable. */
+.message.assistant .mermaid-node-clickable { cursor: pointer; }
+
+.message.assistant .mermaid-node-clickable:hover rect,
+.message.assistant .mermaid-node-clickable:hover circle,
+.message.assistant .mermaid-node-clickable:hover polygon,
+.message.assistant .mermaid-node-clickable:hover path {
+    stroke: var(--accent);
+    stroke-width: 2px;
 }
