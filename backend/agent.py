@@ -88,6 +88,7 @@ MCP_TOOL_NAMES = [
     "mcp__learning-tools__get_learning_progress",
     "mcp__learning-tools__update_concept",
     "mcp__learning-tools__suggest_next_topics",
+    "mcp__learning-tools__get_domain_map",
     "mcp__learning-tools__get_quiz_topics",
     "mcp__learning-tools__record_quiz_result",
     "mcp__learning-tools__update_learner_profile",

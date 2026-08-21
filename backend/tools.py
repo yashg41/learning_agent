@@ -40,7 +40,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from backend.episodic import EpisodicMemory
 from backend.feedback import ASPECTS as FEEDBACK_ASPECTS, load_feedback
-from backend.knowledge import KnowledgeStore
+from backend.knowledge import CURRICULUM_GRAPH, TRACK_ORDER, KnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -352,14 +352,26 @@ def create_learning_tools(
 
     @tool(
         "suggest_next_topics",
-        "Analyze the learner's knowledge graph and suggest what Python concepts to learn next. "
-        "Considers prerequisite chains, current mastery levels, and natural learning progression.",
+        "Suggest what the learner should study next, based on prerequisite chains and "
+        "current mastery. Returns only concepts they can START NOW. "
+        "Pass `track` to scope to one domain (python, ml, dl, llm, ops, quantum, sysdesign). "
+        "If the learner asked about a specific domain and this returns nothing, that domain "
+        "is gated behind unmet prerequisites — call get_domain_map(track) to see its shape "
+        "and what unlocks it. Do NOT ask the learner what the domain contains; the "
+        "curriculum knows.",
         {
             "type": "object",
             "properties": {
                 "count": {
                     "type": "integer",
                     "description": "Number of suggestions to return (default: 3)",
+                },
+                "track": {
+                    "type": "string",
+                    "description": (
+                        "Restrict to one track: python, ml, dl, llm, ops "
+                        "(MLOps), quantum, sysdesign. Omit for a cross-track mix."
+                    ),
                 },
             },
             "required": [],
@@ -368,9 +380,51 @@ def create_learning_tools(
     async def suggest_next_topics_tool(args):
         try:
             count = args.get("count", 3)
-            suggestions = knowledge.get_next_topic_suggestions(count)
+            track = args.get("track")
+            if track is not None:
+                track = str(track).strip().lower()
+                if track not in TRACK_ORDER:
+                    return _error_result(
+                        f"Unknown track '{track}'. Valid tracks: "
+                        f"{', '.join(TRACK_ORDER)}."
+                    )
+
+            suggestions = knowledge.get_next_topic_suggestions(count, track=track)
 
             if not suggestions:
+                # An empty result used to claim the curriculum was finished.
+                # That is one of two very different situations, and the wrong
+                # one sends the tutor off to invent advanced material. Ask the
+                # domain map which it is.
+                if track:
+                    dmap = knowledge.get_domain_map(track)
+                    return _text_result(json.dumps({
+                        "suggestions": [],
+                        "track": track,
+                        "message": (
+                            f"Nothing in {dmap['track_name']} can be started yet: "
+                            f"{dmap['blocked']} of {dmap['total']} concepts are "
+                            f"blocked by unmet prerequisites. Call "
+                            f"get_domain_map('{track}') for the full structure "
+                            f"and the concepts that unlock it."
+                        ),
+                        "gateway_concepts": dmap["gateway_concepts"][:5],
+                    }, default=str))
+
+                remaining = [
+                    c for c in CURRICULUM_GRAPH
+                    if c not in knowledge.load_knowledge()["concepts"]
+                ]
+                if remaining:
+                    return _text_result(json.dumps({
+                        "suggestions": [],
+                        "message": (
+                            f"No concept is currently startable, but "
+                            f"{len(remaining)} remain uncovered — they are all "
+                            f"behind unmet prerequisites. Use get_domain_map "
+                            f"on a track to see what unlocks it."
+                        ),
+                    }))
                 return _text_result(json.dumps({
                     "suggestions": [],
                     "message": "All curriculum concepts have been covered! Consider diving deeper into advanced topics.",
@@ -383,6 +437,43 @@ def create_learning_tools(
         except Exception as e:
             logger.error(f"suggest_next_topics error: {e}", exc_info=True)
             return _error_result(f"Error suggesting topics: {e}")
+
+    @tool(
+        "get_domain_map",
+        "Get the full structure of one domain: every concept in it, in learning order, "
+        "each marked available / blocked / already-known, plus the specific prerequisites "
+        "that are missing and the 'gateway' concepts that unlock the most. "
+        "Use this whenever the learner asks what a domain contains, asks for a structured "
+        "path through it, or when suggest_next_topics returns nothing for that track. "
+        "This is how you answer 'what's in MLOps?' — never ask the learner to tell you.",
+        {
+            "type": "object",
+            "properties": {
+                "track": {
+                    "type": "string",
+                    "description": (
+                        "Which domain: python, ml, dl, llm, ops (MLOps), "
+                        "quantum, sysdesign."
+                    ),
+                },
+            },
+            "required": ["track"],
+        },
+    )
+    async def get_domain_map_tool(args):
+        try:
+            track = str(args.get("track", "")).strip().lower()
+            if track not in TRACK_ORDER:
+                return _error_result(
+                    f"Unknown track '{track}'. Valid tracks: "
+                    f"{', '.join(TRACK_ORDER)}."
+                )
+            return _text_result(json.dumps(
+                knowledge.get_domain_map(track), default=str
+            ))
+        except Exception as e:
+            logger.error(f"get_domain_map error: {e}", exc_info=True)
+            return _error_result(f"Error building domain map: {e}")
 
     @tool(
         "get_quiz_topics",
@@ -1369,6 +1460,7 @@ def create_learning_tools(
             get_learning_progress_tool,
             update_concept_tool,
             suggest_next_topics_tool,
+            get_domain_map_tool,
             get_quiz_topics_tool,
             record_quiz_result_tool,
             update_learner_profile_tool,

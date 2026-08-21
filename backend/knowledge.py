@@ -786,13 +786,23 @@ class KnowledgeStore:
 
         return concepts[:count]
 
-    def get_next_topic_suggestions(self, count: int = 3) -> list[dict]:
+    def get_next_topic_suggestions(
+        self, count: int = 3, track: str | None = None
+    ) -> list[dict]:
         """Suggest next topics, mixing tracks so cross-domain topics surface early.
 
         Finds concepts whose prerequisites are all met, buckets them by track
         (python/ml/dl/llm/ops), then interleaves: primary track first, then
         one candidate from each other track whose bucket is non-empty, then
         back to primary — repeating until `count` candidates are returned.
+
+        `track` restricts the walk to a single track. Without it, a learner who
+        asks about one domain gets a cross-track interleave that mostly answers
+        a question they did not ask. Note that a track filter makes an empty
+        result much more likely: the eligible set is already small, and one
+        track's slice of it is often empty even when the unfiltered call
+        returns something. That is what get_domain_map exists to explain —
+        an empty list here means "nothing startable", not "nothing to learn".
         """
         data = self.load_knowledge()
         known_concepts = set(data["concepts"].keys())
@@ -800,6 +810,8 @@ class KnowledgeStore:
         # Bucket candidates by track
         buckets: dict[str, list[dict]] = {}
         for concept_id, info in CURRICULUM_GRAPH.items():
+            if track and info.get("track", "python") != track:
+                continue
             if concept_id in known_concepts:
                 continue
             prereqs = info["prereqs"]
@@ -855,6 +867,121 @@ class KnowledgeStore:
             if not made_progress:
                 break
         return result
+
+    def get_domain_map(self, track: str) -> dict:
+        """The whole shape of one track: what is in it, in what order, how far off.
+
+        get_next_topic_suggestions answers "what can you start right now", which
+        for a track gated behind another track is nothing at all. Asking about
+        MLOps returned a single Python fundamentals concept, because all 15 ops
+        concepts sit behind ML prerequisites that are not recorded yet — the
+        tutor could not tell "this domain is empty" from "this domain is not
+        open yet", and fell back to asking the learner what MLOps contains.
+
+        So this returns every concept in the track, each marked with its status
+        and, when blocked, the specific prerequisites that are missing. Nothing
+        is filtered out; the caller gets the map and can describe the route.
+
+        `gateway_concepts` are the missing prerequisites that lie OUTSIDE this
+        track, ordered by how many of the track's concepts they unblock. That
+        is the actionable part of the answer: for a fully-gated track, the next
+        step is never in the track itself.
+        """
+        data = self.load_knowledge()
+        known = set(data["concepts"].keys())
+
+        concepts: list[dict] = []
+
+        for concept_id, info in CURRICULUM_GRAPH.items():
+            if info.get("track", "python") != track:
+                continue
+
+            prereqs = info["prereqs"]
+            missing = [p for p in prereqs if p not in known]
+
+            if concept_id in known:
+                status = data["concepts"][concept_id].get("mastery", "introduced")
+            elif missing:
+                status = "blocked"
+            else:
+                status = "available"
+
+            concepts.append({
+                "concept_id": concept_id,
+                "name": info["name"],
+                "category": info["category"],
+                "status": status,
+                "prerequisites": prereqs,
+                "missing_prerequisites": missing,
+            })
+
+        # Curriculum order within the track, so the list reads as a route
+        # rather than a set: available first, then by category priority.
+        status_rank = {"available": 0, "blocked": 1}
+        concepts.sort(key=lambda c: (
+            status_rank.get(c["status"], 2),
+            CATEGORY_PRIORITY.get(c["category"], 99),
+            c["concept_id"],
+        ))
+
+        # Gateways are counted TRANSITIVELY. Counting only direct dependents
+        # ranks every prerequisite equally — for a fully-gated track each one
+        # blocks exactly one concept, and the list says nothing about where to
+        # start. Walking the full unmet chain instead shows that
+        # sklearn_pipelines gates the entire serving line, while
+        # llm_evaluation gates one leaf.
+        def _unmet_chain(cid: str, seen: set[str]) -> set[str]:
+            """Every unmet prerequisite behind `cid`, transitively."""
+            out: set[str] = set()
+            for p in CURRICULUM_GRAPH.get(cid, {}).get("prereqs", []):
+                if p in known or p in seen:
+                    continue
+                seen.add(p)
+                out.add(p)
+                out |= _unmet_chain(p, seen)
+            return out
+
+        gateway_counts: dict[str, int] = {}
+        for c in concepts:
+            if c["status"] != "blocked":
+                continue
+            for p in _unmet_chain(c["concept_id"], set()):
+                # Only prerequisites outside this track are gateways. A missing
+                # in-track prereq resolves by learning the track in order and
+                # is already visible as that concept's own row.
+                if CURRICULUM_GRAPH.get(p, {}).get("track", "python") != track:
+                    gateway_counts[p] = gateway_counts.get(p, 0) + 1
+
+        # Entry points first: a gateway that is itself blocked cannot be
+        # started today, so a startable one outranks it at equal reach.
+        gateways = [
+            {
+                "concept_id": cid,
+                "name": CURRICULUM_GRAPH.get(cid, {}).get("name", cid),
+                "track": CURRICULUM_GRAPH.get(cid, {}).get("track", "python"),
+                "unblocks": n,
+                "startable": all(
+                    p in known
+                    for p in CURRICULUM_GRAPH.get(cid, {}).get("prereqs", [])
+                ),
+            }
+            for cid, n in gateway_counts.items()
+        ]
+        gateways.sort(key=lambda g: (not g["startable"], -g["unblocks"], g["concept_id"]))
+
+        return {
+            "track": track,
+            "track_name": TRACK_NAMES.get(track, track),
+            "total": len(concepts),
+            "available": sum(1 for c in concepts if c["status"] == "available"),
+            "blocked": sum(1 for c in concepts if c["status"] == "blocked"),
+            "known": sum(
+                1 for c in concepts
+                if c["status"] not in ("available", "blocked")
+            ),
+            "concepts": concepts,
+            "gateway_concepts": gateways,
+        }
 
     def record_quiz(self, quiz_data: dict) -> dict:
         """Save quiz results and promote mastery for correct answers.
