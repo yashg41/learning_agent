@@ -27,9 +27,21 @@ from backend.config import settings
 USERS_DIR = os.path.join(settings.DATA_DIR, "users")
 
 
+def _normalize_email(email: str) -> str:
+    """Canonical identity key for a learner.
+
+    Case-folding only — deliberately NOT _safe_email. That one substitutes any
+    character outside [\\w@.\\-] with "_", which is right for a directory name
+    but wrong for an identity: it maps "yash+ml@gmail.com" and
+    "yash_ml@gmail.com" onto the same key, silently merging two learners'
+    memories. Anything keyed by identity rather than by path wants this.
+    """
+    return email.lower().strip()
+
+
 def _safe_email(email: str) -> str:
     """Sanitize email for use as directory name."""
-    return re.sub(r"[^\w@.\-]", "_", email.lower().strip())
+    return re.sub(r"[^\w@.\-]", "_", _normalize_email(email))
 
 
 def _conversation_paths(session_dir: str) -> tuple[str, str]:
@@ -282,9 +294,11 @@ def save_user_session(
     now = datetime.now(timezone.utc).isoformat()
 
     if not data:
-        # Brand new user
+        # Brand new user. Store the normalized email, not the raw one — the
+        # directory is already lowercased by _safe_email, and a raw value here
+        # is what put "YASHG41" in a yashg41/ directory.
         data = {
-            "email": email,
+            "email": _normalize_email(email),
             "active_session": session_id,
             "sessions": [],
             "created_at": now,
@@ -512,7 +526,9 @@ class MemoryStore:
 
     def __init__(self, email: str, session_id: str, model: str = "", system_prompt: str | None = None):
         safe = _safe_email(email)
-        self.email = email
+        # Normalized, not raw: this is written into session metadata.json and
+        # is the identity the rest of the stack compares against.
+        self.email = _normalize_email(email)
         self.session_id = session_id
         self.user_dir = os.path.join(USERS_DIR, safe)
         self.session_dir = os.path.join(self.user_dir, "sessions", session_id)

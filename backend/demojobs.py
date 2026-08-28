@@ -28,6 +28,7 @@ import uuid
 from datetime import datetime, timezone
 
 from backend.demos import _ensure_dirs, _read_json, _write_atomic, demos_dir
+from backend.memory import _normalize_email
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,10 @@ def new_job(
 ) -> dict:
     """Create a job record in the queued state and persist it."""
     _ensure_dirs(email)
+    # The directory is lowercased by _ensure_dirs but this field is compared
+    # with == in get_job/list_jobs/active_count, so it has to be normalized
+    # too — otherwise a casing difference hides the job from its own owner.
+    email = _normalize_email(email)
     record = {
         "job_id": f"j_{uuid.uuid4().hex[:10]}",
         "email": email,
@@ -130,9 +135,10 @@ def get_job(email: str, job_id: str) -> dict | None:
     through here, would let them kill that build. The on-disk branch was
     already scoped by path; the in-memory one was not.
     """
+    email = _normalize_email(email)
     record = JOBS.get(job_id)
     if record is not None:
-        return record if record.get("email") == email else None
+        return record if _normalize_email(record.get("email") or "") == email else None
     return _read_json(_job_path(email, job_id))
 
 
@@ -142,6 +148,7 @@ def list_jobs(email: str) -> list[dict]:
     Reads from disk so a page refresh (or a restart) still sees them, then
     overlays the in-memory record, which is fresher for a running job.
     """
+    email = _normalize_email(email)
     out: dict[str, dict] = {}
     try:
         for name in os.listdir(_jobs_dir(email)):
@@ -154,7 +161,7 @@ def list_jobs(email: str) -> list[dict]:
         pass
 
     for job_id, record in JOBS.items():
-        if record.get("email") == email:
+        if _normalize_email(record.get("email") or "") == email:
             out[job_id] = record
 
     jobs = list(out.values())
@@ -163,10 +170,12 @@ def list_jobs(email: str) -> list[dict]:
 
 
 def active_count(email: str) -> int:
+    email = _normalize_email(email)
     return sum(
         1
         for r in JOBS.values()
-        if r.get("email") == email and r.get("state") in (QUEUED, BUILDING)
+        if _normalize_email(r.get("email") or "") == email
+        and r.get("state") in (QUEUED, BUILDING)
     )
 
 
