@@ -85,6 +85,10 @@ MCP_TOOL_NAMES = [
     "mcp__learning-tools__search_past_conversations",
     "mcp__learning-tools__save_conversation_summary",
     "mcp__learning-tools__save_image_memory",
+    # Lets the tutor see what it has already recorded. Without it the model
+    # cannot tell a covered topic from an uncovered one, and summaries end up
+    # far behind the teaching they are meant to record.
+    "mcp__learning-tools__get_memory_status",
     "mcp__learning-tools__get_learning_progress",
     "mcp__learning-tools__update_concept",
     "mcp__learning-tools__suggest_next_topics",

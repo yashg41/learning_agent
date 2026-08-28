@@ -983,12 +983,53 @@ class KnowledgeStore:
             "gateway_concepts": gateways,
         }
 
-    def record_quiz(self, quiz_data: dict) -> dict:
+    def clear_struggle_area(self, concept_id: str, *, passed: bool) -> bool:
+        """Remove a concept from struggle_areas after a passed re-test.
+
+        struggle_areas used to be a one-way ratchet: record_quiz appended on a
+        wrong answer and nothing ever removed the entry, so a single miss was
+        reported in every system prompt forever. The live symptom was a concept
+        sitting at mastery="mastered" while the same prompt said the learner
+        struggled with it.
+
+        Clearing is deliberately not automatic. A flag is only lifted when the
+        learner asks to be re-tested and passes, so "no longer struggling" is
+        backed by evidence the learner chose to produce.
+
+        Returns True when the flag was actually removed.
+        """
+        if not passed:
+            return False
+
+        data = self.load_knowledge()
+        struggles = data["profile"].get("struggle_areas", [])
+        if concept_id not in struggles:
+            return False
+
+        struggles.remove(concept_id)
+        data["profile"]["struggle_areas"] = struggles
+        # Recorded rather than silently dropped: the learning path is the audit
+        # trail for every other mastery change, and a recovery is one too.
+        data["learning_path"].append({
+            "concept": concept_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "struggle_cleared",
+            "mastery": data["concepts"].get(concept_id, {}).get("mastery", ""),
+        })
+        self.save_knowledge(data)
+        logger.info(f"Struggle area '{concept_id}' cleared by passed re-test")
+        return True
+
+    def record_quiz(self, quiz_data: dict, retest_concept: str | None = None) -> dict:
         """Save quiz results and promote mastery for correct answers.
 
         quiz_data: {quiz_id, topics, questions: [{question, user_answer, correct, concept}], score, total}
 
-        Returns dict with mastery_changes.
+        retest_concept: set when the learner explicitly asked to be re-tested on
+        a flagged concept. Every question on that concept must be correct for
+        the struggle flag to clear; anything less leaves it in place.
+
+        Returns dict with mastery_changes and struggle_cleared.
         """
         now = datetime.now(timezone.utc).isoformat()
 
@@ -1040,8 +1081,10 @@ class KnowledgeStore:
                         "to": new_mastery,
                     })
             else:
-                # Note the struggle area
-                if concept_id not in data["profile"].get("struggle_areas", []):
+                # Note the struggle area. A failed re-test is exempt: the
+                # concept is already flagged, and re-appending would be a no-op
+                # that reads like a second, independent failure.
+                if concept_id != retest_concept and concept_id not in data["profile"].get("struggle_areas", []):
                     data["profile"].setdefault("struggle_areas", []).append(concept_id)
 
             concept["last_reviewed"] = now
@@ -1055,7 +1098,25 @@ class KnowledgeStore:
         })
 
         self.save_knowledge(data)
-        return {"mastery_changes": mastery_changes, "quiz_entry": quiz_entry}
+
+        # Evaluate the re-test after the quiz itself is saved, so clearing the
+        # flag reads the state this quiz just wrote (mastery promotions
+        # included) rather than a stale copy.
+        struggle_cleared = False
+        if retest_concept:
+            answers = [
+                q for q in quiz_data.get("questions", [])
+                if q.get("concept") == retest_concept
+            ]
+            # A re-test with no questions on the concept proves nothing.
+            passed = bool(answers) and all(q.get("correct") for q in answers)
+            struggle_cleared = self.clear_struggle_area(retest_concept, passed=passed)
+
+        return {
+            "mastery_changes": mastery_changes,
+            "quiz_entry": quiz_entry,
+            "struggle_cleared": struggle_cleared,
+        }
 
     def format_for_system_prompt(self) -> str:
         """Format the current knowledge state as a condensed string for system prompt injection."""

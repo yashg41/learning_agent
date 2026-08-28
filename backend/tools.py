@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import random
+import re
 from datetime import datetime, timezone
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
@@ -235,6 +236,83 @@ def create_learning_tools(
         except Exception as e:
             logger.error(f"save_image_memory error: {e}", exc_info=True)
             return _error_result(f"Error saving image: {e}")
+
+    @tool(
+        "get_memory_status",
+        "See what you have already written into long-term memory: how many conversation "
+        "summaries exist, when the last one was saved, and which concepts you have taught "
+        "since then. Call this before saving a summary to check whether a topic is already "
+        "covered, or whenever you want to know if your notes are behind the conversation. "
+        "Cheap — returns counts and short strings, not full transcripts.",
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    )
+    async def get_memory_status_tool(args):
+        try:
+            email = _email_from_dir(user_data_dir)
+
+            # Recency-ordered already; see EpisodicMemory.get_recent_episodes.
+            recent = episodic.get_recent_episodes(email, n=5)
+            last_at = recent[0]["timestamp"] if recent else None
+
+            summaries = [
+                {
+                    "timestamp": ep["timestamp"][:19],
+                    "topics": ep["topics"],
+                    # First line only: this is a status check, not a retrieval.
+                    # search_past_conversations is where full text belongs.
+                    "preview": (ep["summary"] or "").split("\n")[0][:160],
+                }
+                for ep in recent
+            ]
+
+            data = knowledge.load_knowledge()
+            path = data.get("learning_path", [])
+
+            # Concepts taught since the last summary — the gap, computed rather
+            # than guessed. Without this the model cannot tell a covered topic
+            # from an uncovered one, which is how 72 concepts ended up with 30
+            # summaries between them.
+            since_last = []
+            if last_at:
+                since_last = [
+                    e["concept"] for e in path
+                    if e.get("action") == "introduced" and e.get("timestamp", "") > last_at
+                ]
+            else:
+                since_last = [
+                    e["concept"] for e in path if e.get("action") == "introduced"
+                ]
+
+            hours_since = None
+            if last_at:
+                try:
+                    delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_at)
+                    hours_since = round(delta.total_seconds() / 3600, 1)
+                except ValueError:
+                    pass
+
+            return _text_result(json.dumps({
+                "summary_count": episodic.count_episodes(email),
+                "last_summary_at": last_at[:19] if last_at else None,
+                "hours_since_last_summary": hours_since,
+                "recent_summaries": summaries,
+                "concepts_since_last_summary": since_last,
+                "recent_concept_activity": [
+                    {
+                        "concept": e.get("concept"),
+                        "action": e.get("action"),
+                        "at": (e.get("timestamp") or "")[:19],
+                    }
+                    for e in path[-10:]
+                ],
+            }, default=str))
+        except Exception as e:
+            logger.error(f"get_memory_status error: {e}", exc_info=True)
+            return _error_result(f"Error reading memory status: {e}")
 
     # =====================================================================
     # TIER 3: Semantic Memory Tools (JSON Knowledge Graph)
@@ -549,14 +627,25 @@ def create_learning_tools(
                 },
                 "score": {"type": "integer", "description": "Number of correct answers"},
                 "total": {"type": "integer", "description": "Total number of questions"},
+                "retest_concept": {
+                    "type": "string",
+                    "description": (
+                        "Set ONLY when the learner explicitly asked to be re-tested on a "
+                        "concept listed under 'Struggles with'. Every question on that "
+                        "concept must be correct for the struggle flag to clear. Never set "
+                        "this for an ordinary quiz, and never set it unless the learner "
+                        "asked for the re-test themselves."
+                    ),
+                },
             },
             "required": ["quiz_id", "topics", "questions", "score", "total"],
         },
     )
     async def record_quiz_result_tool(args):
         try:
-            result = knowledge.record_quiz(args)
-            return _text_result(json.dumps({
+            retest_concept = args.get("retest_concept") or None
+            result = knowledge.record_quiz(args, retest_concept=retest_concept)
+            payload = {
                 "status": "recorded",
                 "mastery_changes": result["mastery_changes"],
                 "quiz_summary": {
@@ -565,7 +654,15 @@ def create_learning_tools(
                     "percentage": result["quiz_entry"]["percentage"],
                 },
                 "message": "Quiz results saved and mastery levels updated.",
-            }, default=str))
+            }
+            if retest_concept:
+                payload["struggle_cleared"] = result["struggle_cleared"]
+                payload["message"] += (
+                    f" Re-test passed — '{retest_concept}' is no longer flagged as a struggle area."
+                    if result["struggle_cleared"]
+                    else f" Re-test not passed — '{retest_concept}' stays flagged."
+                )
+            return _text_result(json.dumps(payload, default=str))
         except Exception as e:
             logger.error(f"record_quiz_result error: {e}", exc_info=True)
             return _error_result(f"Error recording quiz: {e}")
@@ -1457,6 +1554,7 @@ def create_learning_tools(
             search_past_conversations_tool,
             save_conversation_summary_tool,
             save_image_memory_tool,
+            get_memory_status_tool,
             get_learning_progress_tool,
             update_concept_tool,
             suggest_next_topics_tool,
