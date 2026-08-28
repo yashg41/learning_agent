@@ -7,6 +7,14 @@ __pycache__/
 *.pyc
 *.egg-info/
 
+# Local ML experiment tracking and scratch notebooks. Not part of the app:
+# mlruns/ is regenerated output that would conflict on every run, and the
+# notebooks are throwaway exploration rather than anything the app imports.
+mlflow.db
+mlruns/
+*.ipynb
+!docs/**/*.ipynb
+
 # Secrets / local config
 .env
 .env.*
