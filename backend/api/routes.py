@@ -1167,6 +1167,7 @@ async def chroma_documents(email: str | None = None, limit: int = 100, collectio
         collection: 'conversations' (summaries) or 'exchanges' (detailed exchanges)
     """
     from backend.agent import _get_episodic
+    from backend.memory import _normalize_email
 
     episodic = _get_episodic()
     col = episodic._exchanges if collection == "exchanges" else episodic._conversations
@@ -1177,7 +1178,9 @@ async def chroma_documents(email: str | None = None, limit: int = 100, collectio
 
     kwargs = {"include": ["documents", "metadatas", "embeddings"], "limit": min(limit, count)}
     if email:
-        kwargs["where"] = {"user_email": email}
+        # Builds the where clause directly rather than going through
+        # EpisodicMemory, so it has to normalize for itself.
+        kwargs["where"] = {"user_email": _normalize_email(email)}
 
     try:
         results = col.get(**kwargs)
@@ -1224,6 +1227,7 @@ class SearchRequest(BaseModel):
 async def chroma_search(body: SearchRequest):
     """Semantic search across ChromaDB and return results with similarity scores."""
     from backend.agent import _get_episodic
+    from backend.memory import _normalize_email
 
     episodic = _get_episodic()
     col = episodic._conversations
@@ -1238,7 +1242,7 @@ async def chroma_search(body: SearchRequest):
         "include": ["documents", "metadatas", "distances"],
     }
     if body.email:
-        kwargs["where"] = {"user_email": body.email}
+        kwargs["where"] = {"user_email": _normalize_email(body.email)}
 
     try:
         results = col.query(**kwargs)
