@@ -84,50 +84,80 @@ def _cli_env() -> dict:
 # file permanently. Enough to carry an error message and a small JSON result.
 TOOL_RESULT_MAX_CHARS = 2000
 
-# MCP tool names (must match mcp__<server-name>__<tool-name> convention)
-MCP_TOOL_NAMES = [
-    "mcp__learning-tools__search_past_conversations",
-    "mcp__learning-tools__save_conversation_summary",
-    "mcp__learning-tools__save_image_memory",
-    # Lets the tutor see what it has already recorded. Without it the model
-    # cannot tell a covered topic from an uncovered one, and summaries end up
-    # far behind the teaching they are meant to record.
-    "mcp__learning-tools__get_memory_status",
-    "mcp__learning-tools__get_learning_progress",
-    "mcp__learning-tools__update_concept",
-    "mcp__learning-tools__suggest_next_topics",
-    "mcp__learning-tools__get_domain_map",
-    "mcp__learning-tools__get_quiz_topics",
-    "mcp__learning-tools__record_quiz_result",
-    "mcp__learning-tools__update_learner_profile",
-    "mcp__learning-tools__generate_quiz_question",
-    "mcp__learning-tools__get_feedback",
-    # Runs Python in the learner's own venv. Unlike every other tool here this
-    # one executes model-authored code as a subprocess — acceptable only
-    # because the notebook already gives the same venv the same reach, and this
-    # app is single-user by design (see the security note in sandbox.py).
-    "mcp__learning-tools__run_code",
-    "mcp__learning-tools__get_code_result",
-    # The tutor requests a demo; it does not write one. save_demo/update_demo
-    # belong to the builder (DEMO_BUILDER_TOOL_NAMES) — keeping them off this
-    # list stops the tutor emitting 30KB of HTML inside a chat turn, which is
-    # what used to block the composer for a minute.
-    "mcp__learning-tools__request_demo",
-    "mcp__learning-tools__search_demos",
-    # Reads slices of a demo's source when the learner asks about one. Capped
-    # and query-required — the tutor never gets the whole document.
-    "mcp__learning-tools__get_demo_source",
-    # Same split as demos: the tutor asks for a derivation, the builder writes
-    # it. Keeping derivation_write off this list is what stops the tutor
-    # assembling one inline and stalling the turn.
-    "mcp__learning-tools__request_derivation",
-    # Built-ins, not MCP: the tutor's only route to anything newer than the
-    # model's cutoff. Listed here for accuracy even though the allowlist is
-    # advisory under bypassPermissions — what actually admits them is their
-    # absence from DENIED_TOOL_NAMES.
-    "WebSearch",
-    "WebFetch",
-]
+# The tutor's tool names, per family (must match the mcp__<server>__<tool>
+# convention). Mirrors the families in tools.py, but lists only what the TUTOR
+# may call: the builder-only writers are deliberately absent, which is what
+# stops the tutor emitting 30KB of HTML or assembling a derivation inline and
+# stalling the turn.
+_TUTOR_TOOLS_BY_FAMILY = {
+    "core": [
+        "mcp__learning-tools__search_past_conversations",
+        "mcp__learning-tools__save_conversation_summary",
+        "mcp__learning-tools__save_image_memory",
+        # Lets the tutor see what it has already recorded. Without it the model
+        # cannot tell a covered topic from an uncovered one, and summaries end
+        # up far behind the teaching they are meant to record.
+        "mcp__learning-tools__get_memory_status",
+        "mcp__learning-tools__get_learning_progress",
+        "mcp__learning-tools__update_concept",
+        "mcp__learning-tools__suggest_next_topics",
+        "mcp__learning-tools__get_domain_map",
+        "mcp__learning-tools__get_quiz_topics",
+        "mcp__learning-tools__record_quiz_result",
+        "mcp__learning-tools__update_learner_profile",
+        "mcp__learning-tools__generate_quiz_question",
+        "mcp__learning-tools__get_feedback",
+    ],
+    "code": [
+        # Runs Python in the learner's own venv. Unlike every other tool here
+        # this one executes model-authored code as a subprocess — acceptable
+        # only because the notebook already gives the same venv the same reach,
+        # and this app is single-user by design (see sandbox.py's security
+        # note). A tutor with no Python to teach must not be handed this.
+        "mcp__learning-tools__run_code",
+        "mcp__learning-tools__get_code_result",
+    ],
+    "demos": [
+        # The tutor requests a demo; it does not write one. save_demo and
+        # update_demo belong to the builder (DEMO_BUILDER_TOOL_NAMES).
+        "mcp__learning-tools__request_demo",
+        "mcp__learning-tools__search_demos",
+        # Reads slices of a demo's source when the learner asks about one.
+        # Capped and query-required — the tutor never gets the whole document.
+        "mcp__learning-tools__get_demo_source",
+    ],
+    "derivations": [
+        # Same split as demos: the tutor asks, the builder writes.
+        "mcp__learning-tools__request_derivation",
+    ],
+}
+
+# Built-ins, not MCP: the tutor's only route to anything newer than the model's
+# cutoff. Every app gets them. Listed for accuracy even though the allowlist is
+# advisory under bypassPermissions — what actually admits them is their absence
+# from DENIED_TOOL_NAMES.
+_BUILTIN_TOOL_NAMES = ["WebSearch", "WebFetch"]
+
+
+def tutor_tool_names(app: str = "pymentor") -> list[str]:
+    """The tutor's allowlist for one app.
+
+    Derived from the same family selection tools.py uses to build the server,
+    so the two cannot drift into the state where the tutor is told about a tool
+    that was never registered.
+    """
+    from backend.tools import app_tool_families
+
+    names = [
+        name
+        for family in app_tool_families(app)
+        for name in _TUTOR_TOOLS_BY_FAMILY.get(family, [])
+    ]
+    return names + _BUILTIN_TOOL_NAMES
+
+
+# Back-compat for callers that predate the per-app split.
+MCP_TOOL_NAMES = tutor_tool_names("pymentor")
 # Note: skills do NOT need a "Skill" entry here. Verified against the bundled
 # CLI — a skill loads and runs with an MCP-only allowlist and no permission
 # denials. Skill bodies are injected as context, not invoked as a tool.
@@ -592,6 +622,7 @@ async def run_agent_internal(
     allowed_tools: list[str] | None = None,
     session_ctx: dict | None = None,
     build_ctx: dict | None = None,
+    app: str = "pymentor",
 ) -> str | None:
     """Internal SDK call — runs query() and streams events.
 
@@ -607,6 +638,10 @@ async def run_agent_internal(
     allowed_tools: narrow the MCP allowlist for this run. The demo builder
     uses it so a build cannot wander into quiz or profile tools.
 
+    app: which tutor this is. Selects both the tools that get registered and
+    the allowlist the model is shown, from one family list, so the two cannot
+    disagree about what exists.
+
     session_ctx: a caller-owned dict this run writes its session id into, as
     soon as the SDK reports it. Tools close over the same dict, which is the
     only way a tool handler can learn which chat session invoked it — the id
@@ -617,11 +652,11 @@ async def run_agent_internal(
     # Create MCP tools
     if user_data_dir:
         mcp_server = create_learning_tools(
-            user_data_dir, episodic, session_ctx, build_ctx
+            user_data_dir, episodic, session_ctx, build_ctx, app=app
         )
         options = ClaudeAgentOptions(
             mcp_servers={"learning-tools": mcp_server},
-            allowed_tools=allowed_tools or MCP_TOOL_NAMES,
+            allowed_tools=allowed_tools or tutor_tool_names(app),
             # Loads .claude/ from PROJECT_ROOT — specifically skills/, which is
             # how the tutor learns to build interactive demos. The SDK default
             # is None, which makes the CLI load nothing from disk, so without

@@ -74,18 +74,58 @@ RUN_CODE_TIMEOUT_SEC = 10
 # 71-99%, so 0.6 sits in an empty gap. See prose_ratio().
 MAX_PROSE_RATIO = 0.6
 
+# Which tool families each app gets.
+#
+# One backend serves more than one tutor, and they do not want the same tools:
+# a Sanskrit tutor has no use for run_code, and PyMentor has no use for a
+# sandhi splitter. Families rather than individual names, because the families
+# are the real units — the demo pair (request + search + read source) is
+# meaningless if you take only one of them, and a tutor with record_quiz_result
+# but not generate_quiz_question cannot run the quiz protocol at all.
+#
+# `core` is the tutoring machinery every app needs: memory, the knowledge
+# graph, quizzes, feedback. It is not listed per-app because omitting it never
+# makes sense — a tutor that cannot record what it taught is not a tutor.
+APP_TOOL_FAMILIES = {
+    "pymentor": ("code", "demos", "derivations"),
+    # Sanskrit gets its own families in Phase 2 ("sanskrit"). Demos stay:
+    # a declension table or a sandhi animation is exactly the demo surface.
+    # Code goes: there is no Python to run, and leaving run_code in would
+    # invite the tutor to "verify" morphology by writing a script instead of
+    # calling the analyser that actually knows.
+    "sanskrit": ("demos",),
+}
+
+DEFAULT_APP = "pymentor"
+
+
+def app_tool_families(app: str) -> tuple[str, ...]:
+    """Families for one app, always including core. Fails loudly on a typo."""
+    if app not in APP_TOOL_FAMILIES:
+        raise ValueError(
+            f"Unknown app '{app}'. Known apps: {sorted(APP_TOOL_FAMILIES)}."
+        )
+    return ("core",) + APP_TOOL_FAMILIES[app]
+
 
 def create_learning_tools(
     user_data_dir: str,
     episodic: EpisodicMemory,
     session_ctx: dict | None = None,
     build_ctx: dict | None = None,
+    app: str = DEFAULT_APP,
 ):
     """Create in-process MCP tools for the learning agent.
 
     Args:
         user_data_dir: Path to the user's data directory (data/users/<email>/)
         episodic: Shared EpisodicMemory instance
+        app: Which tutor this is. Selects the tool families (see
+            APP_TOOL_FAMILIES) so a Sanskrit tutor is not handed run_code.
+            Every tool is still *defined* below whatever the app — only the
+            list handed to the MCP server is filtered, because the definitions
+            are closures over this factory's arguments and splitting them
+            across modules would mean threading five parameters through each.
         session_ctx: Caller-owned dict that run_agent_internal fills with the
             live session id. request_demo needs it to know which conversation
             to fork, and the id does not exist when this factory is called.
@@ -1897,38 +1937,68 @@ def create_learning_tools(
     # Create MCP Server
     # =====================================================================
 
-    return create_sdk_mcp_server(
-        name="learning-tools",
-        version="1.0.0",
-        tools=[
+    # Grouped by family so an app can take or leave a whole capability. The
+    # groups are also the documentation: what "demos" means is this list, not a
+    # comment that can drift from it.
+    families = {
+        "core": [
+            # Episodic memory (ChromaDB)
             search_past_conversations_tool,
             save_conversation_summary_tool,
             save_image_memory_tool,
             get_memory_status_tool,
+            # Semantic memory / knowledge graph
             get_learning_progress_tool,
             update_concept_tool,
             suggest_next_topics_tool,
             get_domain_map_tool,
+            # Quizzing and the learner profile
             get_quiz_topics_tool,
             record_quiz_result_tool,
             update_learner_profile_tool,
             generate_quiz_question_tool,
             get_feedback_tool,
+        ],
+        "code": [
             run_code_tool,
             get_code_result_tool,
-            save_demo_tool,
-            update_demo_tool,
-            get_demo_html_tool,
-            search_demos_tool,
-            get_demo_source_tool,
-            request_demo_tool,
-            request_derivation_tool,
-            derivation_open_tool,
-            derivation_write_tool,
-            derivation_verify_tool,
-            derivation_read_tool,
-            derivation_plot_tool,
         ],
+        "demos": [
+            request_demo_tool,      # tutor
+            search_demos_tool,      # tutor
+            get_demo_source_tool,   # tutor
+            save_demo_tool,         # builder only
+            update_demo_tool,       # builder only
+            get_demo_html_tool,     # builder only
+        ],
+        "derivations": [
+            request_derivation_tool,  # tutor
+            derivation_open_tool,     # builder only
+            derivation_write_tool,    # builder only
+            derivation_verify_tool,   # builder only
+            derivation_read_tool,     # builder only
+            derivation_plot_tool,     # builder only
+        ],
+    }
+
+    selected = app_tool_families(app)
+    unknown = set(selected) - set(families)
+    if unknown:
+        raise ValueError(
+            f"App '{app}' asks for tool families that do not exist: "
+            f"{sorted(unknown)}. Known: {sorted(families)}."
+        )
+
+    enabled = [t for name in selected for t in families[name]]
+    logger.debug(
+        "Tools for app '%s': %d across families %s",
+        app, len(enabled), list(selected),
+    )
+
+    return create_sdk_mcp_server(
+        name="learning-tools",
+        version="1.0.0",
+        tools=enabled,
     )
 
 
