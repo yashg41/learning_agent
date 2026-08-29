@@ -294,6 +294,26 @@ if __name__ == "__main__":
             host=settings.API_HOST,
             port=settings.API_PORT,
             reload=settings.DEBUG,
+            # Watch ONLY the source tree. uvicorn's default is the whole cwd,
+            # which includes data/ — and the code runner writes cell.py and
+            # sitecustomize.py into data/users/<email>/scratch/ on every Run
+            # Code. Those match the reloader's default "*.py" filter, so every
+            # code execution restarted the server. That killed the `claude` CLI
+            # subprocess carrying the SDK's MCP control channel mid-turn, and
+            # any in-flight tool call came back as "Stream closed" — observed
+            # as three straight save_demo failures, since demo generation is
+            # the only tool that runs ~57s into a turn.
+            #
+            # frontend/ is static and served by the app, so a browser refresh
+            # already picks up its edits; it does not need the reloader.
+            #
+            # reload_dirs is what actually contains this: WatchFilesReload calls
+            # watch(*reload_dirs), so nothing outside backend/ is ever walked.
+            # reload_excludes would NOT have been enough on its own — its
+            # FileFilter still returns True for data/.../scratch/cell.py; those
+            # paths simply never reach the filter. Belt and braces lives in
+            # sandbox.SCRATCH_ROOT, which puts run files outside the tree.
+            reload_dirs=[os.path.join(ROOT, "backend")],
         )
     except KeyboardInterrupt:
         pass

@@ -102,13 +102,34 @@ CURRICULUM_ML = {
     "logistic_regression": {"name": "Logistic Regression", "prereqs": ["linear_regression"], "category": "ml_supervised", "track": "ml"},
     "decision_trees": {"name": "Decision Trees", "prereqs": ["train_test_split"], "category": "ml_supervised", "track": "ml"},
     "random_forests": {"name": "Random Forests", "prereqs": ["decision_trees"], "category": "ml_supervised", "track": "ml"},
+    "svm": {"name": "Support Vector Machines", "prereqs": ["logistic_regression"], "category": "ml_supervised", "track": "ml"},
+    "knn": {"name": "K-Nearest Neighbours", "prereqs": ["train_test_split"], "category": "ml_supervised", "track": "ml"},
+    "naive_bayes": {"name": "Naive Bayes", "prereqs": ["train_test_split"], "category": "ml_supervised", "track": "ml"},
+    "regularization": {"name": "Regularization (L1 / L2)", "prereqs": ["linear_regression", "logistic_regression"], "category": "ml_supervised", "track": "ml"},
+    "bias_variance": {"name": "Bias-Variance Tradeoff", "prereqs": ["train_test_split", "linear_regression"], "category": "ml_supervised", "track": "ml"},
+    # --- Ensembles (ml_ensembles) ---
+    # Gradient boosting is the workhorse of tabular ML and had no home in the
+    # graph at all. Bagging vs boosting leads the section because the
+    # parallel-vs-sequential distinction is the thing learners actually confuse.
+    "ensemble_basics": {"name": "Ensembles: Bagging vs Boosting", "prereqs": ["decision_trees", "random_forests"], "category": "ml_ensembles", "track": "ml"},
+    "gradient_boosting": {"name": "Gradient Boosting", "prereqs": ["ensemble_basics", "bias_variance"], "category": "ml_ensembles", "track": "ml"},
+    "xgboost": {"name": "XGBoost", "prereqs": ["gradient_boosting", "regularization"], "category": "ml_ensembles", "track": "ml"},
+    "lightgbm": {"name": "LightGBM", "prereqs": ["gradient_boosting"], "category": "ml_ensembles", "track": "ml"},
+    "catboost": {"name": "CatBoost", "prereqs": ["gradient_boosting"], "category": "ml_ensembles", "track": "ml"},
+    "stacking_blending": {"name": "Stacking & Blending", "prereqs": ["ensemble_basics", "cross_validation"], "category": "ml_ensembles", "track": "ml"},
     # --- Unsupervised (ml_unsupervised) ---
     "kmeans": {"name": "K-Means Clustering", "prereqs": ["numpy_broadcasting", "matplotlib_basics"], "category": "ml_unsupervised", "track": "ml"},
+    "hierarchical_clustering": {"name": "Hierarchical Clustering", "prereqs": ["kmeans"], "category": "ml_unsupervised", "track": "ml"},
+    "dbscan": {"name": "DBSCAN", "prereqs": ["kmeans"], "category": "ml_unsupervised", "track": "ml"},
+    "pca": {"name": "PCA & Dimensionality Reduction", "prereqs": ["numpy_broadcasting", "feature_engineering"], "category": "ml_unsupervised", "track": "ml"},
     # --- Evaluation & tuning (ml_eval) ---
     "evaluation_metrics": {"name": "Evaluation Metrics", "prereqs": ["logistic_regression"], "category": "ml_eval", "track": "ml"},
     "cross_validation": {"name": "Cross-Validation", "prereqs": ["train_test_split", "evaluation_metrics"], "category": "ml_eval", "track": "ml"},
     "hyperparameter_tuning": {"name": "Hyperparameter Tuning", "prereqs": ["cross_validation"], "category": "ml_eval", "track": "ml"},
     "sklearn_pipelines": {"name": "scikit-learn Pipelines", "prereqs": ["feature_engineering", "cross_validation"], "category": "ml_eval", "track": "ml"},
+    "imbalanced_data": {"name": "Imbalanced Data & Resampling", "prereqs": ["evaluation_metrics"], "category": "ml_eval", "track": "ml"},
+    "feature_importance": {"name": "Feature Importance & SHAP", "prereqs": ["random_forests", "gradient_boosting"], "category": "ml_eval", "track": "ml"},
+    "data_leakage": {"name": "Data Leakage", "prereqs": ["sklearn_pipelines", "cross_validation"], "category": "ml_eval", "track": "ml"},
 }
 
 CURRICULUM_DL = {
@@ -126,6 +147,17 @@ CURRICULUM_DL = {
     "rnns": {"name": "Recurrent Neural Networks", "prereqs": ["training_loop"], "category": "dl_architectures", "track": "dl"},
     "transformers_intro": {"name": "Transformers (Intro)", "prereqs": ["rnns"], "category": "dl_architectures", "track": "dl"},
     "transfer_learning": {"name": "Transfer Learning", "prereqs": ["cnns"], "category": "dl_architectures", "track": "dl"},
+    # Attention is split from transformers_intro: the mechanism is what the
+    # rest of the modern stack is built on, and it is taught before the
+    # architecture that packages it.
+    "attention_mechanism": {"name": "Attention & Self-Attention", "prereqs": ["rnns"], "category": "dl_architectures", "track": "dl"},
+    "vision_transformers": {"name": "Vision Transformers (ViT)", "prereqs": ["transformers_intro", "cnns"], "category": "dl_architectures", "track": "dl"},
+    "autoencoders": {"name": "Autoencoders", "prereqs": ["nn_module", "training_loop"], "category": "dl_architectures", "track": "dl"},
+    "gans": {"name": "GANs", "prereqs": ["autoencoders"], "category": "dl_architectures", "track": "dl"},
+    "diffusion_models": {"name": "Diffusion Models", "prereqs": ["autoencoders", "cnns"], "category": "dl_architectures", "track": "dl"},
+    "regularization_dl": {"name": "Dropout & Batch Normalization", "prereqs": ["training_loop"], "category": "dl_basics", "track": "dl"},
+    "lr_scheduling": {"name": "Learning Rate Scheduling", "prereqs": ["optimizers"], "category": "dl_basics", "track": "dl"},
+    "overfitting_dl": {"name": "Overfitting & Early Stopping", "prereqs": ["training_loop", "regularization_dl"], "category": "dl_basics", "track": "dl"},
 }
 
 CURRICULUM_LLM = {
@@ -141,6 +173,20 @@ CURRICULUM_LLM = {
     "reranking": {"name": "Reranking", "prereqs": ["retrieval"], "category": "llm_rag", "track": "llm"},
     "rag_architecture": {"name": "RAG Architecture", "prereqs": ["retrieval", "prompt_engineering"], "category": "llm_rag", "track": "llm"},
     "agents_tool_use": {"name": "Agents & Tool Use", "prereqs": ["prompt_engineering", "functions_basic"], "category": "llm_rag", "track": "llm"},
+    "hybrid_search": {"name": "Hybrid Search (BM25 + dense)", "prereqs": ["retrieval"], "category": "llm_rag", "track": "llm"},
+    "mcp_protocol": {"name": "Model Context Protocol (MCP)", "prereqs": ["agents_tool_use"], "category": "llm_rag", "track": "llm"},
+    "structured_output": {"name": "Structured Output & Function Calling", "prereqs": ["prompt_engineering"], "category": "llm_core", "track": "llm"},
+    "context_windows": {"name": "Context Windows & Long Context", "prereqs": ["tokenization"], "category": "llm_core", "track": "llm"},
+    "hallucination_grounding": {"name": "Hallucination & Grounding", "prereqs": ["rag_architecture", "llm_evaluation"], "category": "llm_core", "track": "llm"},
+    # --- Adapting and running models (llm_tuning) ---
+    # The track stopped at prompting and RAG; fine-tuning and the serving
+    # economics that decide whether a model is deployable had no home.
+    "finetuning_basics": {"name": "Fine-Tuning: When and Why", "prereqs": ["prompt_engineering", "rag_architecture"], "category": "llm_tuning", "track": "llm"},
+    "peft_lora": {"name": "PEFT: LoRA & QLoRA", "prereqs": ["finetuning_basics", "transfer_learning"], "category": "llm_tuning", "track": "llm"},
+    "instruction_tuning": {"name": "Instruction Tuning (SFT)", "prereqs": ["finetuning_basics"], "category": "llm_tuning", "track": "llm"},
+    "preference_tuning": {"name": "Preference Tuning (RLHF, DPO)", "prereqs": ["instruction_tuning"], "category": "llm_tuning", "track": "llm"},
+    "quantization": {"name": "Quantization (INT8, NF4)", "prereqs": ["finetuning_basics"], "category": "llm_tuning", "track": "llm"},
+    "inference_optimization": {"name": "Inference Optimization & KV Cache", "prereqs": ["quantization", "context_windows"], "category": "llm_tuning", "track": "llm"},
 }
 
 CURRICULUM_MLOPS = {
@@ -155,6 +201,14 @@ CURRICULUM_MLOPS = {
     "monitoring_drift": {"name": "Monitoring & Drift Detection", "prereqs": ["inference_serving"], "category": "ops_monitoring", "track": "ops"},
     "cicd_for_ml": {"name": "CI/CD for ML", "prereqs": ["containerization", "unit_testing"], "category": "ops_monitoring", "track": "ops"},
     "feature_stores": {"name": "Feature Stores", "prereqs": ["feature_engineering", "pandas_groupby_merge"], "category": "ops_monitoring", "track": "ops"},
+    "data_versioning": {"name": "Data & Dataset Versioning", "prereqs": ["experiment_tracking"], "category": "ops_monitoring", "track": "ops"},
+    "pipeline_orchestration": {"name": "Pipeline Orchestration (Airflow, Prefect)", "prereqs": ["cicd_for_ml"], "category": "ops_monitoring", "track": "ops"},
+    "model_governance": {"name": "Model Governance & Reproducibility", "prereqs": ["model_registry", "data_versioning"], "category": "ops_monitoring", "track": "ops"},
+    "ab_testing_ml": {"name": "A/B Testing & Shadow Deployment", "prereqs": ["monitoring_drift", "batch_vs_streaming"], "category": "ops_serving", "track": "ops"},
+    "model_optimization_serving": {"name": "Serving Optimization (batching, caching)", "prereqs": ["inference_serving"], "category": "ops_serving", "track": "ops"},
+    # LLM-era ops. Distinct from classical monitoring: the failure modes are
+    # cost and output quality rather than numeric drift.
+    "llmops": {"name": "LLMOps: Evaluating & Monitoring LLM Apps", "prereqs": ["monitoring_drift", "llm_evaluation"], "category": "ops_monitoring", "track": "ops"},
 }
 
 CURRICULUM_QUANTUM = {
@@ -279,11 +333,12 @@ CATEGORY_PRIORITY = {
     "file_io": 6, "modules": 7, "testing": 8,
     "data_processing": 9, "advanced": 10,
     # ML
-    "ml_core": 0, "ml_supervised": 1, "ml_unsupervised": 2, "ml_eval": 3,
+    "ml_core": 0, "ml_supervised": 1, "ml_ensembles": 2,
+    "ml_unsupervised": 3, "ml_eval": 4,
     # DL
     "dl_basics": 0, "dl_architectures": 1,
     # LLM
-    "llm_core": 0, "llm_rag": 1,
+    "llm_core": 0, "llm_rag": 1, "llm_tuning": 2,
     # Ops
     "ops_serving": 0, "ops_monitoring": 1,
     # Quantum
@@ -315,6 +370,7 @@ CATEGORY_COLORS = {
     # ML — oranges/ambers
     "ml_core": "#f5a623",
     "ml_supervised": "#ffb454",
+    "ml_ensembles": "#ffc978",
     "ml_unsupervised": "#e08e2a",
     "ml_eval": "#d97706",
     # DL — cyans/teals
@@ -323,6 +379,7 @@ CATEGORY_COLORS = {
     # LLM — purples/violets
     "llm_core": "#a277ff",
     "llm_rag": "#c678dd",
+    "llm_tuning": "#8b5cf6",
     # Ops — greens
     "ops_serving": "#98c379",
     "ops_monitoring": "#5fb37c",
@@ -357,6 +414,33 @@ TRACK_COLORS = {
 # Round-robin order for cross-track suggestion interleaving. Kept as a single
 # tuple so adding a track only means editing this list (and TRACK_COLORS).
 TRACK_ORDER = ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign")
+
+# How each track is named in prose. Used to build the tutor's identity line
+# from the curriculum instead of restating it in the prompt, so a track added
+# here cannot leave the prompt claiming a different set of subjects.
+TRACK_NAMES = {
+    "python": "Python",
+    "ml": "classical machine learning",
+    "dl": "deep learning",
+    "llm": "LLMs and RAG",
+    "ops": "MLOps",
+    "quantum": "quantum computing with Qiskit",
+    "sysdesign": "system design",
+}
+
+
+def taught_domains() -> str:
+    """The subjects the curriculum actually covers, as an English list.
+
+    Derived from TRACK_ORDER so the identity prompt and the knowledge graph can
+    never disagree. Python leads and the rest follow as what builds on it,
+    matching how the tracks are actually sequenced.
+    """
+    rest = [TRACK_NAMES.get(t, t) for t in TRACK_ORDER if t != "python"]
+    if not rest:
+        return TRACK_NAMES.get("python", "Python")
+    tail = f"{', '.join(rest[:-1])}, and {rest[-1]}" if len(rest) > 1 else rest[0]
+    return f"{TRACK_NAMES.get('python', 'Python')} and the topics that build on it: {tail}"
 
 # --- Derived palette (OKLCH) ------------------------------------------------
 # 31 independently-chosen category hues are indistinguishable on screen. Since
@@ -451,12 +535,14 @@ def build_oklch_palette(theme: str = "dark") -> dict:
 CATEGORY_LABELS = {
     "ml_core": "ML · Core",
     "ml_supervised": "ML · Supervised",
+    "ml_ensembles": "ML · Ensembles & Boosting",
     "ml_unsupervised": "ML · Unsupervised",
     "ml_eval": "ML · Evaluation",
     "dl_basics": "DL · Basics",
     "dl_architectures": "DL · Architectures",
     "llm_core": "LLM · Core",
     "llm_rag": "LLM · RAG & Agents",
+    "llm_tuning": "LLM · Tuning & Serving",
     "ops_serving": "MLOps · Serving",
     "ops_monitoring": "MLOps · Monitoring",
     "qc_foundations": "Quantum · Foundations",
@@ -475,6 +561,43 @@ CATEGORY_LABELS = {
 def category_label(category: str) -> str:
     """Display name for a category id, falling back to title-casing."""
     return CATEGORY_LABELS.get(category, category.replace("_", " ").title())
+
+
+# Palette for categories the tutor invents. The built-in tracks each own a hue
+# family (see CATEGORY_COLORS); these are deliberately outside those families
+# so a learner-invented category never looks like it belongs to Python or ML.
+CUSTOM_CATEGORY_COLORS = [
+    "#e0af68", "#d4a5c8", "#9ece6a", "#f7768e", "#7dcfff",
+    "#bb9af7", "#e69875", "#73daca", "#c0caf5", "#ff9e64",
+]
+
+
+def _auto_label(category: str) -> str:
+    """Human-readable label for a category id the curriculum never defined.
+
+    Mirrors the "Track · Topic" shape of CATEGORY_LABELS where the id carries a
+    known track prefix, so an invented `ml_ensembles` reads as "ML · Ensembles"
+    beside the built-in ML entries rather than as "Ml Ensembles".
+    """
+    prefixes = {
+        "ml": "ML", "dl": "DL", "llm": "LLM", "ops": "MLOps",
+        "qc": "Quantum", "sd": "System Design",
+    }
+    head, _, tail = category.partition("_")
+    if tail and head in prefixes:
+        return f"{prefixes[head]} · {tail.replace('_', ' ').title()}"
+    return category.replace("_", " ").title()
+
+
+def _auto_color(category: str) -> str:
+    """Stable color for an invented category.
+
+    Hashed rather than assigned in arrival order so the same category keeps its
+    color across learners and across a knowledge file being rebuilt — the graph
+    view would otherwise reshuffle colors whenever concepts were re-added.
+    """
+    idx = sum(ord(c) for c in category) % len(CUSTOM_CATEGORY_COLORS)
+    return CUSTOM_CATEGORY_COLORS[idx]
 
 
 def _default_knowledge() -> dict:
@@ -550,6 +673,13 @@ class KnowledgeStore:
         data = self.load_knowledge()
         now = datetime.now(timezone.utc).isoformat()
 
+        # Register a category the curriculum never defined. The tutor teaches
+        # past the fixed curriculum — a session on gradient boosting produces
+        # concepts no CURRICULUM_* dict anticipated — and a category with no
+        # label and no color renders as an unnamed grey node. Recording it here
+        # means the graph view can name and colour it like any built-in.
+        self._register_category(data, category)
+
         existing = data["concepts"].get(concept_id)
         if existing:
             # Update existing concept
@@ -598,6 +728,44 @@ class KnowledgeStore:
         logger.info(f"Concept '{concept_id}' {action} at mastery={mastery}")
         return concept
 
+    @staticmethod
+    def _register_category(data: dict, category: str) -> None:
+        """Record a category that is not part of the built-in curriculum.
+
+        Mutates `data` in place; the caller saves. Built-in categories are
+        skipped, so this only ever grows with what the tutor actually invents.
+        Uses setdefault throughout: knowledge files written before this existed
+        have no custom_categories key, and re-registering must not overwrite a
+        label the learner may later have edited.
+        """
+        if not category or category in CATEGORY_LABELS or category in CATEGORY_COLORS:
+            return
+        customs = data.setdefault("custom_categories", {})
+        if category not in customs:
+            customs[category] = {
+                "label": _auto_label(category),
+                "color": _auto_color(category),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info(f"Registered new category '{category}'")
+
+    def categories(self) -> dict:
+        """Every category this learner has, built-in and invented.
+
+        Returns {id: {"label", "color"}} — what the graph legend needs, without
+        the caller having to know which categories came from the curriculum.
+        """
+        out = {
+            cat: {"label": category_label(cat), "color": color}
+            for cat, color in CATEGORY_COLORS.items()
+        }
+        for cat, meta in self.load_knowledge().get("custom_categories", {}).items():
+            out[cat] = {
+                "label": meta.get("label") or _auto_label(cat),
+                "color": meta.get("color") or _auto_color(cat),
+            }
+        return out
+
     def get_quiz_candidates(self, count: int = 5, category: str | None = None) -> list[dict]:
         """Get concepts ranked by quiz priority.
 
@@ -618,13 +786,23 @@ class KnowledgeStore:
 
         return concepts[:count]
 
-    def get_next_topic_suggestions(self, count: int = 3) -> list[dict]:
+    def get_next_topic_suggestions(
+        self, count: int = 3, track: str | None = None
+    ) -> list[dict]:
         """Suggest next topics, mixing tracks so cross-domain topics surface early.
 
         Finds concepts whose prerequisites are all met, buckets them by track
         (python/ml/dl/llm/ops), then interleaves: primary track first, then
         one candidate from each other track whose bucket is non-empty, then
         back to primary — repeating until `count` candidates are returned.
+
+        `track` restricts the walk to a single track. Without it, a learner who
+        asks about one domain gets a cross-track interleave that mostly answers
+        a question they did not ask. Note that a track filter makes an empty
+        result much more likely: the eligible set is already small, and one
+        track's slice of it is often empty even when the unfiltered call
+        returns something. That is what get_domain_map exists to explain —
+        an empty list here means "nothing startable", not "nothing to learn".
         """
         data = self.load_knowledge()
         known_concepts = set(data["concepts"].keys())
@@ -632,6 +810,8 @@ class KnowledgeStore:
         # Bucket candidates by track
         buckets: dict[str, list[dict]] = {}
         for concept_id, info in CURRICULUM_GRAPH.items():
+            if track and info.get("track", "python") != track:
+                continue
             if concept_id in known_concepts:
                 continue
             prereqs = info["prereqs"]
@@ -688,12 +868,168 @@ class KnowledgeStore:
                 break
         return result
 
-    def record_quiz(self, quiz_data: dict) -> dict:
+    def get_domain_map(self, track: str) -> dict:
+        """The whole shape of one track: what is in it, in what order, how far off.
+
+        get_next_topic_suggestions answers "what can you start right now", which
+        for a track gated behind another track is nothing at all. Asking about
+        MLOps returned a single Python fundamentals concept, because all 15 ops
+        concepts sit behind ML prerequisites that are not recorded yet — the
+        tutor could not tell "this domain is empty" from "this domain is not
+        open yet", and fell back to asking the learner what MLOps contains.
+
+        So this returns every concept in the track, each marked with its status
+        and, when blocked, the specific prerequisites that are missing. Nothing
+        is filtered out; the caller gets the map and can describe the route.
+
+        `gateway_concepts` are the missing prerequisites that lie OUTSIDE this
+        track, ordered by how many of the track's concepts they unblock. That
+        is the actionable part of the answer: for a fully-gated track, the next
+        step is never in the track itself.
+        """
+        data = self.load_knowledge()
+        known = set(data["concepts"].keys())
+
+        concepts: list[dict] = []
+
+        for concept_id, info in CURRICULUM_GRAPH.items():
+            if info.get("track", "python") != track:
+                continue
+
+            prereqs = info["prereqs"]
+            missing = [p for p in prereqs if p not in known]
+
+            if concept_id in known:
+                status = data["concepts"][concept_id].get("mastery", "introduced")
+            elif missing:
+                status = "blocked"
+            else:
+                status = "available"
+
+            concepts.append({
+                "concept_id": concept_id,
+                "name": info["name"],
+                "category": info["category"],
+                "status": status,
+                "prerequisites": prereqs,
+                "missing_prerequisites": missing,
+            })
+
+        # Curriculum order within the track, so the list reads as a route
+        # rather than a set: available first, then by category priority.
+        status_rank = {"available": 0, "blocked": 1}
+        concepts.sort(key=lambda c: (
+            status_rank.get(c["status"], 2),
+            CATEGORY_PRIORITY.get(c["category"], 99),
+            c["concept_id"],
+        ))
+
+        # Gateways are counted TRANSITIVELY. Counting only direct dependents
+        # ranks every prerequisite equally — for a fully-gated track each one
+        # blocks exactly one concept, and the list says nothing about where to
+        # start. Walking the full unmet chain instead shows that
+        # sklearn_pipelines gates the entire serving line, while
+        # llm_evaluation gates one leaf.
+        def _unmet_chain(cid: str, seen: set[str]) -> set[str]:
+            """Every unmet prerequisite behind `cid`, transitively."""
+            out: set[str] = set()
+            for p in CURRICULUM_GRAPH.get(cid, {}).get("prereqs", []):
+                if p in known or p in seen:
+                    continue
+                seen.add(p)
+                out.add(p)
+                out |= _unmet_chain(p, seen)
+            return out
+
+        gateway_counts: dict[str, int] = {}
+        for c in concepts:
+            if c["status"] != "blocked":
+                continue
+            for p in _unmet_chain(c["concept_id"], set()):
+                # Only prerequisites outside this track are gateways. A missing
+                # in-track prereq resolves by learning the track in order and
+                # is already visible as that concept's own row.
+                if CURRICULUM_GRAPH.get(p, {}).get("track", "python") != track:
+                    gateway_counts[p] = gateway_counts.get(p, 0) + 1
+
+        # Entry points first: a gateway that is itself blocked cannot be
+        # started today, so a startable one outranks it at equal reach.
+        gateways = [
+            {
+                "concept_id": cid,
+                "name": CURRICULUM_GRAPH.get(cid, {}).get("name", cid),
+                "track": CURRICULUM_GRAPH.get(cid, {}).get("track", "python"),
+                "unblocks": n,
+                "startable": all(
+                    p in known
+                    for p in CURRICULUM_GRAPH.get(cid, {}).get("prereqs", [])
+                ),
+            }
+            for cid, n in gateway_counts.items()
+        ]
+        gateways.sort(key=lambda g: (not g["startable"], -g["unblocks"], g["concept_id"]))
+
+        return {
+            "track": track,
+            "track_name": TRACK_NAMES.get(track, track),
+            "total": len(concepts),
+            "available": sum(1 for c in concepts if c["status"] == "available"),
+            "blocked": sum(1 for c in concepts if c["status"] == "blocked"),
+            "known": sum(
+                1 for c in concepts
+                if c["status"] not in ("available", "blocked")
+            ),
+            "concepts": concepts,
+            "gateway_concepts": gateways,
+        }
+
+    def clear_struggle_area(self, concept_id: str, *, passed: bool) -> bool:
+        """Remove a concept from struggle_areas after a passed re-test.
+
+        struggle_areas used to be a one-way ratchet: record_quiz appended on a
+        wrong answer and nothing ever removed the entry, so a single miss was
+        reported in every system prompt forever. The live symptom was a concept
+        sitting at mastery="mastered" while the same prompt said the learner
+        struggled with it.
+
+        Clearing is deliberately not automatic. A flag is only lifted when the
+        learner asks to be re-tested and passes, so "no longer struggling" is
+        backed by evidence the learner chose to produce.
+
+        Returns True when the flag was actually removed.
+        """
+        if not passed:
+            return False
+
+        data = self.load_knowledge()
+        struggles = data["profile"].get("struggle_areas", [])
+        if concept_id not in struggles:
+            return False
+
+        struggles.remove(concept_id)
+        data["profile"]["struggle_areas"] = struggles
+        # Recorded rather than silently dropped: the learning path is the audit
+        # trail for every other mastery change, and a recovery is one too.
+        data["learning_path"].append({
+            "concept": concept_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "struggle_cleared",
+            "mastery": data["concepts"].get(concept_id, {}).get("mastery", ""),
+        })
+        self.save_knowledge(data)
+        logger.info(f"Struggle area '{concept_id}' cleared by passed re-test")
+        return True
+
+    def record_quiz(self, quiz_data: dict, retest_concept: str | None = None) -> dict:
         """Save quiz results and promote mastery for correct answers.
 
         quiz_data: {quiz_id, topics, questions: [{question, user_answer, correct, concept}], score, total}
 
-        Returns dict with mastery_changes.
+        retest_concept: set when the learner explicitly asked to be re-tested on
+        a flagged concept. Every question on that concept must be correct for
+        the struggle flag to clear; anything less leaves it in place.
+
+        Returns dict with mastery_changes and struggle_cleared.
         """
         now = datetime.now(timezone.utc).isoformat()
 
@@ -745,8 +1081,10 @@ class KnowledgeStore:
                         "to": new_mastery,
                     })
             else:
-                # Note the struggle area
-                if concept_id not in data["profile"].get("struggle_areas", []):
+                # Note the struggle area. A failed re-test is exempt: the
+                # concept is already flagged, and re-appending would be a no-op
+                # that reads like a second, independent failure.
+                if concept_id != retest_concept and concept_id not in data["profile"].get("struggle_areas", []):
                     data["profile"].setdefault("struggle_areas", []).append(concept_id)
 
             concept["last_reviewed"] = now
@@ -760,7 +1098,25 @@ class KnowledgeStore:
         })
 
         self.save_knowledge(data)
-        return {"mastery_changes": mastery_changes, "quiz_entry": quiz_entry}
+
+        # Evaluate the re-test after the quiz itself is saved, so clearing the
+        # flag reads the state this quiz just wrote (mastery promotions
+        # included) rather than a stale copy.
+        struggle_cleared = False
+        if retest_concept:
+            answers = [
+                q for q in quiz_data.get("questions", [])
+                if q.get("concept") == retest_concept
+            ]
+            # A re-test with no questions on the concept proves nothing.
+            passed = bool(answers) and all(q.get("correct") for q in answers)
+            struggle_cleared = self.clear_struggle_area(retest_concept, passed=passed)
+
+        return {
+            "mastery_changes": mastery_changes,
+            "quiz_entry": quiz_entry,
+            "struggle_cleared": struggle_cleared,
+        }
 
     def format_for_system_prompt(self) -> str:
         """Format the current knowledge state as a condensed string for system prompt injection."""

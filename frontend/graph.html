@@ -151,6 +151,29 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
     font-variant-numeric: tabular-nums;
 }
 
+/* "only" isolates one mastery level. Hidden until the row is hovered so five
+   buttons don't compete with the five swatches they sit beside. */
+.only-btn {
+    margin-left: auto;
+    padding: 1px 5px;
+    background: none;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease),
+                color var(--duration-fast) var(--ease),
+                border-color var(--duration-fast) var(--ease);
+}
+.legend-row:hover .only-btn { opacity: 1; }
+.only-btn:hover { color: var(--accent); border-color: var(--accent); }
+.only-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); }
+/* With the button present the count no longer needs the auto margin. */
+.legend-row .only-btn + .legend-count { margin-left: var(--space-2); }
+
 .ring { width: 14px; height: 14px; flex-shrink: 0; }
 
 .hint {
@@ -182,6 +205,9 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
     text-transform: uppercase;
     letter-spacing: 0.06em;
 }
+/* The "what next" number, tinted to match the violet rings on the map. */
+.stat-next { background: var(--accent-soft); }
+.stat-next .stat-num { color: var(--accent); }
 
 /* --- Canvas area --- */
 .graph-area { flex: 1; position: relative; min-width: 0; }
@@ -264,6 +290,16 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
     color: var(--text-muted);
     margin-bottom: 2px;
 }
+.tt-ready {
+    margin-top: var(--space-2);
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+}
+
 .tt-tracks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .tt-chip {
     font-size: var(--text-2xs);
@@ -312,15 +348,20 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
 
         <div>
             <div class="section-label">Mastery</div>
-            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="var(--border-strong)" stroke-width="2"/></svg>Not started</div>
-            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="var(--border-strong)" stroke-width="2"/><circle cx="10" cy="10" r="7" fill="none" stroke="var(--mastery-introduced)" stroke-width="2" stroke-dasharray="11 44" transform="rotate(-90 10 10)"/></svg>Introduced</div>
-            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="var(--border-strong)" stroke-width="2"/><circle cx="10" cy="10" r="7" fill="none" stroke="var(--mastery-practiced)" stroke-width="2" stroke-dasharray="33 44" transform="rotate(-90 10 10)"/></svg>Practiced</div>
-            <div class="legend-row"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="var(--mastery-mastered)" fill-opacity="0.3" stroke="var(--mastery-mastered)" stroke-width="2"/></svg>Mastered</div>
+            <!-- Built from data so the counts stay honest; the rings mirror what
+                 the canvas actually draws. Click a row to hide that level, or
+                 "only" to isolate it. -->
+            <div id="mastery-legend"></div>
         </div>
 
         <div>
             <div class="section-label">Reading the map</div>
             <div class="hint">
+                Colour means you have met the concept; grey means you have not,
+                and the fill deepens as you master it. A <b>violet ring</b> marks
+                a concept whose prerequisites you already know — those are your
+                next steps.
+                <br><br>
                 Prerequisites flow left → right; each lane is one track.
                 Edges appear when you hover a concept.
                 <b>Dashed</b> edges cross tracks — those are the bridges that
@@ -372,8 +413,24 @@ const TRACK_ORDER = ["python", "ml", "dl", "llm", "ops", "quantum", "sysdesign"]
 const MIN_ZOOM = 0.3, MAX_ZOOM = 4;
 const LABEL_ZOOM = 1.15;
 
+// Radius, ring weight and interior fill per mastery step. Untouched is both
+// the smallest and the only colourless state, so a lane of untouched concepts
+// recedes to a faint scaffold and anything the learner has actually met sits
+// on top of it. The fill steps are wide apart (0 → .22 → .6 → 1) because at
+// fit zoom a node is ~11px across and closer steps are indistinguishable.
+const MASTERY_SPEC = {
+    not_started: { r: 4.5, stroke: 1,   fill: 0    },
+    introduced:  { r: 5.5, stroke: 1.5, fill: 0.22 },
+    practiced:   { r: 5.5, stroke: 1.5, fill: 0.6  },
+    mastered:    { r: 6,   stroke: 2,   fill: 1    },
+};
+
 let G = null;
 let hoverNode = null, searchTerm = "", hiddenTracks = new Set();
+// Mastery levels currently filtered out, same pattern as hiddenTracks. The
+// pseudo-level "frontier" is included so "show me only what I can start next"
+// is one click rather than four.
+let hiddenMastery = new Set(), frontierLabelIds = new Set();
 let gx = 0, gy = 0, gz = 1;
 let panning = false, panStart = null, moved = false;
 
@@ -382,6 +439,27 @@ const tooltip = document.getElementById("tooltip");
 
 function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/**
+ * Return `color` at the given alpha, for canvas fills.
+ *
+ * The palette ships OKLCH strings ("oklch(69% 0.155 264)"), so alpha goes in
+ * via the slash form rather than by building an rgba(). Anything else (a hex
+ * fallback, a named colour) is handled by letting the canvas parse it and
+ * setting globalAlpha at the call site instead — hence the null return.
+ */
+function withAlpha(color, a) {
+    if (a >= 1) return color;
+    const m = color.match(/^oklch\(([^)]+)\)$/i);
+    return m ? `oklch(${m[1].split("/")[0].trim()} / ${a})` : null;
+}
+
+/** The category colour for a node, falling back to its track, then the accent. */
+function nodeColor(n) {
+    return cssVar("--cat-" + n.category.replace(/_/g, "-"))
+        || cssVar("--track-" + n.track)
+        || cssVar("--accent");
 }
 
 // --- Theme -----------------------------------------------------------
@@ -486,8 +564,77 @@ function layout(data) {
     });
 
     G = { nodes, edges, byId, prereqs, lanes, height: y, width: maxX + 60 };
+    markFrontier();
     buildTrackLegend(nodes);
+    buildMasteryLegend(nodes);      // after markFrontier: needs is_frontier
     updateStats(nodes);
+}
+
+/**
+ * Flag the concepts the learner has earned the right to start next.
+ *
+ * A node is on the frontier when it is untouched but every prerequisite is
+ * at least practiced. The bar is "practiced", not "mastered": on real learner
+ * data the strict bar yields 4 nodes out of 215, which is too sparse to point
+ * anywhere, while this one yields ~13 spread across the tracks in play.
+ *
+ * Concepts with no prerequisites pass trivially — [].every() is true. That is
+ * the wanted behaviour rather than an oversight: the curriculum has exactly
+ * one root (Variables), so a learner who has touched nothing sees exactly one
+ * violet ring instead of every track's entry point lighting up at once.
+ */
+function markFrontier() {
+    const ready = m => m === "mastered" || m === "practiced";
+    G.nodes.forEach(n => {
+        n.is_frontier = n.mastery === "not_started"
+            && (G.prereqs[n.id] || []).every(p => ready(G.byId[p]?.mastery));
+    });
+
+    // Pick which frontier nodes get a standing label at low zoom: the two
+    // leftmost per track. Leftmost means fewest prerequisites deep, so it is
+    // the most immediately reachable concept in that lane. Labelling all of
+    // them printed five overlapping names across the ML lane.
+    frontierLabelIds = new Set();
+    TRACK_ORDER.forEach(t => {
+        (G.lanes[t] || []).filter(n => n.is_frontier)
+            .sort((a, b) => a.x - b.x || a.y - b.y)
+            .slice(0, 2)
+            .forEach(n => frontierLabelIds.add(n.id));
+    });
+}
+
+// The mastery filter rows, in map order. Each swatch is the same shape the
+// canvas draws for that state, using the Python hue as a stand-in since on the
+// map the hue varies by lane.
+const MASTERY_FILTERS = [
+    { key: "not_started", label: "Untouched",
+      svg: `<circle cx="10" cy="10" r="5" fill="none" stroke="var(--border-strong)" stroke-width="1.5"/>` },
+    { key: "introduced", label: "Introduced",
+      svg: `<circle cx="10" cy="10" r="6" fill="var(--track-python)" fill-opacity="0.22" stroke="var(--track-python)" stroke-width="1.5"/>` },
+    { key: "practiced", label: "Practiced",
+      svg: `<circle cx="10" cy="10" r="6" fill="var(--track-python)" fill-opacity="0.6" stroke="var(--track-python)" stroke-width="1.5"/>` },
+    { key: "mastered", label: "Mastered",
+      svg: `<circle cx="10" cy="10" r="6.5" fill="var(--track-python)" stroke="var(--track-python)" stroke-width="2"/>` },
+    { key: "frontier", label: "Ready to learn",
+      svg: `<circle cx="10" cy="10" r="4.5" fill="none" stroke="var(--border-strong)" stroke-width="1"/><circle cx="10" cy="10" r="7.5" fill="none" stroke="var(--accent)" stroke-width="2"/>` },
+];
+
+function buildMasteryLegend(nodes) {
+    const counts = {};
+    nodes.forEach(n => {
+        const k = masteryKey(n);
+        counts[k] = (counts[k] || 0) + 1;
+    });
+    document.getElementById("mastery-legend").innerHTML = MASTERY_FILTERS.map(f => `
+        <div class="legend-row" data-mastery="${f.key}" onclick="toggleMastery('${f.key}')"
+             title="Click to hide ${f.label.toLowerCase()}">
+            <svg class="ring" viewBox="0 0 20 20">${f.svg}</svg>
+            ${f.label}
+            <button class="only-btn" onclick="soloMastery('${f.key}', event)"
+                    title="Show only ${f.label.toLowerCase()}">only</button>
+            <span class="legend-count">${counts[f.key] || 0}</span>
+        </div>`).join("");
+    syncMasteryRows();
 }
 
 /** Generated from the data, so a missing track can't silently go unlabelled. */
@@ -512,11 +659,13 @@ function toggleTrack(t) {
 
 function updateStats(nodes) {
     const n = m => nodes.filter(x => x.mastery === m).length;
+    // "Untouched" is stated outright rather than left to be read as the gap
+    // between Concepts and Started, since that gap is the learner's question.
     document.getElementById("stats").innerHTML = `
-        <div class="stat"><div class="stat-num">${nodes.length}</div><div class="stat-lbl">Concepts</div></div>
-        <div class="stat"><div class="stat-num">${nodes.filter(x => x.mastery !== "not_started").length}</div><div class="stat-lbl">Started</div></div>
-        <div class="stat"><div class="stat-num">${n("practiced")}</div><div class="stat-lbl">Practiced</div></div>
-        <div class="stat"><div class="stat-num">${n("mastered")}</div><div class="stat-lbl">Mastered</div></div>`;
+        <div class="stat"><div class="stat-num">${nodes.filter(x => x.mastery !== "not_started").length}</div><div class="stat-lbl">Touched</div></div>
+        <div class="stat"><div class="stat-num">${n("not_started")}</div><div class="stat-lbl">Untouched</div></div>
+        <div class="stat"><div class="stat-num">${n("mastered")}</div><div class="stat-lbl">Mastered</div></div>
+        <div class="stat stat-next"><div class="stat-num">${nodes.filter(x => x.is_frontier).length}</div><div class="stat-lbl">Ready</div></div>`;
 }
 
 function resizeCanvas() {
@@ -540,7 +689,43 @@ function fitGraph() {
     gy = padY + Math.max(0, (h - G.height * gz) / 2);
 }
 
-function visible(n) { return !hiddenTracks.has(n.track); }
+// A node survives if its track is shown and its mastery level is shown.
+// Frontier nodes filter as "frontier" rather than as "not_started", so hiding
+// the untouched mass doesn't also hide the concepts you just unlocked.
+function visible(n) {
+    if (hiddenTracks.has(n.track)) return false;
+    return !hiddenMastery.has(masteryKey(n));
+}
+
+function masteryKey(n) {
+    return n.is_frontier ? "frontier" : n.mastery;
+}
+
+function toggleMastery(level) {
+    hiddenMastery.has(level) ? hiddenMastery.delete(level) : hiddenMastery.add(level);
+    syncMasteryRows();
+    drawGraph();
+}
+
+/** Show only one mastery level — the "just this" shortcut on each row. */
+function soloMastery(level, ev) {
+    if (ev) ev.stopPropagation();
+    const others = MASTERY_FILTERS.map(f => f.key).filter(k => k !== level);
+    // Clicking solo on the only visible level restores everything, so the
+    // control is its own undo.
+    const alreadySolo = hiddenMastery.size === others.length
+        && others.every(k => hiddenMastery.has(k));
+    hiddenMastery = alreadySolo ? new Set() : new Set(others);
+    syncMasteryRows();
+    drawGraph();
+}
+
+function syncMasteryRows() {
+    MASTERY_FILTERS.forEach(f => {
+        const row = document.querySelector(`.legend-row[data-mastery="${f.key}"]`);
+        if (row) row.classList.toggle("dimmed", hiddenMastery.has(f.key));
+    });
+}
 
 function drawGraph() {
     if (!G) return;
@@ -557,9 +742,30 @@ function drawGraph() {
         if (!lane || !lane.length || hiddenTracks.has(t)) return;
         ctx.fillStyle = cssVar("--canvas-lane");
         ctx.fillRect(0, lane.laneY - 12, G.width, lane.laneH + 10);
-        ctx.fillStyle = cssVar("--track-" + t) || cssVar("--accent");
+
+        const track = cssVar("--track-" + t) || cssVar("--accent");
         ctx.font = "600 10px " + cssVar("--font-sans");
-        ctx.fillText((TRACK_LABEL[t] || t).toUpperCase(), 4, lane.laneY - 16);
+        ctx.fillStyle = track;
+        const label = (TRACK_LABEL[t] || t).toUpperCase();
+        ctx.fillText(label, 4, lane.laneY - 16);
+
+        // "How far am I into this track" answered on the band itself, so the
+        // question doesn't require reading every node in the lane.
+        const done = lane.filter(n => n.mastery !== "not_started").length;
+        const labelW = ctx.measureText(label).width;
+        ctx.font = "10px " + cssVar("--font-sans");
+        ctx.fillStyle = cssVar("--text-muted");
+        ctx.fillText(`${done}/${lane.length}`, 4 + labelW + 8, lane.laneY - 16);
+
+        const barX = 4 + labelW + 8 + ctx.measureText(`${done}/${lane.length}`).width + 8;
+        const barW = 60;
+        if (barX + barW < G.width) {
+            ctx.fillStyle = cssVar("--border-subtle");
+            ctx.fillRect(barX, lane.laneY - 21, barW, 3);
+            const filled = withAlpha(track, 0.85) || track;
+            ctx.fillStyle = filled;
+            ctx.fillRect(barX, lane.laneY - 21, barW * (done / lane.length), 3);
+        }
     });
 
     // Edges only for the hovered node — at rest the canvas stays legible.
@@ -600,32 +806,74 @@ function drawGraph() {
         if (matching) alpha = matching.has(n.id) ? 1 : 0.12;
         ctx.globalAlpha = alpha;
 
-        const color = cssVar("--cat-" + n.category.replace(/_/g, "-"))
-                   || cssVar("--track-" + n.track)
-                   || cssVar("--accent");
-        const r = n.is_bridge ? 7 : 5.5;
+        // Touched vs untouched is carried by chroma, not by fill level.
+        //
+        // This used to be fill-alpha alone on an identical full-strength ring,
+        // which meant an untouched concept and a mastered one differed only in
+        // the few interior pixels of a ~11px circle at fit zoom — the whole
+        // reason the map was hard to read. Now untouched nodes drop their hue
+        // entirely and sit as grey skeletons, so the split the learner cares
+        // about is chromatic vs achromatic: the strongest binary available.
+        // Mastery then ramps within the node's own track hue, which keeps the
+        // ramp monotonic inside a lane and leaves --accent free for "next".
+        const spec = MASTERY_SPEC[n.mastery] || MASTERY_SPEC.not_started;
+        const touched = n.mastery !== "not_started";
+        const color = touched ? nodeColor(n) : cssVar("--border-strong");
 
-        // Mastery is fill level; colour already encodes the track.
+        // Bridges stay a size up, as a modifier rather than a competing scale.
+        const r = spec.r + (n.is_bridge ? 1.5 : 0);
+
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-        if (n.mastery === "mastered") {
-            ctx.fillStyle = color; ctx.fill();
-        } else if (n.mastery === "practiced") {
-            ctx.fillStyle = color; ctx.globalAlpha = alpha * 0.55; ctx.fill(); ctx.globalAlpha = alpha;
-        } else if (n.mastery === "introduced") {
-            ctx.fillStyle = color; ctx.globalAlpha = alpha * 0.25; ctx.fill(); ctx.globalAlpha = alpha;
-        } else {
-            ctx.fillStyle = cssVar("--bg-primary"); ctx.fill();
+        if (spec.fill > 0) {
+            const faded = withAlpha(color, spec.fill);
+            if (faded) {
+                ctx.fillStyle = faded;
+                ctx.fill();
+            } else {
+                // Non-OKLCH fallback: alpha has to ride on globalAlpha.
+                ctx.fillStyle = color;
+                ctx.globalAlpha = alpha * spec.fill;
+                ctx.fill();
+                ctx.globalAlpha = alpha;
+            }
         }
+        // Untouched stays genuinely transparent rather than filled with the
+        // page background — a bg-coloured disc punched a hole in the lane band
+        // and read as a solid light dot in the light theme.
         ctx.strokeStyle = color;
-        ctx.lineWidth = n.is_bridge ? 2 : 1.5;
+        ctx.lineWidth = spec.stroke + (n.is_bridge ? 0.5 : 0);
         ctx.stroke();
+
+        // The one place --accent lands on a node, so a violet ring reads
+        // unambiguously as "you have unlocked this, start here".
+        if (n.is_frontier) {
+            const accent = cssVar("--accent");
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, r + 2, 0, Math.PI * 2);
+            ctx.strokeStyle = accent;
+            ctx.lineWidth = 2.5;
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = accent;
+            ctx.stroke();
+            ctx.shadowBlur = 0;      // or every later draw inherits the glow
+        }
 
         // Labels are collected, not drawn here: they must sit on top of every
         // node, and they need collision checking against each other.
-        const forced = related || (matching && matching.has(n.id));
+        //
+        // Frontier nodes are named while zoomed out so the glowing rings say
+        // which concept they are — but only when the learner isn't hovering or
+        // searching, and only up to a handful, since a lane with a dozen names
+        // in it is the clutter this was meant to cure. The rest stay findable
+        // by their ring, the tooltip, and the "Ready" filter.
+        const isFrontierLabel = n.is_frontier && !hoverNode && !matching
+                             && frontierLabelIds.has(n.id);
+        const forced = related || (matching && matching.has(n.id)) || isFrontierLabel;
         if (forced || gz >= LABEL_ZOOM) {
-            labels.push({ n, r, alpha, forced });
+            const priority = related || (matching && matching.has(n.id)) ? 2
+                           : isFrontierLabel ? 1 : 0;
+            labels.push({ n, r, alpha, forced, priority });
         }
     });
 
@@ -644,6 +892,14 @@ function drawGraph() {
  * Font size is divided by the zoom so text stays the same physical size on
  * screen at any zoom — previously labels shrank with the graph and became
  * unreadable exactly when you had zoomed out to see everything.
+ *
+ * Collision applies to EVERY label, including forced ones. Forced labels used
+ * to bypass the check on the assumption that only one or two are ever forced
+ * at once (a hover, a search hit). Marking all frontier nodes as forced broke
+ * that assumption and they bulldozed each other — five ML labels printed on
+ * top of one another. Priority now decides who places FIRST, not who gets to
+ * ignore the rule; a label that loses its slot flips to the node's left side
+ * before giving up, which recovers most of them in a dense lane.
  */
 function drawLabels(ctx, labels) {
     if (!labels.length) return;
@@ -651,20 +907,26 @@ function drawLabels(ctx, labels) {
     ctx.font = `${px}px ` + cssVar("--font-sans");
     ctx.textBaseline = "middle";
 
-    // Forced labels (hover / search) claim their space first.
-    labels.sort((a, b) => (b.forced ? 1 : 0) - (a.forced ? 1 : 0));
+    // Higher priority claims space first: hover/search beats frontier, which
+    // beats an ordinary zoomed-in label.
+    labels.sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
     const placed = [];
     const padY = px * 0.62;
-    for (const { n, r, alpha, forced } of labels) {
-        const x = n.x + r + 5 / gz;
-        const y = n.y;
-        const w = ctx.measureText(n.name).width;
-        const box = { x1: x, y1: y - padY, x2: x + w, y2: y + padY };
+    const hits = box => placed.some(p =>
+        box.x1 < p.x2 && box.x2 > p.x1 && box.y1 < p.y2 && box.y2 > p.y1);
 
-        if (!forced && placed.some(p =>
-            box.x1 < p.x2 && box.x2 > p.x1 && box.y1 < p.y2 && box.y2 > p.y1)) {
-            continue;                          // would collide — leave it out
+    for (const { n, r, alpha, forced } of labels) {
+        const w = ctx.measureText(n.name).width;
+        const gap = r + 5 / gz;
+
+        // Try the right of the node, then the left.
+        let x = n.x + gap;
+        let box = { x1: x, y1: n.y - padY, x2: x + w, y2: n.y + padY };
+        if (hits(box)) {
+            x = n.x - gap - w;
+            box = { x1: x, y1: n.y - padY, x2: x + w, y2: n.y + padY };
+            if (hits(box)) continue;           // no room either side — drop it
         }
         placed.push(box);
 
@@ -673,9 +935,9 @@ function drawLabels(ctx, labels) {
         ctx.lineWidth = 3 / gz;
         ctx.strokeStyle = cssVar("--bg-primary");
         ctx.lineJoin = "round";
-        ctx.strokeText(n.name, x, y);
+        ctx.strokeText(n.name, x, n.y);
         ctx.fillStyle = forced ? cssVar("--text-bright") : cssVar("--text-dim");
-        ctx.fillText(n.name, x, y);
+        ctx.fillText(n.name, x, n.y);
     }
     ctx.textBaseline = "alphabetic";
 }
@@ -699,6 +961,10 @@ function showTooltip(n, mx, my) {
 
     let html = `<div class="tt-name">${n.name}</div>
                 <div class="tt-meta">${n.category} · ${n.mastery.replace(/_/g, " ")}</div>`;
+    // Say why the ring is glowing, so the marker explains itself on contact.
+    if (n.is_frontier) {
+        html += `<div class="tt-ready">Ready to learn — you already know what it needs</div>`;
+    }
     if (pre.length) {
         html += `<div class="tt-sec"><b>Requires</b>${pre.slice(0, 5).join(", ")}</div>`;
     }
