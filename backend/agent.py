@@ -30,9 +30,9 @@ from backend.memory import (
 )
 from backend.demos import demo_digest, format_session_demos
 from backend.prompts import (
-    DEMO_BUILDER_PROMPT,
-    DERIVATION_BUILDER_PROMPT,
     build_system_prompt,
+    demo_builder_prompt,
+    derivation_builder_prompt,
 )
 from backend.replay import (
     session_exists_in_claude,
@@ -456,7 +456,7 @@ async def run_demo_builder(
         prompt=request,
         session_id=resume,
         fork_session=fork,
-        system_prompt=DEMO_BUILDER_PROMPT,
+        system_prompt=demo_builder_prompt(),
         user_data_dir=user_data_dir,
         on_event=on_event,
         email=None,
@@ -506,7 +506,7 @@ async def run_derivation_builder(
         prompt=request,
         session_id=resume,
         fork_session=fork,
-        system_prompt=DERIVATION_BUILDER_PROMPT,
+        system_prompt=derivation_builder_prompt(),
         user_data_dir=user_data_dir,
         on_event=on_event,
         email=None,

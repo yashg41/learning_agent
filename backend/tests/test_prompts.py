@@ -85,7 +85,10 @@ def test_braces_in_a_prompt_would_not_break_assembly(tmp_path, monkeypatch):
     """
     import backend.prompts as prompts
 
-    (tmp_path / "00_x.md").write_text(
+    (tmp_path / "_common").mkdir()
+    app_dir = tmp_path / "pymentor"
+    app_dir.mkdir()
+    (app_dir / "00_x.md").write_text(
         'Example: {"concept_id": "trees"} and f"{value:.2f}"\n$knowledge_state',
         encoding="utf-8",
     )
@@ -144,5 +147,83 @@ def test_mechanics_are_not_duplicated_in_the_always_on_prompt():
 
 
 def test_every_section_file_is_non_empty():
-    for path in sorted(PROMPTS_DIR.glob("*.md")):
+    for path in sorted(PROMPTS_DIR.glob("*/*.md")):
         assert path.read_text(encoding="utf-8").strip(), f"empty prompt: {path.name}"
+
+
+# --- The _common / <app> split -------------------------------------------
+#
+# One backend serves more than one tutor. These guard the property that makes
+# that worth doing: a fix to a shared rule reaches every app with no porting.
+
+
+def test_common_sections_reach_the_assembled_prompt():
+    """A rule in _common/ is in the prompt without the app copying it."""
+    prompt = build_system_prompt("K", "R", "D")
+    assert "## Your Memory System" in prompt      # _common/40_memory.md
+    assert "## Quiz Behavior" in prompt           # _common/50_quiz.md
+    assert "## Looking Things Up" in prompt       # _common/25_web_lookup.md
+
+
+def test_common_and_app_sections_interleave_by_number():
+    """Merged into ONE numeric sequence, not one directory after the other.
+
+    app 20_code_execution must precede common 25_web_lookup, which must precede
+    app 30_output_formatting. Concatenating directories would break this.
+    """
+    prompt = build_system_prompt("K", "R", "D")
+    assert (
+        prompt.index("## Running Code")            # pymentor/20_
+        < prompt.index("## Looking Things Up")     # _common/25_
+        < prompt.index("## Output Formatting")     # pymentor/30_
+    )
+
+
+def test_an_app_file_overrides_a_common_file_of_the_same_name(tmp_path, monkeypatch):
+    """The override hatch: copy the file into <app>/ and edit it there."""
+    import backend.prompts as prompts
+
+    common = tmp_path / "_common"
+    common.mkdir()
+    (common / "10_rule.md").write_text("SHARED VERSION", encoding="utf-8")
+    (common / "40_keep.md").write_text("STILL SHARED", encoding="utf-8")
+
+    app = tmp_path / "sanskrit"
+    app.mkdir()
+    (app / "10_rule.md").write_text("APP VERSION", encoding="utf-8")
+
+    monkeypatch.setattr(prompts, "PROMPTS_DIR", tmp_path)
+    monkeypatch.setattr(prompts, "_CACHE", {})
+
+    out = prompts.build_system_prompt("K", "R", "D", app="sanskrit")
+    assert "APP VERSION" in out
+    assert "SHARED VERSION" not in out
+    # Overriding one file must not detach the app from the rest of _common.
+    assert "STILL SHARED" in out
+
+
+def test_subject_specific_sections_are_not_in_common():
+    """_common must stay genuinely subject-neutral.
+
+    These three name Qiskit, LaTeX/mermaid, and the Python track ids. Sharing
+    them would push Python assumptions into every future tutor — the exact
+    failure the split exists to prevent.
+    """
+    common = PROMPTS_DIR / "_common"
+    for leaked in ("10_teaching_style.md", "30_output_formatting.md",
+                   "80_learner_state.md", "00_identity.md"):
+        assert not (common / leaked).is_file(), (
+            f"{leaked} is subject-specific and must live under an app directory"
+        )
+
+
+def test_unknown_app_fails_loudly():
+    with pytest.raises(FileNotFoundError, match="No prompt directory"):
+        build_system_prompt("K", "R", "D", app="nonexistent")
+
+
+def test_builder_prompts_default_to_the_shared_copy():
+    """'Build one demo, emit no prose' is subject-neutral, so it is shared."""
+    assert (PROMPTS_DIR / "_common" / "demo_builder.md").is_file()
+    assert (PROMPTS_DIR / "_common" / "derivation_builder.md").is_file()
+    assert "You build ONE interactive HTML demo" in demo_builder_prompt()
