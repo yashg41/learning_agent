@@ -23,12 +23,14 @@ MASTERY_LEVELS = ["introduced", "practiced", "mastered"]
 # Re-exported under the original names because tools.py, routes.py and the tests
 # import them from this module.
 from backend.curriculum import (  # noqa: E402
+    APP_TRACKS,
     CURRICULUM_GRAPH,
     CATEGORY_PRIORITY,
     CATEGORY_LABELS,
     TRACK_HUE,
     TRACK_NAMES,
     TRACK_ORDER,
+    app_tracks,
 )
 
 # CATEGORY_PRIORITY (imported above) sorts candidates *within* one track's
@@ -104,18 +106,29 @@ TRACK_COLORS = {
 # added to the curriculum cannot leave the prompt naming a different subject.
 
 
-def taught_domains() -> str:
-    """The subjects the curriculum actually covers, as an English list.
+def taught_domains(app: str = "pymentor") -> str:
+    """The subjects ONE tutor covers, as an English list.
 
-    Derived from TRACK_ORDER so the identity prompt and the knowledge graph can
-    never disagree. Python leads and the rest follow as what builds on it,
-    matching how the tracks are actually sequenced.
+    Derived from the curriculum so the identity prompt and the knowledge graph
+    can never disagree — which is the point, and was also the bug: before this
+    took an `app`, it walked every loaded track, so adding the Sanskrit track
+    made PyMentor introduce itself as teaching "... system design, and
+    Sanskrit". A tutor must only ever name its own tracks.
+
+    PyMentor's phrasing leads with Python and presents the rest as what builds
+    on it, matching how those tracks are actually sequenced. A single-track app
+    just names its subject; stringing "and the topics that build on it" onto
+    one track would read as though something were missing.
     """
-    rest = [TRACK_NAMES.get(t, t) for t in TRACK_ORDER if t != "python"]
-    if not rest:
-        return TRACK_NAMES.get("python", "Python")
+    tracks = app_tracks(app)
+    names = [TRACK_NAMES.get(t, t) for t in tracks]
+
+    if len(names) == 1:
+        return names[0]
+
+    lead, rest = names[0], names[1:]
     tail = f"{', '.join(rest[:-1])}, and {rest[-1]}" if len(rest) > 1 else rest[0]
-    return f"{TRACK_NAMES.get('python', 'Python')} and the topics that build on it: {tail}"
+    return f"{lead} and the topics that build on it: {tail}"
 
 # --- Derived palette (OKLCH) ------------------------------------------------
 # 31 independently-chosen category hues are indistinguishable on screen. Since
@@ -277,11 +290,29 @@ def _default_quiz_history() -> dict:
 class KnowledgeStore:
     """Read/write access to a user's knowledge.json and quiz_history.json."""
 
-    def __init__(self, user_data_dir: str):
+    def __init__(self, user_data_dir: str, app: str = "pymentor"):
+        """
+        app: which tutor this store serves. Bounds every curriculum walk to
+            that tutor's tracks, so the Python tutor cannot suggest a Sanskrit
+            concept and vice versa. The stored knowledge.json is shared — one
+            learner, one progress file — but what gets *offered* is scoped.
+        """
         self.user_data_dir = user_data_dir
+        self.app = app
+        self.tracks = frozenset(app_tracks(app))
         self.knowledge_path = os.path.join(user_data_dir, "knowledge.json")
         self.quiz_path = os.path.join(user_data_dir, "quiz_history.json")
         os.makedirs(user_data_dir, exist_ok=True)
+
+    def _in_scope(self, concept_id: str) -> bool:
+        """Is this concept one this tutor teaches?
+
+        A concept the tutor invented is not in CURRICULUM_GRAPH at all; those
+        stay in scope, because the tutor that created one is the tutor that
+        should keep seeing it.
+        """
+        info = CURRICULUM_GRAPH.get(concept_id)
+        return info is None or info.get("track") in self.tracks
 
     def load_knowledge(self) -> dict:
         if not os.path.isfile(self.knowledge_path):
@@ -451,9 +482,11 @@ class KnowledgeStore:
         data = self.load_knowledge()
         known_concepts = set(data["concepts"].keys())
 
-        # Bucket candidates by track
+        # Bucket candidates by track, within this tutor's tracks only.
         buckets: dict[str, list[dict]] = {}
         for concept_id, info in CURRICULUM_GRAPH.items():
+            if info.get("track", "python") not in self.tracks:
+                continue
             if track and info.get("track", "python") != track:
                 continue
             if concept_id in known_concepts:
@@ -478,26 +511,34 @@ class KnowledgeStore:
                 s["concept_id"],
             ))
 
-        # Pick the learner's primary track — whichever track has the most
-        # concepts at practiced/mastered. Ties break toward "python".
+        # Pick the learner's primary track — whichever of THIS tutor's tracks
+        # has the most concepts at practiced/mastered. Ties break toward the
+        # tutor's first track, which is the one its curriculum leads with.
+        app_track_order = [t for t in TRACK_ORDER if t in self.tracks]
+        default_track = app_track_order[0]
+
         track_scores: dict[str, int] = {}
         for cid, concept in data["concepts"].items():
             if concept.get("mastery") not in ("practiced", "mastered"):
                 continue
-            concept_track = CURRICULUM_GRAPH.get(cid, {}).get("track", "python")
+            concept_track = CURRICULUM_GRAPH.get(cid, {}).get("track")
+            if concept_track not in self.tracks:
+                continue  # another tutor's progress, or an invented concept
             track_scores[concept_track] = track_scores.get(concept_track, 0) + 1
         if track_scores:
             primary_track = max(
                 track_scores.items(),
-                key=lambda kv: (kv[1], kv[0] == "python"),
+                key=lambda kv: (kv[1], kv[0] == default_track),
             )[0]
         else:
-            primary_track = "python"
+            primary_track = default_track
 
         # Build an interleaved walk order: primary first, then the rest in a
         # stable order. Each round, take one candidate from each track in
         # walk order, until we hit `count` or exhaust all buckets.
-        track_order = [primary_track] + [t for t in TRACK_ORDER if t != primary_track]
+        track_order = [primary_track] + [
+            t for t in app_track_order if t != primary_track
+        ]
         result: list[dict] = []
         while len(result) < count:
             made_progress = False

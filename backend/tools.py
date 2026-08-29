@@ -41,7 +41,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from backend.episodic import EpisodicMemory
 from backend.feedback import ASPECTS as FEEDBACK_ASPECTS, load_feedback
-from backend.knowledge import CURRICULUM_GRAPH, TRACK_ORDER, KnowledgeStore
+from backend.knowledge import CURRICULUM_GRAPH, KnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ def create_learning_tools(
     Returns:
         McpSdkServerConfig for use in ClaudeAgentOptions.mcp_servers
     """
-    knowledge = KnowledgeStore(user_data_dir)
+    knowledge = KnowledgeStore(user_data_dir, app=app)
 
     # =====================================================================
     # TIER 2: Episodic Memory Tools (ChromaDB)
@@ -504,10 +504,10 @@ def create_learning_tools(
             track = args.get("track")
             if track is not None:
                 track = str(track).strip().lower()
-                if track not in TRACK_ORDER:
+                if track not in knowledge.tracks:
                     return _error_result(
                         f"Unknown track '{track}'. Valid tracks: "
-                        f"{', '.join(TRACK_ORDER)}."
+                        f"{', '.join(sorted(knowledge.tracks))}."
                     )
 
             suggestions = knowledge.get_next_topic_suggestions(count, track=track)
@@ -584,10 +584,10 @@ def create_learning_tools(
     async def get_domain_map_tool(args):
         try:
             track = str(args.get("track", "")).strip().lower()
-            if track not in TRACK_ORDER:
+            if track not in knowledge.tracks:
                 return _error_result(
                     f"Unknown track '{track}'. Valid tracks: "
-                    f"{', '.join(TRACK_ORDER)}."
+                    f"{', '.join(sorted(knowledge.tracks))}."
                 )
             return _text_result(json.dumps(
                 knowledge.get_domain_map(track), default=str

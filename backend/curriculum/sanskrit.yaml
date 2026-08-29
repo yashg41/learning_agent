@@ -1,0 +1,294 @@
+track: sanskrit
+name: Sanskrit
+hue: 95
+
+# Ordering notes, because two things here deliberately contradict the obvious
+# arrangement and a later edit should not "fix" them back:
+#
+# 1. SANDHI IS SPLIT IN TWO. Generating sandhi (joining two words) is easy and
+#    belongs early. RESOLVING it while reading — finding word boundaries that
+#    are not written — is the single most common place learners quit, and it is
+#    a late, continuous skill practised against real text with the analyser as a
+#    safety net. Modelling sandhi as one early gate is a known cause of dropout.
+#
+# 2. NON-FINITE FORMS COME BEFORE SERIOUS READING. Classical prose uses
+#    participles and absolutives more than finite verbs, so gating reading
+#    behind the full verb system means the learner never starts reading. The
+#    past passive participle in particular is the highest-frequency form in
+#    narrative and is a prerequisite for the reading track, not a sequel to it.
+#
+# The lakāras beyond laṭ are deliberately shallow: liṭ (perfect) is flagged as
+# recognition-with-lookup rather than production, because it is the default
+# narrative tense of the epics but follows one of seven unpredictable stem
+# patterns. Same for luṅ (aorist), which is comparatively rare in classical
+# Sanskrit. Both are read, not written.
+
+categories:
+- id: san_script
+  label: Sanskrit · Script & Sound
+  priority: 0
+  concepts:
+  - id: varnamala
+    name: Varṇamālā — the sound-ordered alphabet
+    prereqs: []
+  - id: articulation
+    name: Articulation (uccāraṇa-sthāna) — where each sound is made
+    prereqs: [varnamala]
+  - id: conjuncts
+    name: Conjunct consonants (saṃyuktākṣara)
+    prereqs: [varnamala]
+  - id: transliteration
+    name: IAST and Devanāgarī — reading both ways
+    prereqs: [varnamala]
+  - id: vowel_length
+    name: Vowel length and its meaning
+    prereqs: [varnamala]
+  - id: visarga_anusvara
+    name: Visarga and anusvāra
+    prereqs: [articulation, vowel_length]
+
+- id: san_phonology
+  label: Sanskrit · Sound Change
+  priority: 1
+  concepts:
+  - id: guna_vrddhi
+    name: Guṇa and vṛddhi — the vowel ladder
+    prereqs: [vowel_length]
+  - id: syllable_weight
+    name: Syllable weight (laghu / guru)
+    prereqs: [conjuncts, vowel_length]
+
+- id: san_sandhi
+  label: Sanskrit · Sandhi
+  priority: 2
+  concepts:
+  - id: sandhi_vowel
+    name: Vowel sandhi — joining
+    prereqs: [guna_vrddhi]
+  - id: sandhi_visarga
+    name: Visarga sandhi — joining
+    prereqs: [visarga_anusvara]
+  - id: sandhi_consonant
+    name: Consonant sandhi — joining
+    prereqs: [articulation]
+  # The wall. Late, continuous, and practised against real text.
+  - id: sandhi_resolve
+    name: Resolving sandhi while reading (sandhi-viccheda)
+    prereqs: [sandhi_vowel, sandhi_visarga, sandhi_consonant, conjuncts]
+
+- id: san_nominal
+  label: Sanskrit · Nouns & Cases
+  priority: 3
+  concepts:
+  - id: case_system
+    name: The eight cases — what each one does
+    prereqs: [varnamala]
+  - id: a_stems
+    name: a-stem nouns (rāma, phala)
+    prereqs: [case_system]
+  - id: feminine_stems
+    name: ā/ī-stem feminines (latā, nadī)
+    prereqs: [a_stems]
+  - id: i_u_stems
+    name: i- and u-stem nouns
+    prereqs: [a_stems]
+  - id: consonant_stems
+    name: Consonant-final stems (rājan, ātman, manas)
+    prereqs: [i_u_stems, sandhi_consonant]
+  - id: pronouns
+    name: Pronouns (tad, idam, asmad, yuṣmad)
+    prereqs: [a_stems]
+  - id: adjectives
+    name: Adjectives and agreement
+    prereqs: [a_stems, feminine_stems]
+  - id: numerals
+    name: Numerals
+    prereqs: [adjectives]
+
+- id: san_verbal
+  label: Sanskrit · Verbs
+  priority: 4
+  concepts:
+  - id: dhatu
+    name: The dhātu (root) and how verbs are built from it
+    prereqs: [varnamala]
+  - id: lat_lakara
+    name: Present tense (laṭ)
+    prereqs: [dhatu]
+  - id: gana_system
+    name: The ten gaṇas — which stem a root forms
+    prereqs: [lat_lakara]
+  - id: atmanepada
+    name: Ātmanepada and the active/middle distinction
+    prereqs: [lat_lakara]
+  - id: lot_vidhilin
+    name: Imperative (loṭ) and optative (vidhiliṅ)
+    prereqs: [lat_lakara]
+  - id: lrt_lan
+    name: Future (lṛṭ) and past (laṅ)
+    prereqs: [lat_lakara]
+  - id: passive
+    name: Passive (karmaṇi prayoga)
+    prereqs: [atmanepada]
+  - id: causative
+    name: Causative (ṇic)
+    prereqs: [gana_system]
+  # Recognition, not production — see the note at the top of this file.
+  - id: lit_perfect
+    name: Perfect (liṭ) — recognising it in narrative
+    prereqs: [gana_system, lrt_lan]
+  - id: lun_aorist
+    name: Aorist (luṅ) — recognising it
+    prereqs: [lit_perfect]
+
+- id: san_nonfinite
+  label: Sanskrit · Participles & Absolutives
+  priority: 5
+  concepts:
+  - id: ppp
+    name: Past passive participle (kta) — the workhorse of narrative
+    prereqs: [dhatu, a_stems]
+  - id: absolutive
+    name: Absolutive (-tvā, -ya) — "having done X"
+    prereqs: [dhatu, sandhi_consonant]
+  - id: infinitive
+    name: Infinitive (tumun)
+    prereqs: [dhatu]
+  - id: present_participle
+    name: Present participles (śatṛ, śānac)
+    prereqs: [lat_lakara, adjectives]
+  - id: gerundive
+    name: Gerundive (kṛtya) — "to be done"
+    prereqs: [ppp]
+  - id: absolutes
+    name: Locative and genitive absolute
+    prereqs: [present_participle, case_system]
+
+- id: san_compound
+  label: Sanskrit · Compounds (Samāsa)
+  priority: 6
+  concepts:
+  - id: samasa_intro
+    name: What a compound is, and how to spot one
+    prereqs: [a_stems, sandhi_vowel]
+  - id: tatpurusha
+    name: Tatpuruṣa
+    prereqs: [samasa_intro, case_system]
+  - id: karmadharaya
+    name: Karmadhāraya and dvigu
+    prereqs: [tatpurusha, adjectives]
+  - id: dvandva
+    name: Dvandva
+    prereqs: [samasa_intro]
+  - id: bahuvrihi
+    name: Bahuvrīhi — the compound that points outside itself
+    prereqs: [karmadharaya]
+  - id: avyayibhava
+    name: Avyayībhāva
+    prereqs: [samasa_intro]
+  - id: long_compounds
+    name: Unpacking long compounds in real text
+    prereqs: [bahuvrihi, dvandva, avyayibhava, sandhi_resolve]
+
+- id: san_syntax
+  label: Sanskrit · Syntax
+  priority: 7
+  concepts:
+  - id: karaka
+    name: Kāraka — semantic roles, not just case endings
+    prereqs: [case_system, lat_lakara]
+  - id: word_order
+    name: Word order and how to find the verb
+    prereqs: [karaka]
+  - id: yad_tad
+    name: Relative-correlative (yad … tad)
+    prereqs: [pronouns, word_order]
+  - id: participial_clauses
+    name: Participial clauses instead of finite verbs
+    prereqs: [ppp, absolutive, word_order]
+  - id: anvaya
+    name: Anvaya — reordering a verse into prose order
+    prereqs: [participial_clauses, yad_tad]
+
+- id: san_lexicon
+  label: Sanskrit · Vocabulary & Word Formation
+  priority: 8
+  concepts:
+  - id: dhatu_families
+    name: Root families — learning words in groups
+    prereqs: [dhatu]
+  - id: upasarga
+    name: Upasargas and how they bend a root's meaning
+    prereqs: [dhatu_families]
+  - id: krt_pratyaya
+    name: Kṛt suffixes — making nouns from roots
+    prereqs: [dhatu_families, ppp]
+  - id: taddhita
+    name: Taddhita suffixes — making words from words
+    prereqs: [krt_pratyaya]
+  - id: dictionary_skill
+    name: Using a dictionary — finding the stem to look up
+    prereqs: [krt_pratyaya, consonant_stems]
+
+- id: san_metre
+  label: Sanskrit · Metre (Chandas)
+  priority: 9
+  concepts:
+  - id: scansion
+    name: Scanning a line — laghu and guru
+    prereqs: [syllable_weight]
+  - id: anustubh
+    name: Anuṣṭubh — the śloka
+    prereqs: [scansion]
+  - id: classical_metres
+    name: Triṣṭubh, upajāti and the classical metres
+    prereqs: [anustubh]
+  - id: metre_disambiguation
+    name: Using metre to resolve a doubtful reading
+    prereqs: [classical_metres, sandhi_resolve]
+
+- id: san_reading
+  label: Sanskrit · Reading
+  priority: 10
+  concepts:
+  # Graded by unique-word count, the Amarahāsa metric — restricted vocabulary,
+  # unrestricted grammar. Reading starts as early as the forms allow.
+  - id: reading_graded
+    name: Graded readers — first continuous Sanskrit
+    prereqs: [ppp, absolutive, a_stems, lat_lakara]
+  - id: reading_hitopadesha
+    name: Hitopadeśa — first real text
+    prereqs: [reading_graded, sandhi_resolve, tatpurusha]
+  - id: reading_nala
+    name: Nala–Damayantī — narrative verse
+    prereqs: [reading_hitopadesha, anustubh, lit_perfect]
+  - id: reading_gita
+    name: Bhagavad Gītā — chapter 2
+    prereqs: [reading_nala, anvaya]
+  - id: reading_panchatantra
+    name: Pañcatantra
+    prereqs: [reading_hitopadesha, long_compounds]
+  - id: reading_ramayana
+    name: Rāmāyaṇa — selections
+    prereqs: [reading_nala, participial_clauses]
+
+- id: san_spoken
+  label: Sanskrit · Speaking & Recitation
+  priority: 11
+  concepts:
+  # Runs alongside from early on. Samskrita Bharati's drilling is what makes
+  # paradigms automatic rather than table-recited, and reading fluency is
+  # retrieval speed. Also: sandhi rules only make sense in sound, so reciting
+  # is not decoration — it is how sandhi becomes intuitive.
+  - id: pronunciation
+    name: Pronouncing Sanskrit — length, visarga, retroflexion
+    prereqs: [articulation, visarga_anusvara]
+  - id: recitation
+    name: Reciting a verse with correct rhythm
+    prereqs: [pronunciation, scansion]
+  - id: simple_conversation
+    name: Simple conversation (sambhāṣaṇa)
+    prereqs: [pronunciation, lat_lakara, case_system]
+  - id: chanting
+    name: Chanting — sustained recitation of a passage
+    prereqs: [recitation, anustubh]

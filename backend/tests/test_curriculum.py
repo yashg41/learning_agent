@@ -15,7 +15,7 @@ it met. That is a silently unteachable concept, which is worse than a crash.
 import pytest
 import yaml
 
-from backend.curriculum import CURRICULUM_DIR, _load_all
+from backend.curriculum import APP_TRACKS, CURRICULUM_DIR, _load_all
 from backend.knowledge import (
     CATEGORY_LABELS,
     CATEGORY_PRIORITY,
@@ -139,12 +139,55 @@ def test_palette_covers_every_category_in_both_themes():
             assert track in palette["tracks"]
 
 
-def test_identity_line_names_every_track():
-    """taught_domains() builds the tutor's identity from the curriculum, so a
-    track added here cannot leave the prompt claiming a different subject."""
-    domains = taught_domains()
-    for track in TRACK_ORDER:
-        assert TRACK_NAMES[track] in domains, f"{track} missing from identity line"
+def test_identity_line_names_every_track_the_app_teaches():
+    """taught_domains() builds a tutor's identity from the curriculum, so a
+    track added to an app cannot leave that prompt naming a different subject."""
+    for app, tracks in APP_TRACKS.items():
+        domains = taught_domains(app)
+        for track in tracks:
+            assert TRACK_NAMES[track] in domains, (
+                f"{track} missing from {app}'s identity line"
+            )
+
+
+def test_identity_line_names_no_other_app_tracks():
+    """The regression this pair exists for.
+
+    taught_domains() used to walk every loaded track, so adding the Sanskrit
+    curriculum immediately made PyMentor introduce itself as teaching
+    "... system design, and Sanskrit". Deriving identity from the curriculum is
+    the right idea; deriving it from *every* curriculum is the bug.
+    """
+    for app, tracks in APP_TRACKS.items():
+        domains = taught_domains(app)
+        for other in set(TRACK_ORDER) - set(tracks):
+            assert TRACK_NAMES[other] not in domains, (
+                f"{app}'s identity line leaks the '{other}' track"
+            )
+
+
+def test_single_track_app_reads_naturally():
+    """One track should just be named, not dressed up as a lead plus a tail."""
+    assert taught_domains("sanskrit") == "Sanskrit"
+
+
+def test_every_track_belongs_to_exactly_one_app():
+    """An unassigned track loads but no tutor ever teaches it — invisible."""
+    assigned = [t for tracks in APP_TRACKS.values() for t in tracks]
+    assert set(assigned) == set(TRACK_ORDER)
+    assert len(assigned) == len(set(assigned)), "a track is assigned twice"
+
+
+def test_suggestions_never_cross_app_boundaries(tmp_path):
+    """A tutor must not offer a concept belonging to the other tutor."""
+    from backend.knowledge import KnowledgeStore
+
+    for app, tracks in APP_TRACKS.items():
+        store = KnowledgeStore(str(tmp_path / app), app=app)
+        for s in store.get_next_topic_suggestions(count=25):
+            assert s["track"] in tracks, (
+                f"{app} suggested '{s['concept_id']}' from track '{s['track']}'"
+            )
 
 
 def test_loader_is_deterministic():

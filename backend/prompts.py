@@ -126,7 +126,7 @@ def build_system_prompt(
         ("$knowledge_state", knowledge_state),
         ("$recent_episodes", recent_episodes),
         ("$session_demos", session_demos or "(none yet in this session)"),
-        ("$domains", taught_domains()),
+        ("$domains", taught_domains(app)),
     ):
         text = text.replace(key, value)
     return text

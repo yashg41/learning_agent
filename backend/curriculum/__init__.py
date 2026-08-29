@@ -35,7 +35,31 @@ CURRICULUM_DIR = Path(__file__).parent
 # glob. The order decides how cross-track suggestions interleave, so it is a
 # curriculum decision that has to be written down, not an accident of how the
 # filesystem happens to sort. A file not named here is not loaded.
-TRACK_ORDER = ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign")
+TRACK_ORDER = (
+    "python", "ml", "dl", "llm", "ops", "quantum", "sysdesign",
+    "sanskrit",
+)
+
+# Which tracks belong to which tutor.
+#
+# TRACK_ORDER is every track this backend can load; it is NOT what any one
+# tutor teaches. Adding the Sanskrit track without this split immediately made
+# PyMentor introduce itself as teaching "... system design, and Sanskrit",
+# because the identity line is derived from the curriculum — which is normally
+# the point, and here was the bug. A tutor must only ever see its own tracks.
+APP_TRACKS = {
+    "pymentor": ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign"),
+    "sanskrit": ("sanskrit",),
+}
+
+DEFAULT_APP = "pymentor"
+
+
+def app_tracks(app: str = DEFAULT_APP) -> tuple[str, ...]:
+    """The tracks one tutor teaches, in curriculum order."""
+    if app not in APP_TRACKS:
+        raise ValueError(f"Unknown app '{app}'. Known apps: {sorted(APP_TRACKS)}.")
+    return APP_TRACKS[app]
 
 
 def _load_track(track: str) -> dict:
@@ -133,6 +157,25 @@ _missing = {
 if _missing:
     raise AssertionError(f"Curriculum has dangling prereqs: {sorted(_missing)}")
 del _missing
+
+# Every track belongs to exactly one app. An unassigned track loads but no tutor
+# ever teaches it — invisible, and the kind of thing found weeks later.
+_assigned = [t for tracks in APP_TRACKS.values() for t in tracks]
+_orphans = set(TRACK_ORDER) - set(_assigned)
+if _orphans:
+    raise AssertionError(
+        f"Tracks belong to no app: {sorted(_orphans)}. Add them to APP_TRACKS."
+    )
+_unknown = set(_assigned) - set(TRACK_ORDER)
+if _unknown:
+    raise AssertionError(f"APP_TRACKS names unknown tracks: {sorted(_unknown)}.")
+_duplicated = {t for t in _assigned if _assigned.count(t) > 1}
+if _duplicated:
+    raise AssertionError(
+        f"Tracks assigned to more than one app: {sorted(_duplicated)}. "
+        f"Cross-app sharing is not supported — the identity line would name it twice."
+    )
+del _assigned, _orphans, _unknown, _duplicated
 
 logger.debug(
     "Curriculum loaded: %d concepts across %d tracks",
