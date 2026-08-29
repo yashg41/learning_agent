@@ -249,6 +249,7 @@ async def run_agent(
     attachments: list[dict] | None = None,
     demo_ref: dict | None = None,
     derivation_ref: dict | None = None,
+    app: str = "pymentor",
 ) -> str | None:
     """Run the learning agent for a user.
 
@@ -343,7 +344,7 @@ async def run_agent(
             logger.warning(f"Could not persist attachment for {email}: {e}")
 
     # Load Tier 3: Semantic memory → inject into system prompt
-    knowledge_store = KnowledgeStore(user_data_dir)
+    knowledge_store = KnowledgeStore(user_data_dir, app=app)
     knowledge_state = knowledge_store.format_for_system_prompt()
 
     # Load Tier 2: Recent episodic memory → inject into system prompt
@@ -361,6 +362,7 @@ async def run_agent(
         knowledge_state,
         recent_episodes,
         format_session_demos(email, session_id),
+        app=app,
     )
 
     placeholder_session_id = None  # Track pre-created sessions that need ID replacement
@@ -443,6 +445,7 @@ async def run_demo_builder(
     resume_builder_session: str | None = None,
     on_event=None,
     build_ctx: dict | None = None,
+    app: str = "pymentor",
 ) -> str | None:
     """Build (or refine) a demo in a session of its own. Returns its session id.
 
@@ -486,11 +489,12 @@ async def run_demo_builder(
         prompt=request,
         session_id=resume,
         fork_session=fork,
-        system_prompt=demo_builder_prompt(),
+        system_prompt=demo_builder_prompt(app),
         user_data_dir=user_data_dir,
         on_event=on_event,
         email=None,
         allowed_tools=DEMO_BUILDER_TOOL_NAMES,
+        app=app,
         # None so a builder cannot recursively request another demo.
         session_ctx=None,
         build_ctx=build_ctx,

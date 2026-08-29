@@ -100,6 +100,17 @@ if os.path.exists(frontend_path):
     app.mount("/static", NoCacheStaticFiles(directory=frontend_path), name="static")
 
 
+@app.get("/sanskrit")
+async def sanskrit_index():
+    """The Sanskrit tutor's own UI.
+
+    A separate page rather than a mode toggle on the existing one: the two
+    tutors share a backend but not a front end, and the panes differ (no code
+    runner, no derivations) as does the whole visual register.
+    """
+    return FileResponse(os.path.join(frontend_path, "sanskrit", "index.html"))
+
+
 @app.get("/")
 async def index():
     return FileResponse(os.path.join(frontend_path, "index.html"))

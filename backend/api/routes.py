@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from urllib.parse import quote
 import asyncio
 import json
@@ -62,6 +62,28 @@ class ChatRequest(BaseModel):
     # model sees, and the html is never sent.
     demo_ref: dict | None = None
     derivation_ref: dict | None = None
+    # Which tutor is being addressed. Selects the system prompt, the tool
+    # families and the curriculum tracks. Defaults to pymentor so every
+    # existing client keeps working without sending it.
+    app: str = "pymentor"
+
+    @field_validator("app")
+    @classmethod
+    def _known_app(cls, v: str) -> str:
+        """Reject an unknown app here rather than deep in the agent.
+
+        Without this, a typo surfaces as a 500 from somewhere inside prompt
+        assembly, which says nothing useful about what was wrong with the
+        request.
+        """
+        from backend.curriculum import APP_TRACKS
+
+        if v not in APP_TRACKS:
+            raise ValueError(
+                f"unknown app '{v}'; expected one of {sorted(APP_TRACKS)}"
+            )
+        return v
+
 
 
 def _validate_attachments(attachments: list[Attachment] | None) -> list[Attachment]:
@@ -135,6 +157,7 @@ async def chat_stream(body: ChatRequest):
                 attachments=[a.model_dump() for a in attachments],
                 demo_ref=body.demo_ref,
                 derivation_ref=body.derivation_ref,
+                app=body.app,
             )
         except Exception as e:
             await event_queue.put({"type": "error", "content": str(e)})
@@ -188,6 +211,7 @@ async def chat(body: ChatRequest):
         email=body.email,
         on_event=collect_event,
         session_id=body.session_id,
+        app=body.app,
     )
 
     response_text = ""

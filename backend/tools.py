@@ -1572,6 +1572,7 @@ def create_learning_tools(
                 concept_id=args.get("concept_id", ""),
                 request=args.get("request", ""),
                 base_demo_id=(args.get("base_demo_id") or "").strip() or None,
+                app=app,
             )
             return _text_result(json.dumps({
                 "job_id": job["job_id"],

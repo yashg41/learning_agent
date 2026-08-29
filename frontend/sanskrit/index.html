@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>संस्कृतम् — your Sanskrit tutor</title>
+    <!-- Shared design tokens, then the curriculum palette derived per theme
+         in backend/knowledge.py, then this page's own rules. Order matters:
+         styles.css consumes the variables these two define. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- Noto Serif Devanagari, not Tiro: Tiro looks like the scholarly choice
+         but its conjunct-substitution rules are effectively empty in the
+         Google Fonts build, so संयुक्ताक्षर render as separate letters. -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+Devanagari:wght@400;600&display=swap">
+    <link rel="stylesheet" href="/static/sanskrit/tokens.css">
+    <link rel="stylesheet" href="/api/palette.css">
+    <!-- Before styles.css: KaTeX ships its own .katex rules, and the overrides
+         in styles.css (sizing, overflow on wide equations) have to win. -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <link rel="stylesheet" href="/static/sanskrit/styles.css">
+    <!-- After styles.css: the notes pane overrides a few shared button rules
+         and should win without !important. -->
+    <link rel="stylesheet" href="/static/sanskrit/notes.css">
+    <link rel="stylesheet" href="/static/sanskrit/demo-pane.css">
+    <script>
+        // Applied before first paint so the page never flashes the wrong theme.
+        // ?theme= wins (useful for screenshots), then the saved choice, then
+        // whatever the OS prefers.
+        (function () {
+            var forced = new URLSearchParams(location.search).get('theme');
+            var saved = null;
+            try { saved = localStorage.getItem('sanskrit:theme'); } catch (e) {}
+            var prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
+            var t = (forced === 'light' || forced === 'dark') ? forced
+                  : saved || (prefersLight ? 'light' : 'dark');
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
+</head>
+<body>
+    <!-- Top bar: identity and cross-view navigation, so the graph and memory
+         explorer read as parts of one product rather than stray links. -->
+    <div class="topbar">
+        <div class="brand"><span class="brand-mark">सं</span> Sanskrit</div>
+        <nav class="topnav">
+            <a href="/sanskrit" class="topnav-link active">Chat</a>
+            <a href="/graph" class="topnav-link">Knowledge Graph</a>
+            <a href="/chroma" class="topnav-link">Memory</a>
+        </nav>
+        <div class="topbar-right">
+            <div class="learner-chip" id="learner-chip" onclick="focusEmail()"
+                 title="Switch learner">
+                <span class="avatar" id="learner-avatar">?</span>
+                <span class="learner-email" id="learner-email">Set your email</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Left Panel -->
+        <div class="left-panel">
+            <div>
+                <label for="email-input">Your Email</label>
+                <input type="email" id="email-input" placeholder="learner@example.com" value=""
+                       onchange="onEmailChange()">
+            </div>
+            <div class="session-section" id="session-section" style="display:none">
+                <div class="session-header">
+                    <label>Sessions</label>
+                    <button class="new-session-btn" onclick="createNewSession()" title="New Session">+</button>
+                </div>
+                <div class="session-list" id="session-list"></div>
+            </div>
+            <div class="status-indicator" id="status">Ready</div>
+        </div>
+
+        <!-- Center Panel (Chat + optional Notebook) -->
+        <div class="center-panel" id="center-panel">
+            <div class="chat-pane" id="chat-pane">
+                <div class="chat-header">
+                    <button class="rail-toggle" id="toggle-left" onclick="toggleRail('left')"
+                            title="Hide sidebar (⌘\)">⊟</button>
+                    <!-- Shows the current session, not a static app name:
+                         "PyMentor" is already in the top bar, and the old
+                         "Python & Quantum" label was stale — the curriculum
+                         now spans seven tracks. -->
+                    <span class="chat-title" id="chat-title">New session</span>
+                    <div class="chat-header-actions">
+                        <button id="theme-btn" class="header-btn" onclick="toggleTheme()"
+                                title="Switch theme">◐ Light</button>
+                        <button id="focus-btn" class="header-btn" onclick="toggleFocus()"
+                                title="Focus mode — hide both rails (⌘.)">⛶ Focus</button>
+                        <button id="notes-btn" class="header-btn" onclick="toggleNotes()"
+                                title="Notes canvas (⌘E)">&#9998; Notes</button>
+                        <button id="demo-btn" class="header-btn" onclick="toggleDemo()"
+                                title="Interactive demos — ask the tutor to build one">&#9654; Demo</button>
+                        <button class="rail-toggle" id="toggle-right" onclick="toggleRail('right')"
+                                title="Hide panel (⌘])">⊟</button>
+                    </div>
+                </div>
+                <div class="chat-scroll-wrap">
+                    <div class="chat-messages" id="chat-messages">
+                        <!-- Teaches what the tutor can do instead of filling
+                             the column with an emoji. The starters double as
+                             the entry point people otherwise never find. -->
+                        <div class="empty-state empty-teach">
+                            <h2>पाठं आरभामहे — shall we begin?</h2>
+                            <p>I remember what we cover, track what you can actually read, and pick up where we left off.</p>
+                            <div class="starters">
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--track-sanskrit)"></span>
+                                    Give me a simple sentence and let me work it out
+                                </button>
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--track-sanskrit)"></span>
+                                    Split the sandhi in तपोवनम् and show me the rule
+                                </button>
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--track-sanskrit)"></span>
+                                    Why is it गच्छति and not गमति?
+                                </button>
+                                <button class="starter" onclick="useStarter(this)">
+                                    <span class="starter-dot" style="background:var(--warning)"></span>
+                                    Quiz me on what I've learned so far
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <button id="scroll-bottom-btn" class="scroll-bottom-btn" onclick="scrollChatToBottom()"
+                            title="Jump to latest">&#8595; Latest</button>
+                </div>
+                <div class="chat-input-area">
+                    <!-- Thumbnails of images staged for the next turn. Hidden
+                         while empty; populated by ChatController. -->
+                    <div class="attach-strip" id="attach-strip"></div>
+                    <div class="chat-input-row">
+                        <textarea id="message-input" placeholder="Ask anything, or paste a verse to work through…" rows="1"
+                                 onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMessage(); }"></textarea>
+                        <button class="attach-btn" id="attach-btn" title="Attach an image">&#128206;</button>
+                        <input type="file" id="attach-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+                        <button id="send-btn" onclick="sendMessage()">Send</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Drag to rebalance chat against whichever pane is open on the
+                 right. Sits immediately after the chat pane so it serves both
+                 the notebook and the notes canvas; hidden when neither is
+                 open, since there is nothing to split. -->
+            <div class="pane-divider" id="pane-divider" title="Drag to resize"></div>
+
+            <!-- Notebook pane (hidden by default; toggled by Run Code button) -->
+            
+
+            <!-- Notes canvas (hidden by default; toggled by the Notes button).
+                 Fixed width, grows downward only — blocks sit at absolute x/y
+                 and nothing reflows under them. An imported PDF renders as a
+                 page column behind the blocks. -->
+            <div class="notes-pane" id="notes-pane" style="display:none">
+                <div class="notes-header">
+                    <select class="notes-picker" id="notes-picker" onchange="onNotePicked()"
+                            title="Switch note"></select>
+                    <div class="notes-header-actions">
+                        <button class="header-btn" onclick="createNote()" title="New note">+</button>
+                        <button class="header-btn" onclick="renameNote()" title="Rename this note">Aa</button>
+                        <button class="header-btn" id="notes-pdf-btn" onclick="pickPdf()"
+                                title="Import a PDF to annotate">PDF</button>
+                        <button class="header-btn" id="notes-pin-btn" onclick="togglePinNote()"
+                                title="Pin this note to this chat">&#128204;</button>
+                        <button class="header-btn" onclick="deleteNote()" title="Delete this note">&#128465;</button>
+                        <button class="header-btn" onclick="toggleNotes()" title="Hide notes">&times;</button>
+                    </div>
+                </div>
+
+                <div class="notes-toolbar" id="notes-toolbar">
+                    <button class="nb-tool is-active" data-tool="select" title="Select (V)">&#9655;</button>
+                    <button class="nb-tool" data-tool="hand"
+                            title="Move the canvas — drag to pan, nothing gets selected (H)">&#9995;</button>
+                    <span class="nb-tool-sep"></span>
+                    <button class="nb-tool" data-tool="text" title="Text (T)">T</button>
+                    <button class="nb-tool" data-tool="sticky" title="Sticky note (S)">&#9635;</button>
+                    <button class="nb-tool" data-tool="code" title="Code block (C)">&lt;/&gt;</button>
+                    <span class="nb-tool-sep"></span>
+                    <button class="nb-tool" data-tool="rect" title="Rectangle (R)">&#9645;</button>
+                    <button class="nb-tool" data-tool="ellipse" title="Ellipse (O)">&#9711;</button>
+                    <button class="nb-tool" data-tool="diamond" title="Diamond (D)">&#9671;</button>
+                    <button class="nb-tool" data-tool="arrow" title="Arrow (A)">&#8599;</button>
+                    <span class="nb-tool-sep"></span>
+                    <!-- nb-btn, not nb-tool: .nb-tool elements get a click
+                         handler that sets the active drawing tool, and these
+                         are not tools. -->
+                    <button class="nb-btn" id="notes-zoom-out" onclick="zoomBy(-1)"
+                            title="Zoom out (⌘−)">&minus;</button>
+                    <span class="nb-zoom" id="notes-zoom-level" onclick="zoomReset()"
+                          title="Click to reset to 100% (⌘0)">100%</span>
+                    <button class="nb-btn" id="notes-zoom-in" onclick="zoomBy(1)"
+                            title="Zoom in (⌘+)">+</button>
+                    <span class="notes-save-state" id="notes-save-state"></span>
+                </div>
+
+                <!-- Formatting ribbon. Fixed in the header like a word
+                     processor rather than floating over the canvas, so it
+                     never covers the block being edited and the controls stay
+                     in one place. Populated by renderFormatBar(). -->
+                <div class="notes-format" id="notes-format"></div>
+
+                <div class="notes-scroll" id="notes-scroll">
+                    <div class="notes-empty" id="notes-empty"></div>
+                    <!-- Wrapper reserves the *scaled* size: a CSS transform
+                         doesn't affect layout, so without this the scroll
+                         container would clip a zoomed-in canvas. -->
+                    <div class="notes-canvas-wrap" id="notes-canvas-wrap">
+                        <div class="notes-canvas" id="notes-canvas">
+                            <div class="notes-pages" id="notes-pages"></div>
+                            <svg class="notes-arrows" id="notes-arrows"></svg>
+                            <div class="notes-blocks" id="notes-blocks"></div>
+                            <div class="notes-marquee" id="notes-marquee" hidden></div>
+                        </div>
+                    </div>
+                    <button class="notes-add-space" onclick="addCanvasSpace()">+ Add space</button>
+                </div>
+
+                <input type="file" id="notes-pdf-input" accept="application/pdf,.pdf" hidden>
+            </div>
+
+            <!-- Demo pane (hidden by default). Holds interactive demos the
+                 tutor builds via the save_demo tool, each rendered in a
+                 sandboxed iframe created at runtime by demo-pane.js — the
+                 frame is deliberately not in the markup, so it can be
+                 destroyed and rebuilt to stop a previous demo's timers. -->
+            <div class="demo-pane" id="demo-pane" style="display:none">
+                <div class="demo-header">
+                    <select class="demo-picker" id="demo-picker" onchange="onDemoPicked()"
+                            title="Switch demo"></select>
+                    <div class="demo-header-actions">
+                        <!-- Scales the frame from the outside. The demo is
+                             sandboxed and opaque-origin, so this document
+                             cannot set a zoom inside it. -->
+                        <button class="header-btn" id="demo-zoom-out" onclick="demoZoomBy(-1)"
+                                title="Zoom out">&minus;</button>
+                        <span class="demo-zoom" id="demo-zoom-level" onclick="demoZoomReset()"
+                              title="Click to reset to 100%">100%</span>
+                        <button class="header-btn" id="demo-zoom-in" onclick="demoZoomBy(1)"
+                                title="Zoom in">+</button>
+                        <!-- Text, not a glyph: three glyph buttons already sit
+                             here and a fourth would be unreadable. -->
+                        <button class="header-btn demo-ask-btn" onclick="askTutorAboutDemo()"
+                                title="Ask the tutor about this demo">Ask tutor</button>
+                        <!-- Sends a picture of the demo AND its identity. A
+                             system screenshot would reach the chat as an
+                             anonymous image with no link to the demo. -->
+                        <button class="header-btn" onclick="screenshotDemoForChat()"
+                                title="Send a snapshot of this demo to the chat">&#128247;</button>
+                        <button class="header-btn" onclick="startRegionCapture()"
+                                title="Send just part of this demo — drag a box">&#9635;</button>
+                        <button class="header-btn" id="demo-pin-btn" onclick="pinDemoToChat()"
+                                title="Bookmark this demo in the transcript">&#128204;</button>
+                        <button class="header-btn" onclick="reloadDemo()"
+                                title="Restart this demo">&#8635;</button>
+                        <button class="header-btn" onclick="deleteDemo()"
+                                title="Delete this demo">&#128465;</button>
+                        <button class="header-btn" onclick="toggleDemo()"
+                                title="Hide demos">&times;</button>
+                    </div>
+                </div>
+                <div class="demo-caption">
+                    <span class="demo-title" id="demo-title"></span>
+                    <span class="demo-summary" id="demo-summary"></span>
+                </div>
+                <!-- Appears while something inside the demo is highlighted.
+                     The frame reports its own selection over postMessage —
+                     this document cannot read into a sandboxed frame. -->
+                <div class="demo-selection-bar" id="demo-selection-bar" style="display:none">
+                    <span class="demo-selection-label">Selected:</span>
+                    <span class="demo-selection-text" id="demo-selection-text"></span>
+                    <button class="demo-selection-ask" onclick="askTutorAboutDemo()">Ask tutor about this</button>
+                </div>
+                <div class="demo-body" id="demo-body">
+                    <div class="demo-empty" id="demo-empty"></div>
+                </div>
+                <!-- Talk to the builder about THIS demo. Docked here rather
+                     than floating: a floating window would cover the very
+                     thing being edited, and the demo is a work artifact, not
+                     a tangent (which is what the side-chat window is for). -->
+                <div class="demo-chat" id="demo-chat" style="display:none">
+                    <div class="demo-chat-log" id="demo-chat-log"></div>
+                    <div class="demo-chat-input">
+                        <input type="text" id="demo-chat-text"
+                               placeholder="Edit this demo — “add a reset button”. Not a chat."
+                               onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDemoEdit();}">
+                        <button id="demo-chat-send" onclick="sendDemoEdit()">Send</button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Panel (Knowledge Dashboard) -->
+        <div class="right-panel">
+            <div class="tabs">
+                <div class="tab active" data-tab="progress" onclick="switchTab('progress')">Progress</div>
+                <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
+                <div class="tab" data-tab="quizzes" onclick="switchTab('quizzes')">Quizzes</div>
+                <div class="tab" data-tab="preferences" onclick="switchTab('preferences')">Preferences</div>
+                <div class="tab" data-tab="events" onclick="switchTab('events')">Events</div>
+            </div>
+
+            <!-- Progress Tab -->
+            <div class="tab-content active" id="tab-progress">
+                <div class="empty-state" id="progress-empty">
+                    <div class="emoji">&#128218;</div>
+                    Start learning to see your progress here!
+                </div>
+                <div id="progress-content" style="display:none"></div>
+            </div>
+
+            <!-- History Tab -->
+            <div class="tab-content" id="tab-history">
+                <div class="empty-state" id="history-empty">
+                    <div class="emoji">&#128338;</div>
+                    Past conversations will appear here.
+                </div>
+                <div id="history-content" style="display:none"></div>
+            </div>
+
+            <!-- Quizzes Tab -->
+            <div class="tab-content" id="tab-quizzes">
+                <div class="empty-state" id="quizzes-empty">
+                    <div class="emoji">&#9889;</div>
+                    Ask "quiz me!" to test your knowledge.
+                </div>
+                <div id="quizzes-content" style="display:none"></div>
+            </div>
+
+            <!-- Preferences Tab -->
+            <div class="tab-content" id="tab-preferences">
+                <div class="empty-state" id="preferences-empty">
+                    <div class="emoji">&#128221;</div>
+                    Enter your email to edit your learning preferences.
+                </div>
+                <div id="preferences-content" style="display:none">
+                    <div class="prefs-section">
+                        <label for="prefs-aspect">Aspect</label>
+                        <select id="prefs-aspect" onchange="loadPreferences()"></select>
+                    </div>
+                    <div class="prefs-section">
+                        <label>Global (read-only — set by admin)</label>
+                        <pre class="prefs-global" id="prefs-global">Loading...</pre>
+                    </div>
+                    <div class="prefs-section">
+                        <label for="prefs-user">Your rules (markdown)</label>
+                        <textarea id="prefs-user" rows="10" placeholder="- Add your own rules, one per line..."></textarea>
+                    </div>
+                    <div class="prefs-actions">
+                        <button id="prefs-save-btn" onclick="savePreferences()">Save</button>
+                        <span class="prefs-status" id="prefs-status"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Events Tab -->
+            <div class="tab-content" id="tab-events">
+                <div id="events-log"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Side-chat: a floating, draggable conversation for tangents. Mounted
+         outside .container so position:fixed escapes the three-column flex
+         layout. Hidden until opened. -->
+    <div class="side-chat" id="side-chat">
+        <div class="side-chat-header" id="side-chat-header">
+            <span class="side-chat-title" id="side-chat-title">Side chat</span>
+            <div class="side-chat-actions">
+                <button class="header-btn" id="side-chat-end" onclick="endSideChat()"
+                        title="Summarize into the main chat and close">End &amp; summarize</button>
+                <button class="header-btn" id="side-chat-close" onclick="closeSideChat()"
+                        title="Hide (keeps the conversation)">&times;</button>
+            </div>
+        </div>
+        <div class="side-chat-messages" id="side-chat-messages">
+            <div class="empty-state side-chat-hint">
+                Ask about a tangent here — the main chat stays clean.
+            </div>
+        </div>
+        <div class="side-chat-input-area">
+            <div class="attach-strip" id="side-attach-strip"></div>
+            <div class="chat-input-row">
+                <textarea id="side-chat-input" rows="1" placeholder="Ask about this topic…"
+                          onkeydown="if(event.key==='Enter' &amp;&amp; !event.shiftKey){ event.preventDefault(); sendSideMessage(); }"></textarea>
+                <button class="attach-btn" id="side-attach-btn" title="Attach an image">&#128206;</button>
+                <input type="file" id="side-attach-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+                <button id="side-chat-send" onclick="sendSideMessage()">Send</button>
+            </div>
+        </div>
+        <!-- Resize handles: four edges, four corners. Last in the DOM so they
+             stack above the content. Only "nw" is visible (see styles.css). -->
+        <div class="side-chat-resize" data-dir="n"></div>
+        <div class="side-chat-resize" data-dir="s"></div>
+        <div class="side-chat-resize" data-dir="e"></div>
+        <div class="side-chat-resize" data-dir="w"></div>
+        <div class="side-chat-resize" data-dir="nw" title="Resize"></div>
+        <div class="side-chat-resize" data-dir="ne"></div>
+        <div class="side-chat-resize" data-dir="sw"></div>
+        <div class="side-chat-resize" data-dir="se"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <!-- Rich rendering for tutor prose. All three are optional at runtime:
+         enrichMessage() feature-detects each one, so a CDN outage costs the
+         typesetting, not the message. Versions are pinned for the same reason
+         marked is — a silent major bump would change how every reply renders. -->
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+    <!-- Mermaid is ESM-only from v10, so it cannot be a classic <script> like
+         the others. Hang it on window so app.js (classic) can reach it, and
+         set a flag the renderer waits on — module execution is deferred, so
+         an early message can otherwise render before mermaid exists. -->
+    <script type="module">
+        import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs";
+        window.mermaid = mermaid;
+        window.dispatchEvent(new Event("mermaid-ready"));
+    </script>
+    <script src="/static/sanskrit/app.js"></script>
+    <!-- After app.js: notes.js uses renderMarkdown/escapeHtml and reads the
+         currentEmail / currentSessionId globals it declares. -->
+    <script src="/static/sanskrit/notes.js"></script>
+    <!-- After notes.js: reuses its pane-divider helpers (syncPaneSplit) and
+         cooperates with toggleNotes for pane exclusivity. -->
+    <script src="/static/sanskrit/demo-pane.js"></script>
+</body>
+</html>

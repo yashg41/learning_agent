@@ -86,6 +86,7 @@ def new_job(
     concept_id: str = "",
     request: str = "",
     base_demo_id: str | None = None,
+    app: str = "pymentor",
 ) -> dict:
     """Create a job record in the queued state and persist it."""
     _ensure_dirs(email)
@@ -104,6 +105,9 @@ def new_job(
         "concept_id": (concept_id or "").strip(),
         "request": (request or "").strip()[:2000],
         "base_demo_id": base_demo_id,
+        # Which tutor asked. Persisted rather than passed through, so a build
+        # resumed after a restart still uses the right prompt and tools.
+        "app": app,
         "state": QUEUED,
         "demo_id": base_demo_id,
         "error": None,
@@ -249,6 +253,7 @@ def start_demo_job(
     concept_id: str = "",
     request: str = "",
     base_demo_id: str | None = None,
+    app: str = "pymentor",
 ) -> dict:
     """Create a job and start building in the background. Returns immediately.
 
@@ -262,6 +267,7 @@ def start_demo_job(
         concept_id=concept_id,
         request=request,
         base_demo_id=base_demo_id,
+        app=app,
     )
 
     if active_count(email) > MAX_CONCURRENT_DEMO_JOBS:
@@ -325,6 +331,9 @@ async def _run_build(record: dict) -> None:
         chat_session_id=record.get("chat_session_id"),
         resume_builder_session=resume_builder,
         build_ctx=build_ctx,
+        # Persisted on the record, so a build resumed after a restart still
+        # builds with the right tutor's prompt and tools.
+        app=record.get("app", "pymentor"),
     )
 
     # Mirror the builder's transcript before any early return below. Refining a
