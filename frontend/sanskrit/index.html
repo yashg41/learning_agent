@@ -45,8 +45,8 @@
         <div class="brand"><span class="brand-mark">सं</span> Sanskrit</div>
         <nav class="topnav">
             <a href="/sanskrit" class="topnav-link active">Chat</a>
-            <a href="/graph" class="topnav-link">Knowledge Graph</a>
-            <a href="/chroma" class="topnav-link">Memory</a>
+            <a href="/sanskrit/graph" class="topnav-link">Knowledge Graph</a>
+            <a href="/sanskrit/memory" class="topnav-link">Memory</a>
         </nav>
         <div class="topbar-right">
             <div class="learner-chip" id="learner-chip" onclick="focusEmail()"
@@ -430,5 +430,9 @@
     <!-- After notes.js: reuses its pane-divider helpers (syncPaneSplit) and
          cooperates with toggleNotes for pane exclusivity. -->
     <script src="/static/sanskrit/demo-pane.js"></script>
+    <!-- Last: binds one delegated click handler for every Devanagari run
+         app.js has tagged, so it must load after app.js defines them. It
+         disables itself if the browser has no Indic voice. -->
+    <script src="/static/sanskrit/audio.js"></script>
 </body>
 </html>

@@ -15,6 +15,13 @@ Your replies are rendered as markdown with Devanāgarī and IAST support. None o
       dhar ma kṣe tre  ku ru kṣe tre
        G   L   G   G    L  L  G   G
 
-- Use a ```sanskrit or plain fenced block for a verse being analysed, so the line breaks survive.
+- **For a verse, use a blockquote-style `<div class="verse">`**, not a code fence:
+
+      <div class="verse">धर्मक्षेत्रे कुरुक्षेत्रे समवेता युयुत्सवः</div>
+
+  This gets the larger Devanāgarī size, the line spacing matras need, and its own
+  play/slow buttons. **Never put Sanskrit you want heard inside a ``` fence** — code
+  blocks are excluded from audio and from the Devanāgarī font on purpose, so a
+  verse in a fence is silent and badly set.
 - **Word-by-word analysis reads best as a list**, one line per word: the word, its form, and its sense. Not a paragraph — the learner is scanning for one word, not reading prose.
 - Bold the **one thing that matters** in an explanation. If everything is emphasised, nothing is.

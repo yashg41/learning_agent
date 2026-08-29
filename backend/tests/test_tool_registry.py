@@ -161,3 +161,41 @@ def test_allowlist_and_registered_tools_cannot_drift(tmp_path):
                 assert _bare(n) in registered, (
                     f"{app}: derivation builder needs {_bare(n)}"
                 )
+
+
+def test_run_agent_forwards_app_to_the_tools(monkeypatch):
+    """The regression the learner hit in the running app.
+
+    run_agent accepted `app` but did not pass it to run_agent_internal, so the
+    MCP tools were always built for the default app. The Sanskrit tutor asked
+    get_domain_map about its own curriculum and was told "Unknown track
+    'sanskrit'" — then apologised to the learner for a limitation that did not
+    exist. Silent, and only visible by reading a tool result.
+
+    Asserts the wiring by signature rather than by running a turn: the call
+    needs a live SDK subprocess, which a unit test should not require.
+    """
+    import inspect
+
+    from backend import agent
+
+    source = inspect.getsource(agent.run_agent)
+    call = source[source.index("run_agent_internal("):]
+    call = call[: call.index(")")]
+    assert "app=app" in call, (
+        "run_agent must forward `app` to run_agent_internal, or every tutor "
+        "gets the default app's tools and curriculum"
+    )
+
+
+def test_every_agent_entrypoint_takes_an_app():
+    """A new entrypoint that forgets `app` silently becomes PyMentor."""
+    import inspect
+
+    from backend import agent
+
+    for name in ("run_agent", "run_agent_internal", "run_demo_builder"):
+        fn = getattr(agent, name)
+        assert "app" in inspect.signature(fn).parameters, (
+            f"{name}() has no `app` parameter"
+        )

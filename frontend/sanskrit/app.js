@@ -334,6 +334,12 @@ function enrichMessage(el) {
     renderMermaidIn(el);
     highlightCodeIn(el);
     tagDevanagariIn(el);
+    // Verse blocks get persistent play buttons (audio.js). Inline phrases
+    // need nothing here — they are handled by one delegated listener, which
+    // is why this is the only audio call in the render path. Guarded rather
+    // than assumed: audio.js is loaded last and disables itself outright on
+    // a browser with no Indic voice.
+    if (typeof attachVerseControls === "function") attachVerseControls(el);
 }
 
 // Devanagari occupies U+0900–U+097F, plus Vedic Extensions (U+1CD0–U+1CFF)
@@ -2174,6 +2180,7 @@ async function endSideChat() {
                 body: JSON.stringify({
                     parent_session_id: sideChatParentId || currentSessionId,
                     topic: sideChatTopic || "",
+                    app: APP,
                 }),
             }
         );
@@ -2297,7 +2304,9 @@ async function submitEdit(messageDiv, newText) {
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ turn_index: turnIndex, message: newText }),
+                body: JSON.stringify({
+                    turn_index: turnIndex, message: newText, app: APP,
+                }),
             }
         );
         if (!res.ok) throw new Error(`Server returned ${res.status} ${res.statusText}`);

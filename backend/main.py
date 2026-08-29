@@ -100,6 +100,16 @@ if os.path.exists(frontend_path):
     app.mount("/static", NoCacheStaticFiles(directory=frontend_path), name="static")
 
 
+# --- The Sanskrit tutor ------------------------------------------------
+#
+# Every page lives under /sanskrit/, so the URL says which tutor you are
+# talking to. The alternative — one /graph shared between apps, told apart
+# by ?app= — reads as an afterthought and makes a bookmark ambiguous.
+#
+# The views themselves are shared files: /sanskrit/graph serves the same
+# graph.html as /graph, which reads its app from the path. One renderer, two
+# curricula, no forked copy to keep in step.
+
 @app.get("/sanskrit")
 async def sanskrit_index():
     """The Sanskrit tutor's own UI.
@@ -109,6 +119,18 @@ async def sanskrit_index():
     runner, no derivations) as does the whole visual register.
     """
     return FileResponse(os.path.join(frontend_path, "sanskrit", "index.html"))
+
+
+@app.get("/sanskrit/graph")
+async def sanskrit_graph():
+    """Sanskrit's knowledge graph — same renderer, scoped by the path."""
+    return FileResponse(os.path.join(frontend_path, "graph.html"))
+
+
+@app.get("/sanskrit/memory")
+async def sanskrit_memory():
+    """Sanskrit's memory explorer — same renderer, scoped by the path."""
+    return FileResponse(os.path.join(frontend_path, "chroma.html"))
 
 
 @app.get("/")

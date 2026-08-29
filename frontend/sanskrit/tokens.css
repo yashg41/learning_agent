@@ -354,3 +354,171 @@ body > .container { height: calc(100vh - var(--header-height)); }
     line-height: 1.4;
     font-size: var(--text-sm);
 }
+
+/* ===================================================================
+   Speaking the Sanskrit
+   ===================================================================
+   The affordance is CSS-only. app.js already wraps Devanagari runs in
+   <span lang="sa">, and audio.js listens for clicks on those via one
+   delegated handler — so nothing is appended to the DOM and nothing
+   here has to survive a re-render.
+
+   Everything is gated behind body.tts-ready, which audio.js sets only
+   once it has found a usable voice. On a machine with no Indic voice
+   the text stays completely inert: no pointer cursor, no glyph, no
+   promise of something that would not happen. */
+
+/* A speaker mark after each Devanagari run, revealed on hover.
+   ::after rather than a real element so it cannot be destroyed by the
+   innerHTML rewrites that happen on every message render, and cannot
+   inherit the Devanagari font stack. */
+body.tts-ready [lang="sa"] {
+    cursor: pointer;
+    /* The mark sits in the line box; reserving the space up front stops
+       text reflowing sideways on hover. */
+    position: relative;
+}
+
+body.tts-ready [lang="sa"]::after {
+    content: "🔊";
+    font-family: var(--font-sans);   /* never --font-deva */
+    font-size: 0.7em;
+    line-height: 1;
+    margin-inline-start: 0.3em;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+    /* The glyph is decoration; a double-click on the phrase should not
+       select it as if it were part of the word. */
+    user-select: none;
+    vertical-align: middle;
+}
+
+body.tts-ready [lang="sa"]:hover::after,
+body.tts-ready [lang="sa"]:focus-visible::after {
+    opacity: 0.75;
+}
+
+/* Reading right now. Deliberately a background wash rather than a colour
+   change: recolouring Devanagari reduces contrast against the very
+   diacritics the learner is trying to see. */
+body.tts-ready [lang="sa"].is-speaking,
+body.tts-ready .verse.is-speaking {
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+}
+
+body.tts-ready [lang="sa"].is-speaking::after {
+    opacity: 1;
+}
+
+/* Touch devices have no hover, so the mark would never appear. Show it
+   permanently but faintly there. */
+@media (hover: none) {
+    body.tts-ready [lang="sa"]::after { opacity: 0.4; }
+}
+
+/* --- Verse controls ------------------------------------------------
+   A verse is what gets replayed twenty times while learning to chant,
+   so it earns persistent buttons rather than a hover mark. */
+.verse { position: relative; }
+
+.verse-audio {
+    position: absolute;
+    top: var(--space-2);
+    inset-inline-end: var(--space-2);
+    display: flex;
+    gap: var(--space-1);
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+}
+
+.verse:hover .verse-audio,
+.verse:focus-within .verse-audio { opacity: 1; }
+
+@media (hover: none) {
+    .verse-audio { opacity: 0.7; }
+}
+
+.verse-audio-btn {
+    font-family: var(--font-sans);
+    font-size: var(--text-xs);
+    line-height: 1;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease),
+                color var(--duration-fast) var(--ease);
+}
+
+.verse-audio-btn:hover {
+    background: var(--accent);
+    /* Ink on amber in dark mode, white on bronze in light. Never a
+       literal — white on this amber measures 1.9:1. */
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+}
+
+/* --- The "it's a Hindi voice" notice --------------------------------
+   Shown once, after the first playback rather than before it: a caveat
+   about a sound you have not heard yet is just noise. Dismissible for
+   good. */
+.tts-notice {
+    position: fixed;
+    inset-block-end: var(--space-5);
+    inset-inline-start: 50%;
+    transform: translate(-50%, 12px);
+    z-index: 60;
+    max-width: 460px;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    border-inline-start: 3px solid var(--accent);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--text-dim);
+    opacity: 0;
+    transition: opacity var(--duration-base) var(--ease),
+                transform var(--duration-base) var(--ease);
+}
+
+.tts-notice.is-in {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+.tts-notice em {
+    font-family: var(--font-deva);
+    font-style: normal;
+    color: var(--text-bright);
+}
+
+.tts-notice-close {
+    flex: none;
+    font-family: var(--font-sans);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    cursor: pointer;
+}
+
+.tts-notice-close:hover {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tts-notice { transition: none; }
+    body.tts-ready [lang="sa"]::after { transition: none; }
+}

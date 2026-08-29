@@ -520,18 +520,36 @@ async def get_quiz_history(email: str):
 
 
 @router.get("/graph/{email}")
-async def get_knowledge_graph(email: str):
-    """Get the full curriculum graph with user mastery overlaid.
+async def get_knowledge_graph(email: str, app: str = "pymentor"):
+    """Get one tutor's curriculum graph with user mastery overlaid.
 
     Returns nodes (concepts) and edges (prerequisites) for graph visualization.
+
+    Scoped by `app`: the backend serves more than one tutor and they do not
+    share tracks, so an unscoped graph would draw Sanskrit concepts into
+    PyMentor's view and vice versa. `track_order` is returned rather than
+    duplicated in the page, which is what let the two drift before.
     """
     from backend.agent import _get_user_data_dir
+    from backend.curriculum import APP_TRACKS
     from backend.knowledge import (
-        KnowledgeStore, CURRICULUM_GRAPH, CATEGORY_COLORS, TRACK_COLORS,
+        KnowledgeStore, CURRICULUM_GRAPH as FULL_GRAPH, CATEGORY_COLORS,
+        TRACK_COLORS, TRACK_ORDER,
     )
 
+    if app not in APP_TRACKS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown app '{app}'; expected one of {sorted(APP_TRACKS)}",
+        )
+    tracks = set(APP_TRACKS[app])
+    CURRICULUM_GRAPH = {
+        cid: info for cid, info in FULL_GRAPH.items()
+        if info.get("track") in tracks
+    }
+
     user_dir = _get_user_data_dir(email)
-    store = KnowledgeStore(user_dir)
+    store = KnowledgeStore(user_dir, app=app)
     data = store.load_knowledge()
     user_concepts = data.get("concepts", {})
 
@@ -575,6 +593,10 @@ async def get_knowledge_graph(email: str):
     for concept_id, user_data in user_concepts.items():
         if concept_id in CURRICULUM_GRAPH:
             continue
+        # A concept belonging to the OTHER tutor's curriculum is not custom,
+        # it is simply out of scope here — one knowledge.json holds both.
+        if concept_id in FULL_GRAPH:
+            continue
         category = user_data.get("category", "")
         nodes.append({
             "id": concept_id,
@@ -591,7 +613,7 @@ async def get_knowledge_graph(email: str):
         })
         # Only to prereqs that exist as nodes — a dangling edge would leave the
         # force layout referencing a node id it never received.
-        known = set(CURRICULUM_GRAPH) | set(user_concepts)
+        known = set(CURRICULUM_GRAPH) | (set(user_concepts) - set(FULL_GRAPH))
         for prereq in user_data.get("prerequisites", []):
             if prereq in known:
                 edges.append({"source": prereq, "target": concept_id})
@@ -603,7 +625,8 @@ async def get_knowledge_graph(email: str):
             {"id": cat, "name": meta["label"], "color": meta["color"]}
             for cat, meta in categories.items()
         ],
-        "track_colors": TRACK_COLORS,
+        "track_colors": {t: c for t, c in TRACK_COLORS.items() if t in tracks},
+        "track_order": [t for t in TRACK_ORDER if t in tracks],
         "profile": data.get("profile", {}),
     }
 
@@ -670,12 +693,14 @@ class EndSideChatRequest(BaseModel):
     """Close a side chat and fold what was learned back into the parent."""
     parent_session_id: str
     topic: str = ""
+    app: str = "pymentor"
 
 
 class BranchRequest(BaseModel):
     """Rewrite history from a turn onward with an edited message."""
     turn_index: int
     message: str
+    app: str = "pymentor"
 
 
 @router.get("/palette.css")
@@ -941,9 +966,11 @@ async def branch_session(email: str, session_id: str, body: BranchRequest):
     # Rebuild the surviving context as a single bootstrap prompt. This is the
     # same prompt-stuffing strategy replay_from_memory uses.
     user_data_dir = _get_user_data_dir(email)
-    knowledge_state = KnowledgeStore(user_data_dir).format_for_system_prompt()
+    knowledge_state = KnowledgeStore(
+        user_data_dir, app=body.app
+    ).format_for_system_prompt()
     recent = _get_episodic().format_for_system_prompt(email, n=5)
-    system_prompt = build_system_prompt(knowledge_state, recent)
+    system_prompt = build_system_prompt(knowledge_state, recent, app=body.app)
 
     new_session_id = None
     if prefix:
@@ -1091,7 +1118,7 @@ async def end_side_chat(email: str, session_id: str, body: EndSideChatRequest):
         logger.error(f"Side-chat episode save failed: {e}", exc_info=True)
 
     # 3. Knowledge graph — the learning counts even though it happened aside.
-    store = KnowledgeStore(_get_user_data_dir(email))
+    store = KnowledgeStore(_get_user_data_dir(email), app=body.app)
     updated = []
     for c in concepts:
         cid = (c.get("concept_id") or "").strip()

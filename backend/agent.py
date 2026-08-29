@@ -421,6 +421,10 @@ async def run_agent(
         attachments=attachments,
         saved_attachments=saved_attachments,
         session_ctx=session_ctx,
+        # Without this the tools are built for the default app, so the
+        # Sanskrit tutor was handed PyMentor's tracks and get_domain_map
+        # answered "Unknown track 'sanskrit'" for its own curriculum.
+        app=app,
     )
 
     # Save session mapping

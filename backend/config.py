@@ -7,7 +7,10 @@ _ENV_FILE = os.path.join(_APP_ROOT, ".env")
 
 class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
-    MODEL_NAME: str = "claude-haiku-4-5-20251001"
+    # Sonnet 5. The tutor's job is explanation and diagnosis — noticing what a
+    # learner actually got wrong and why — which is exactly where a stronger
+    # model earns its cost. Override with MODEL_NAME in .env.
+    MODEL_NAME: str = "claude-sonnet-5"
 
     DATA_DIR: str = os.path.join(_APP_ROOT, "data")
     CHROMA_DIR: str = os.path.join(_APP_ROOT, "data", "chroma")

@@ -7,8 +7,17 @@
 
 <!-- Shared tokens, then the curriculum palette derived per theme in
      backend/knowledge.py. This page keeps no colours of its own. -->
-<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/tokens.css" id="tokens-css">
 <link rel="stylesheet" href="/api/palette.css">
+<script>
+    // Swap in the Sanskrit token set before first paint, so the graph wears
+    // the amber theme rather than PyMentor's violet when reached from
+    // /sanskrit/graph. Inline and synchronous on purpose: doing this from a
+    // deferred script would flash the wrong accent.
+    if (location.pathname.startsWith("/sanskrit/")) {
+        document.getElementById("tokens-css").href = "/static/sanskrit/tokens.css";
+    }
+</script>
 <script>
     // Applied before first paint so the page never flashes the wrong theme.
     (function () {
@@ -317,11 +326,11 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
 <body>
 <!-- Same top bar as the chat page, so navigation never dead-ends. -->
 <div class="topbar">
-    <div class="brand"><span class="brand-mark">P</span> PyMentor</div>
+    <div class="brand"><span class="brand-mark" id="brand-mark">P</span> <span id="brand-name">PyMentor</span></div>
     <nav class="topnav">
-        <a href="/" class="topnav-link">Chat</a>
-        <a href="/graph" class="topnav-link active">Knowledge Graph</a>
-        <a href="/chroma" class="topnav-link">Memory</a>
+        <a href="/" class="topnav-link" id="nav-chat">Chat</a>
+        <a href="/graph" class="topnav-link active" id="nav-graph">Knowledge Graph</a>
+        <a href="/chroma" class="topnav-link" id="nav-memory">Memory</a>
     </nav>
     <div class="topbar-right">
         <button class="btn-ghost" id="theme-btn" onclick="toggleTheme()">◐ Light</button>
@@ -400,12 +409,46 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
 // instead of 271.
 // =====================================================================
 
+// Which tutor's graph this is, taken from the path: /sanskrit/graph is the
+// Sanskrit curriculum, /graph is PyMentor's. The path rather than a query
+// param so a bookmark is unambiguous about which tutor it belongs to.
+// ?app= is still honoured as an override for quick comparisons.
+const APP = new URLSearchParams(location.search).get("app")
+    || (location.pathname.startsWith("/sanskrit/") ? "sanskrit" : "pymentor");
+
+// Point the shared chrome at whichever tutor this is. Without this the
+// Sanskrit graph's nav walks you into PyMentor's chat.
+if (APP === "sanskrit") {
+    document.documentElement.dataset.app = "sanskrit";
+    document.addEventListener("DOMContentLoaded", () => {
+        document.title = "संस्कृतम् — knowledge graph";
+        const mark = document.getElementById("brand-mark");
+        const name = document.getElementById("brand-name");
+        if (mark) mark.textContent = "सं";
+        if (name) name.textContent = "Sanskrit";
+        const set = (id, href) => {
+            const el = document.getElementById(id);
+            if (el) el.href = href;
+        };
+        set("nav-chat", "/sanskrit");
+        set("nav-graph", "/sanskrit/graph");
+        set("nav-memory", "/sanskrit/memory");
+    });
+}
+
 const TRACK_LABEL = {
     python: "Python", ml: "ML / Data Science", dl: "Deep Learning",
     llm: "LLM / RAG", ops: "MLOps", quantum: "Quantum / Qiskit",
     sysdesign: "System Design",
+    sanskrit: "Sanskrit",
 };
-const TRACK_ORDER = ["python", "ml", "dl", "llm", "ops", "quantum", "sysdesign"];
+
+// Filled from the API response, NOT hardcoded. This list used to be a
+// literal copy of the backend's TRACK_ORDER, and the two promptly drifted:
+// adding the Sanskrit track left its concepts unlaned and uncoloured here
+// because this file had never heard of it. The server owns the curriculum,
+// so the server says what is in it.
+let TRACK_ORDER = [];
 
 // Zoom limits and the point at which node names appear. Below LABEL_ZOOM
 // the whole curriculum is in view and 173 names would be an unreadable mat,
@@ -495,9 +538,15 @@ async function loadGraph() {
     updateLearnerChip(email);
 
     try {
-        const res = await fetch(`/api/graph/${encodeURIComponent(email)}`);
+        const res = await fetch(
+            `/api/graph/${encodeURIComponent(email)}?app=${encodeURIComponent(APP)}`);
         if (!res.ok) throw new Error("Failed to load graph");
-        layout(await res.json());
+        const payload = await res.json();
+        // Adopt the server's track order before laying out — the lanes, the
+        // legend and the pie-ring slices are all built from it.
+        TRACK_ORDER = payload.track_order
+            || [...new Set((payload.nodes || []).map(n => n.track))];
+        layout(payload);
         resizeCanvas();
         fitGraph();
         drawGraph();
