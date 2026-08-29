@@ -1,0 +1,176 @@
+track: ml
+name: classical machine learning
+hue: 75
+categories:
+- id: ml_core
+  label: ML · Core
+  priority: 0
+  concepts:
+  - id: numpy_basics
+    name: NumPy Basics
+    prereqs:
+    - lists
+    - functions_basic
+  - id: numpy_broadcasting
+    name: NumPy Broadcasting & Vectorization
+    prereqs:
+    - numpy_basics
+  - id: pandas_series_df
+    name: Pandas Series & DataFrames
+    prereqs:
+    - numpy_basics
+    - dictionaries
+  - id: pandas_groupby_merge
+    name: Pandas GroupBy & Merge
+    prereqs:
+    - pandas_series_df
+  - id: matplotlib_basics
+    name: Matplotlib Plotting
+    prereqs:
+    - numpy_basics
+  - id: data_cleaning
+    name: Data Cleaning & Missing Values
+    prereqs:
+    - pandas_series_df
+  - id: feature_engineering
+    name: Feature Engineering
+    prereqs:
+    - pandas_groupby_merge
+    - data_cleaning
+- id: ml_supervised
+  label: ML · Supervised
+  priority: 1
+  concepts:
+  - id: train_test_split
+    name: Train/Test Split
+    prereqs:
+    - pandas_series_df
+  - id: linear_regression
+    name: Linear Regression
+    prereqs:
+    - train_test_split
+    - numpy_broadcasting
+  - id: logistic_regression
+    name: Logistic Regression
+    prereqs:
+    - linear_regression
+  - id: decision_trees
+    name: Decision Trees
+    prereqs:
+    - train_test_split
+  - id: random_forests
+    name: Random Forests
+    prereqs:
+    - decision_trees
+  - id: svm
+    name: Support Vector Machines
+    prereqs:
+    - logistic_regression
+  - id: knn
+    name: K-Nearest Neighbours
+    prereqs:
+    - train_test_split
+  - id: naive_bayes
+    name: Naive Bayes
+    prereqs:
+    - train_test_split
+  - id: regularization
+    name: Regularization (L1 / L2)
+    prereqs:
+    - linear_regression
+    - logistic_regression
+  - id: bias_variance
+    name: Bias-Variance Tradeoff
+    prereqs:
+    - train_test_split
+    - linear_regression
+- id: ml_ensembles
+  label: ML · Ensembles & Boosting
+  priority: 2
+  concepts:
+  - id: ensemble_basics
+    name: 'Ensembles: Bagging vs Boosting'
+    prereqs:
+    - decision_trees
+    - random_forests
+  - id: gradient_boosting
+    name: Gradient Boosting
+    prereqs:
+    - ensemble_basics
+    - bias_variance
+  - id: xgboost
+    name: XGBoost
+    prereqs:
+    - gradient_boosting
+    - regularization
+  - id: lightgbm
+    name: LightGBM
+    prereqs:
+    - gradient_boosting
+  - id: catboost
+    name: CatBoost
+    prereqs:
+    - gradient_boosting
+  - id: stacking_blending
+    name: Stacking & Blending
+    prereqs:
+    - ensemble_basics
+    - cross_validation
+- id: ml_unsupervised
+  label: ML · Unsupervised
+  priority: 3
+  concepts:
+  - id: kmeans
+    name: K-Means Clustering
+    prereqs:
+    - numpy_broadcasting
+    - matplotlib_basics
+  - id: hierarchical_clustering
+    name: Hierarchical Clustering
+    prereqs:
+    - kmeans
+  - id: dbscan
+    name: DBSCAN
+    prereqs:
+    - kmeans
+  - id: pca
+    name: PCA & Dimensionality Reduction
+    prereqs:
+    - numpy_broadcasting
+    - feature_engineering
+- id: ml_eval
+  label: ML · Evaluation
+  priority: 4
+  concepts:
+  - id: evaluation_metrics
+    name: Evaluation Metrics
+    prereqs:
+    - logistic_regression
+  - id: cross_validation
+    name: Cross-Validation
+    prereqs:
+    - train_test_split
+    - evaluation_metrics
+  - id: hyperparameter_tuning
+    name: Hyperparameter Tuning
+    prereqs:
+    - cross_validation
+  - id: sklearn_pipelines
+    name: scikit-learn Pipelines
+    prereqs:
+    - feature_engineering
+    - cross_validation
+  - id: imbalanced_data
+    name: Imbalanced Data & Resampling
+    prereqs:
+    - evaluation_metrics
+  - id: feature_importance
+    name: Feature Importance & SHAP
+    prereqs:
+    - random_forests
+    - gradient_boosting
+  - id: data_leakage
+    name: Data Leakage
+    prereqs:
+    - sklearn_pipelines
+    - cross_validation

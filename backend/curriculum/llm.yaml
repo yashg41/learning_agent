@@ -1,0 +1,108 @@
+track: llm
+name: LLMs and RAG
+hue: 295
+categories:
+- id: llm_core
+  label: LLM · Core
+  priority: 0
+  concepts:
+  - id: tokenization
+    name: Tokenization
+    prereqs:
+    - string_methods
+  - id: embeddings
+    name: Embeddings
+    prereqs:
+    - numpy_basics
+    - tokenization
+  - id: prompt_engineering
+    name: Prompt Engineering
+    prereqs:
+    - tokenization
+  - id: llm_evaluation
+    name: LLM Evaluation
+    prereqs:
+    - prompt_engineering
+  - id: structured_output
+    name: Structured Output & Function Calling
+    prereqs:
+    - prompt_engineering
+  - id: context_windows
+    name: Context Windows & Long Context
+    prereqs:
+    - tokenization
+  - id: hallucination_grounding
+    name: Hallucination & Grounding
+    prereqs:
+    - rag_architecture
+    - llm_evaluation
+- id: llm_rag
+  label: LLM · RAG & Agents
+  priority: 1
+  concepts:
+  - id: chunking
+    name: Chunking Strategies
+    prereqs:
+    - tokenization
+  - id: vector_databases
+    name: Vector Databases
+    prereqs:
+    - embeddings
+  - id: retrieval
+    name: Retrieval (top-k search)
+    prereqs:
+    - vector_databases
+    - chunking
+  - id: reranking
+    name: Reranking
+    prereqs:
+    - retrieval
+  - id: rag_architecture
+    name: RAG Architecture
+    prereqs:
+    - retrieval
+    - prompt_engineering
+  - id: agents_tool_use
+    name: Agents & Tool Use
+    prereqs:
+    - prompt_engineering
+    - functions_basic
+  - id: hybrid_search
+    name: Hybrid Search (BM25 + dense)
+    prereqs:
+    - retrieval
+  - id: mcp_protocol
+    name: Model Context Protocol (MCP)
+    prereqs:
+    - agents_tool_use
+- id: llm_tuning
+  label: LLM · Tuning & Serving
+  priority: 2
+  concepts:
+  - id: finetuning_basics
+    name: 'Fine-Tuning: When and Why'
+    prereqs:
+    - prompt_engineering
+    - rag_architecture
+  - id: peft_lora
+    name: 'PEFT: LoRA & QLoRA'
+    prereqs:
+    - finetuning_basics
+    - transfer_learning
+  - id: instruction_tuning
+    name: Instruction Tuning (SFT)
+    prereqs:
+    - finetuning_basics
+  - id: preference_tuning
+    name: Preference Tuning (RLHF, DPO)
+    prereqs:
+    - instruction_tuning
+  - id: quantization
+    name: Quantization (INT8, NF4)
+    prereqs:
+    - finetuning_basics
+  - id: inference_optimization
+    name: Inference Optimization & KV Cache
+    prereqs:
+    - quantization
+    - context_windows

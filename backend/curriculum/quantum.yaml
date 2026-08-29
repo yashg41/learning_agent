@@ -1,0 +1,86 @@
+track: quantum
+name: quantum computing with Qiskit
+hue: 330
+categories:
+- id: qc_foundations
+  label: Quantum · Foundations
+  priority: 0
+  concepts:
+  - id: qubits
+    name: Qubits & Classical vs Quantum Bits
+    prereqs:
+    - variables
+    - data_types
+  - id: superposition
+    name: Superposition
+    prereqs:
+    - qubits
+  - id: measurement
+    name: Measurement & Probabilities
+    prereqs:
+    - superposition
+  - id: entanglement
+    name: Entanglement
+    prereqs:
+    - superposition
+    - measurement
+  - id: bloch_sphere
+    name: Bloch Sphere
+    prereqs:
+    - superposition
+    - numpy_basics
+- id: qc_qiskit
+  label: Quantum · Qiskit
+  priority: 1
+  concepts:
+  - id: qiskit_setup
+    name: Qiskit Setup & Install
+    prereqs:
+    - virtual_environments
+    - modules_imports
+  - id: quantum_circuits
+    name: Quantum Circuits (Qiskit)
+    prereqs:
+    - qiskit_setup
+    - classes_basic
+  - id: quantum_gates
+    name: Quantum Gates (X, H, CNOT, ...)
+    prereqs:
+    - quantum_circuits
+    - measurement
+  - id: circuit_visualization
+    name: Circuit Visualization & Statevector
+    prereqs:
+    - quantum_gates
+    - matplotlib_basics
+- id: qc_algorithms
+  label: Quantum · Algorithms
+  priority: 2
+  concepts:
+  - id: deutsch_jozsa
+    name: Deutsch-Jozsa Algorithm
+    prereqs:
+    - quantum_gates
+    - entanglement
+  - id: grover_search
+    name: Grover's Search
+    prereqs:
+    - deutsch_jozsa
+  - id: quantum_teleportation
+    name: Quantum Teleportation
+    prereqs:
+    - entanglement
+    - quantum_gates
+- id: qc_advanced
+  label: Quantum · Advanced
+  priority: 3
+  concepts:
+  - id: variational_circuits
+    name: Variational Quantum Circuits
+    prereqs:
+    - quantum_gates
+    - numpy_broadcasting
+  - id: qaoa_intro
+    name: QAOA (Intro)
+    prereqs:
+    - variational_circuits

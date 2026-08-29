@@ -17,3 +17,8 @@ PyMuPDF
 # lark every step verification fails closed and a derivation cannot be checked.
 sympy
 lark
+# Reads backend/curriculum/*.yaml. Already present transitively via chromadb,
+# but declared here because the curriculum will not load without it — an
+# indirect dependency that the app hard-requires is one upstream change away
+# from becoming a startup crash with a confusing traceback.
+pyyaml

@@ -1,0 +1,298 @@
+track: python
+name: Python
+hue: 264
+categories:
+- id: fundamentals
+  label: null
+  priority: 0
+  concepts:
+  - id: variables
+    name: Variables
+    prereqs: []
+  - id: data_types
+    name: Data Types
+    prereqs:
+    - variables
+  - id: operators
+    name: Operators
+    prereqs:
+    - variables
+    - data_types
+  - id: string_methods
+    name: String Methods
+    prereqs:
+    - variables
+    - data_types
+  - id: string_formatting
+    name: String Formatting
+    prereqs:
+    - variables
+    - data_types
+  - id: input_output
+    name: Input/Output
+    prereqs:
+    - variables
+  - id: comments_docstrings
+    name: Comments & Docstrings
+    prereqs:
+    - variables
+- id: control_flow
+  label: null
+  priority: 1
+  concepts:
+  - id: if_else
+    name: If/Else Conditionals
+    prereqs:
+    - operators
+  - id: for_loops
+    name: For Loops
+    prereqs:
+    - if_else
+  - id: while_loops
+    name: While Loops
+    prereqs:
+    - if_else
+  - id: match_statement
+    name: Match Statement
+    prereqs:
+    - if_else
+  - id: recursion
+    name: Recursion
+    prereqs:
+    - functions_basic
+    - if_else
+- id: data_structures
+  label: null
+  priority: 2
+  concepts:
+  - id: lists
+    name: Lists
+    prereqs:
+    - variables
+    - for_loops
+  - id: tuples
+    name: Tuples
+    prereqs:
+    - lists
+  - id: dictionaries
+    name: Dictionaries
+    prereqs:
+    - lists
+  - id: sets
+    name: Sets
+    prereqs:
+    - lists
+  - id: list_comprehensions
+    name: List Comprehensions
+    prereqs:
+    - lists
+    - for_loops
+  - id: dict_comprehensions
+    name: Dict & Set Comprehensions
+    prereqs:
+    - dictionaries
+    - list_comprehensions
+  - id: named_tuples
+    name: Named Tuples
+    prereqs:
+    - tuples
+    - modules_imports
+  - id: enums
+    name: Enums
+    prereqs:
+    - classes_basic
+- id: functions
+  label: null
+  priority: 3
+  concepts:
+  - id: functions_basic
+    name: Functions (Basic)
+    prereqs:
+    - variables
+    - if_else
+  - id: functions_args
+    name: Function Arguments
+    prereqs:
+    - functions_basic
+  - id: scope
+    name: Variable Scope
+    prereqs:
+    - functions_basic
+  - id: lambda_functions
+    name: Lambda Functions
+    prereqs:
+    - functions_basic
+  - id: closures
+    name: Closures
+    prereqs:
+    - scope
+    - functions_args
+  - id: decorators
+    name: Decorators
+    prereqs:
+    - closures
+  - id: functools
+    name: Functools & Itertools
+    prereqs:
+    - lambda_functions
+    - decorators
+- id: oop
+  label: null
+  priority: 4
+  concepts:
+  - id: classes_basic
+    name: Classes (Basic)
+    prereqs:
+    - functions_basic
+    - dictionaries
+  - id: inheritance
+    name: Inheritance
+    prereqs:
+    - classes_basic
+  - id: dunder_methods
+    name: Dunder Methods
+    prereqs:
+    - classes_basic
+  - id: properties
+    name: Properties & Descriptors
+    prereqs:
+    - classes_basic
+    - decorators
+  - id: abstract_classes
+    name: Abstract Classes
+    prereqs:
+    - inheritance
+  - id: dataclasses
+    name: Dataclasses
+    prereqs:
+    - classes_basic
+    - type_hints
+  - id: protocols
+    name: Protocols & ABCs
+    prereqs:
+    - abstract_classes
+    - type_hints
+- id: error_handling
+  label: null
+  priority: 5
+  concepts:
+  - id: error_handling
+    name: Error Handling
+    prereqs:
+    - functions_basic
+  - id: custom_exceptions
+    name: Custom Exceptions
+    prereqs:
+    - error_handling
+    - classes_basic
+- id: file_io
+  label: null
+  priority: 6
+  concepts:
+  - id: file_reading
+    name: File Reading
+    prereqs:
+    - error_handling
+  - id: file_writing
+    name: File Writing
+    prereqs:
+    - file_reading
+  - id: context_managers
+    name: Context Managers
+    prereqs:
+    - file_reading
+    - classes_basic
+  - id: json_csv
+    name: JSON & CSV Handling
+    prereqs:
+    - dictionaries
+    - file_reading
+- id: modules
+  label: null
+  priority: 7
+  concepts:
+  - id: modules_imports
+    name: Modules & Imports
+    prereqs:
+    - functions_basic
+  - id: packages
+    name: Packages
+    prereqs:
+    - modules_imports
+  - id: virtual_environments
+    name: Virtual Environments
+    prereqs:
+    - packages
+- id: testing
+  label: null
+  priority: 8
+  concepts:
+  - id: unit_testing
+    name: Unit Testing (pytest)
+    prereqs:
+    - functions_basic
+    - error_handling
+  - id: debugging
+    name: Debugging & Logging
+    prereqs:
+    - error_handling
+    - modules_imports
+  - id: mocking
+    name: Mocking & Test Fixtures
+    prereqs:
+    - unit_testing
+    - classes_basic
+- id: data_processing
+  label: null
+  priority: 9
+  concepts:
+  - id: regex
+    name: Regular Expressions
+    prereqs:
+    - string_methods
+    - modules_imports
+  - id: collections_module
+    name: Collections Module
+    prereqs:
+    - dictionaries
+    - modules_imports
+  - id: datetime_module
+    name: Date & Time
+    prereqs:
+    - modules_imports
+    - string_formatting
+- id: advanced
+  label: null
+  priority: 10
+  concepts:
+  - id: generators
+    name: Generators
+    prereqs:
+    - for_loops
+    - functions_args
+  - id: iterators
+    name: Iterators
+    prereqs:
+    - classes_basic
+    - for_loops
+  - id: async_await
+    name: Async/Await
+    prereqs:
+    - generators
+    - error_handling
+  - id: type_hints
+    name: Type Hints
+    prereqs:
+    - functions_args
+    - classes_basic
+  - id: metaclasses
+    name: Metaclasses
+    prereqs:
+    - dunder_methods
+    - inheritance
+  - id: concurrency
+    name: Threading & Multiprocessing
+    prereqs:
+    - functions_basic
+    - error_handling
+    - modules_imports
