@@ -91,9 +91,12 @@ def create_learning_tools(
             to fork, and the id does not exist when this factory is called.
             None for the demo builder, which disables request_demo — a builder
             must not be able to request another build.
-        build_ctx: Caller-owned dict for a demo build: carries the ids to stamp
-            onto saved demos, and receives back the demo_id that was written so
-            the job runner can tell whether the build actually produced one.
+        build_ctx: Caller-owned dict for a builder run (demo or derivation):
+            carries the ids to stamp onto what is saved, and receives back the
+            demo_id / doc_id that was written so the job runner can tell whether
+            the build actually produced anything. Its presence is also the real
+            boundary that keeps save_demo and derivation_write away from the
+            tutor — allowed_tools is advisory under bypassPermissions.
 
     Returns:
         McpSdkServerConfig for use in ClaudeAgentOptions.mcp_servers
@@ -1544,6 +1547,353 @@ def create_learning_tools(
             return _error_result(f"Error requesting demo: {e}")
 
     # =====================================================================
+    # Derivations
+    # =====================================================================
+
+    @tool(
+        "request_derivation",
+        "Ask the derivation builder to work out a piece of mathematics in the "
+        "background: a multi-step derivation, a matrix being reduced, or "
+        "anything that needs its steps shown and checked. Returns immediately "
+        "— do NOT write the derivation yourself. Use this when a result is "
+        "worth more than one or two lines of algebra; keep short formulas "
+        "inline in chat. To revise one that exists, pass its base_doc_id.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short name, e.g. 'Gradient of logistic loss'",
+                },
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What to derive, in detail: the result to reach, where "
+                        "the learner is stuck, which step matters most, and "
+                        "whether a plot would help."
+                    ),
+                },
+                "concept_id": {
+                    "type": "string",
+                    "description": "Concept this belongs to, e.g. 'logistic_regression'",
+                },
+                "base_doc_id": {
+                    "type": "string",
+                    "description": "Set ONLY when revising an existing derivation.",
+                },
+            },
+            "required": ["title", "request"],
+        },
+    )
+    async def request_derivation_tool(args):
+        """Queue a background build and return a job id straight away.
+
+        Returns in microseconds, like request_demo and for the same reason: a
+        derivation with per-step verification takes long enough that building
+        it inline would freeze the learner's composer.
+        """
+        from backend.mathjobs import start_derivation_job
+
+        if session_ctx is None:
+            return _error_result(
+                "request_derivation is not available here. If you are the "
+                "derivation builder, call derivation_open and derivation_write."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            job = start_derivation_job(
+                email=email,
+                chat_session_id=session_ctx.get("session_id"),
+                title=args.get("title", ""),
+                concept_id=args.get("concept_id", ""),
+                request=args.get("request", ""),
+                base_doc_id=(args.get("base_doc_id") or "").strip() or None,
+            )
+            return _text_result(json.dumps({
+                "job_id": job["job_id"],
+                "status": "building",
+                "note": (
+                    "Building in the background. Say ONE sentence about what "
+                    "it will show, then carry on teaching — do not wait for it "
+                    "and do not write the derivation yourself."
+                ),
+            }))
+        except Exception as e:
+            logger.error(f"request_derivation error: {e}", exc_info=True)
+            return _error_result(f"Error requesting derivation: {e}")
+
+    @tool(
+        "derivation_open",
+        "Create the derivation document, before writing any blocks to it. "
+        "Builder only. Returns the doc_id the other derivation tools need.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short name for the derivation"},
+                "concept_id": {"type": "string", "description": "Concept this belongs to"},
+            },
+            "required": ["title"],
+        },
+    )
+    async def derivation_open_tool(args):
+        from backend.derivations import create_doc
+
+        if build_ctx is None:
+            return _error_result(
+                "derivation_open is not available here. Call "
+                "request_derivation(title, concept_id, request) instead."
+            )
+        try:
+            email = _email_from_dir(user_data_dir)
+            build = build_ctx or {}
+            doc = create_doc(
+                email=email,
+                title=args.get("title", "") or build.get("title", ""),
+                concept_id=args.get("concept_id", "") or build.get("concept_id", ""),
+                session_id=build.get("chat_session_id", ""),
+            )
+            build["doc_id"] = doc["id"]
+            return _text_result(json.dumps({
+                "doc_id": doc["id"],
+                "status": "open",
+                "note": "Now call derivation_write in waves — intuition first.",
+            }))
+        except Exception as e:
+            logger.error(f"derivation_open error: {e}", exc_info=True)
+            return _error_result(f"Error opening derivation: {e}")
+
+    @tool(
+        "derivation_write",
+        "Append blocks to a derivation. Blocks ADD to what is already there, "
+        "so call this several times as you work — intuition first, then the "
+        "steps, then any table or matrix — and the learner watches it fill in. "
+        "Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string", "description": "From derivation_open"},
+                "blocks": {
+                    "type": "array",
+                    "description": (
+                        "Blocks to append. Each has a 'kind': "
+                        "'text' {content}, 'latex' {content}, "
+                        "'derivation' {title, steps:[{expr, reason}]}, "
+                        "'matrix' {label, rows, ops}, "
+                        "'table' {headers, rows, caption}. "
+                        "Every derivation step needs a reason naming WHY that "
+                        "step follows. Brace function arguments: \\log{(x)} not "
+                        "\\log(x), or the step cannot be verified."
+                    ),
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["doc_id", "blocks"],
+        },
+    )
+    async def derivation_write_tool(args):
+        from backend.derivations import append_blocks
+
+        if build_ctx is None:
+            return _error_result(
+                "derivation_write is not available here. Call "
+                "request_derivation(title, concept_id, request) instead."
+            )
+        try:
+            email = _email_from_dir(user_data_dir)
+            doc = append_blocks(email, args.get("doc_id", ""), args.get("blocks") or [])
+            if doc is None:
+                return _error_result(f"No such derivation: {args.get('doc_id')}")
+
+            build = build_ctx or {}
+            build["doc_id"] = doc["id"]
+            # The job runner treats "opened but never written" as a failure, so
+            # this flag is what separates a real build from an empty one.
+            build["wrote_blocks"] = True
+
+            unverified = [
+                b["id"] for b in doc["blocks"]
+                if b["kind"] == "derivation"
+                and any(s.get("verified") is None and s.get("check") != "premise"
+                        for s in b.get("steps") or [])
+            ]
+            payload = {
+                "doc_id": doc["id"],
+                "blocks": len(doc["blocks"]),
+                "status": "written",
+            }
+            if unverified:
+                payload["next"] = (
+                    "Call derivation_verify on: " + ", ".join(unverified)
+                )
+            return _text_result(json.dumps(payload))
+        except ValueError as e:
+            return _error_result(f"Derivation rejected: {e}")
+        except Exception as e:
+            logger.error(f"derivation_write error: {e}", exc_info=True)
+            return _error_result(f"Error writing derivation: {e}")
+
+    @tool(
+        "derivation_verify",
+        "Check a derivation block's steps with sympy and stamp each one "
+        "verified. Call this on every derivation block you write. A step that "
+        "comes back false is WRONG — fix it, do not leave it on screen. "
+        "Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "block_id": {
+                    "type": "string",
+                    "description": "The derivation block to check",
+                },
+            },
+            "required": ["doc_id", "block_id"],
+        },
+    )
+    async def derivation_verify_tool(args):
+        from backend.derivations import get_doc, update_block
+        from backend.mathverify import verify_steps
+
+        if build_ctx is None:
+            return _error_result("derivation_verify is not available here.")
+        try:
+            email = _email_from_dir(user_data_dir)
+            doc = get_doc(email, args.get("doc_id", ""))
+            if doc is None:
+                return _error_result(f"No such derivation: {args.get('doc_id')}")
+
+            block_id = args.get("block_id", "")
+            block = next((b for b in doc["blocks"] if b["id"] == block_id), None)
+            if block is None:
+                return _error_result(f"No such block: {block_id}")
+            if block["kind"] != "derivation":
+                return _error_result(
+                    f"Block {block_id} is a {block['kind']}, not a derivation"
+                )
+
+            checked = verify_steps(block.get("steps") or [])
+            update_block(email, doc["id"], block_id, steps=checked)
+
+            wrong = [
+                {"step": i + 1, "expr": s["expr"][:120], "why": s["check"][:160]}
+                for i, s in enumerate(checked) if s["verified"] is False
+            ]
+            unchecked = sum(
+                1 for i, s in enumerate(checked)
+                if s["verified"] is None and i > 0
+            )
+            payload = {
+                "verified": sum(1 for s in checked if s["verified"] is True),
+                "wrong": wrong,
+                "unchecked": unchecked,
+            }
+            if wrong:
+                payload["action"] = (
+                    "These steps do not follow. Rewrite them and call "
+                    "derivation_verify again."
+                )
+            elif unchecked:
+                payload["note"] = (
+                    "Unchecked steps are usually unbraced functions — write "
+                    "\\log{(x)} rather than \\log(x) — or prose inside the expr."
+                )
+            return _text_result(json.dumps(payload))
+        except Exception as e:
+            logger.error(f"derivation_verify error: {e}", exc_info=True)
+            return _error_result(f"Error verifying derivation: {e}")
+
+    @tool(
+        "derivation_read",
+        "Read a derivation's blocks back, before revising it. Builder only.",
+        {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}},
+            "required": ["doc_id"],
+        },
+    )
+    async def derivation_read_tool(args):
+        from backend.derivations import get_doc
+
+        if build_ctx is None:
+            return _error_result("derivation_read is not available here.")
+        try:
+            email = _email_from_dir(user_data_dir)
+            doc = get_doc(email, args.get("doc_id", ""))
+            if doc is None:
+                return _error_result(f"No such derivation: {args.get('doc_id')}")
+            return _text_result(json.dumps({
+                "doc_id": doc["id"],
+                "title": doc.get("title"),
+                "blocks": doc.get("blocks") or [],
+            }))
+        except Exception as e:
+            logger.error(f"derivation_read error: {e}", exc_info=True)
+            return _error_result(f"Error reading derivation: {e}")
+
+    @tool(
+        "derivation_plot",
+        "Add a plot to a derivation from a figure a run_code cell just saved. "
+        "Run the matplotlib code first with run_code (save as .svg), then pass "
+        "the run_id and the filename here. Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id whose figure to attach",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Figure filename from that run, e.g. '_plot_001.svg'",
+                },
+                "caption": {"type": "string", "description": "One line: what it shows"},
+            },
+            "required": ["doc_id", "run_id", "filename"],
+        },
+    )
+    async def derivation_plot_tool(args):
+        """Copy a figure out of scratch and into the document.
+
+        The copy is the point: run artifacts live under a swept scratch dir with
+        an hour TTL and do not survive a reboot, so a doc that merely linked one
+        would render a hole by tomorrow.
+        """
+        from backend.derivations import add_plot
+        from backend.sandbox import run_dir_for
+
+        if build_ctx is None:
+            return _error_result("derivation_plot is not available here.")
+        try:
+            email = _email_from_dir(user_data_dir)
+            run_id = (args.get("run_id") or "").strip()
+            # Shape _new_run_dir produces. The id reaches here from the model,
+            # so a traversal attempt must never become a path.
+            if not re.match(r"^run_\d+_[a-f0-9]+$", run_id):
+                return _error_result(f"Invalid run_id: {run_id!r}")
+            filename = os.path.basename(args.get("filename", ""))
+            source = os.path.join(str(run_dir_for(email, run_id)), filename)
+            if not os.path.isfile(source):
+                return _error_result(
+                    f"No figure {filename!r} in run {args.get('run_id')!r}. "
+                    "Check the run saved it, and that the run has not expired."
+                )
+            doc = add_plot(email, args.get("doc_id", ""), source,
+                           caption=args.get("caption", ""))
+            build_ctx["wrote_blocks"] = True
+            return _text_result(json.dumps({
+                "doc_id": doc["id"],
+                "blocks": len(doc["blocks"]),
+                "status": "plot added",
+            }))
+        except ValueError as e:
+            return _error_result(f"Plot rejected: {e}")
+        except Exception as e:
+            logger.error(f"derivation_plot error: {e}", exc_info=True)
+            return _error_result(f"Error adding plot: {e}")
+
+    # =====================================================================
     # Create MCP Server
     # =====================================================================
 
@@ -1572,6 +1922,12 @@ def create_learning_tools(
             search_demos_tool,
             get_demo_source_tool,
             request_demo_tool,
+            request_derivation_tool,
+            derivation_open_tool,
+            derivation_write_tool,
+            derivation_verify_tool,
+            derivation_read_tool,
+            derivation_plot_tool,
         ],
     )
 

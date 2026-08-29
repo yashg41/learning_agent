@@ -650,7 +650,7 @@
                             ${isSearch ? `<span class="doc-similarity">${(d._similarity * 100).toFixed(1)}% match</span>` : ""}
                             ${d.session_id ? `
                                 <a class="doc-open" title="Open this conversation and keep going"
-                                   href="/?session=${encodeURIComponent(d.session_id)}&email=${encodeURIComponent(d.email || "")}"
+                                   href="/?session=${encodeURIComponent(d.session_id)}&email=${encodeURIComponent((d.email || "").toLowerCase())}"
                                    onclick="event.stopPropagation()">open session →</a>` : ""}
                         </div>`;
 

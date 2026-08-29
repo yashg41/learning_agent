@@ -29,7 +29,11 @@ from backend.memory import (
     _safe_email,
 )
 from backend.demos import demo_digest, format_session_demos
-from backend.prompts import DEMO_BUILDER_PROMPT, build_system_prompt
+from backend.prompts import (
+    DEMO_BUILDER_PROMPT,
+    DERIVATION_BUILDER_PROMPT,
+    build_system_prompt,
+)
 from backend.replay import (
     session_exists_in_claude,
     session_exists_in_memory,
@@ -113,6 +117,10 @@ MCP_TOOL_NAMES = [
     # Reads slices of a demo's source when the learner asks about one. Capped
     # and query-required — the tutor never gets the whole document.
     "mcp__learning-tools__get_demo_source",
+    # Same split as demos: the tutor asks for a derivation, the builder writes
+    # it. Keeping derivation_write off this list is what stops the tutor
+    # assembling one inline and stalling the turn.
+    "mcp__learning-tools__request_derivation",
     # Built-ins, not MCP: the tutor's only route to anything newer than the
     # model's cutoff. Listed here for accuracy even though the allowlist is
     # advisory under bypassPermissions — what actually admits them is their
@@ -132,6 +140,19 @@ DEMO_BUILDER_TOOL_NAMES = [
     "mcp__learning-tools__save_demo",
     "mcp__learning-tools__update_demo",
     "mcp__learning-tools__get_demo_html",
+]
+
+# The derivation builder writes blocks and verifies them. run_code is included
+# because a derivation may need a plot, and verification is the whole point of
+# the surface — but nothing else, so a build cannot wander into quiz or profile
+# tools.
+DERIVATION_BUILDER_TOOL_NAMES = [
+    "mcp__learning-tools__derivation_open",
+    "mcp__learning-tools__derivation_write",
+    "mcp__learning-tools__derivation_verify",
+    "mcp__learning-tools__derivation_read",
+    "mcp__learning-tools__derivation_plot",
+    "mcp__learning-tools__run_code",
 ]
 
 # Built-in tools the tutor must never reach. This is the real restriction:
@@ -197,6 +218,7 @@ async def run_agent(
     set_active: bool = True,
     attachments: list[dict] | None = None,
     demo_ref: dict | None = None,
+    derivation_ref: dict | None = None,
 ) -> str | None:
     """Run the learning agent for a user.
 
@@ -247,6 +269,31 @@ async def run_agent(
             )
         else:
             logger.warning(f"demo_ref {demo_ref['demo_id']} not found for {email}")
+
+    # Same idea for a derivation the learner is pointing at. Cheaper than the
+    # demo case — a derivation is already structured, so the digest IS the
+    # content rather than a summary of markup.
+    if derivation_ref and derivation_ref.get("doc_id"):
+        from backend.derivations import derivation_digest
+
+        digest = derivation_digest(
+            email, derivation_ref["doc_id"], derivation_ref.get("selection")
+        )
+        if digest:
+            prompt = (
+                "[The learner is asking about this derivation, open in their "
+                "Maths pane. Steps marked WRONG failed a sympy check; steps "
+                "marked unchecked could not be verified, usually because of "
+                "ambiguous notation.\n\n"
+                f"{digest}\n\n"
+                "Answer their question about it. To revise the derivation "
+                "itself, call request_derivation with base_doc_id.]\n\n"
+                f"{prompt}"
+            )
+        else:
+            logger.warning(
+                f"derivation_ref {derivation_ref['doc_id']} not found for {email}"
+            )
 
     # Write attachments to disk before the SDK call so the transcript can
     # record paths. The base64 goes to the model but is never persisted.
@@ -415,6 +462,56 @@ async def run_demo_builder(
         email=None,
         allowed_tools=DEMO_BUILDER_TOOL_NAMES,
         # None so a builder cannot recursively request another demo.
+        session_ctx=None,
+        build_ctx=build_ctx,
+    )
+
+
+async def run_derivation_builder(
+    email: str,
+    request: str,
+    chat_session_id: str | None = None,
+    resume_builder_session: str | None = None,
+    on_event=None,
+    build_ctx: dict | None = None,
+) -> str | None:
+    """Build (or revise) a derivation in a session of its own. Returns its id.
+
+    Same shape as run_demo_builder and for the same reasons: a derivation with
+    per-step verification takes long enough that doing it inside the chat turn
+    would freeze the composer.
+
+    Context comes from *forking* the chat session rather than a prose brief — a
+    summary of twenty turns produces a generic derivation, whereas a fork
+    inherits what the learner actually got stuck on. The fork writes to a new
+    session id, so the tutor's transcript is never appended to.
+
+    email is deliberately NOT passed to run_agent_internal: that is what gates
+    MemoryStore construction and _extract_and_save_exchange, so the builder gets
+    tools without writing half-finished derivations into episodic memory.
+    """
+    from backend.replay import session_exists_in_claude
+
+    user_data_dir = _get_user_data_dir(email)
+
+    if resume_builder_session and session_exists_in_claude(resume_builder_session):
+        resume, fork = resume_builder_session, False
+    elif chat_session_id and session_exists_in_claude(chat_session_id):
+        resume, fork = chat_session_id, True
+    else:
+        resume, fork = None, False
+        logger.info("Derivation builder starting with no session context")
+
+    return await run_agent_internal(
+        prompt=request,
+        session_id=resume,
+        fork_session=fork,
+        system_prompt=DERIVATION_BUILDER_PROMPT,
+        user_data_dir=user_data_dir,
+        on_event=on_event,
+        email=None,
+        allowed_tools=DERIVATION_BUILDER_TOOL_NAMES,
+        # None so a builder cannot recursively request another derivation.
         session_ctx=None,
         build_ctx=build_ctx,
     )

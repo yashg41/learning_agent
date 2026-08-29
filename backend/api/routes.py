@@ -61,6 +61,7 @@ class ChatRequest(BaseModel):
     # turns this into a structural digest — the client never decides what the
     # model sees, and the html is never sent.
     demo_ref: dict | None = None
+    derivation_ref: dict | None = None
 
 
 def _validate_attachments(attachments: list[Attachment] | None) -> list[Attachment]:
@@ -133,6 +134,7 @@ async def chat_stream(body: ChatRequest):
                 set_active=body.set_active,
                 attachments=[a.model_dump() for a in attachments],
                 demo_ref=body.demo_ref,
+                derivation_ref=body.derivation_ref,
             )
         except Exception as e:
             await event_queue.put({"type": "error", "content": str(e)})
@@ -1736,3 +1738,130 @@ async def cancel_demo_job_route(email: str, job_id: str):
     if not request_cancel(email, job_id):
         raise HTTPException(status_code=404, detail="Job not found or already finished")
     return {"ok": True}
+
+
+# =====================================================================
+# Derivations
+# =====================================================================
+#
+# A derivation is an ordered list of typed blocks, rendered in a read-only pane
+# beside the chat. Builds run in the background exactly as demo builds do, so
+# these routes cover both the documents and the jobs that produce them.
+
+
+@router.get("/derivations/{email}")
+async def list_derivations_route(email: str):
+    """List a learner's derivations for the picker."""
+    from backend.derivations import list_docs
+
+    return {"derivations": list_docs(email)}
+
+
+@router.get("/derivations/{email}/{doc_id}")
+async def get_derivation_route(email: str, doc_id: str):
+    """Full derivation, for rendering into the pane and for chat fences."""
+    from backend.derivations import get_doc
+
+    doc = get_doc(email, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Derivation not found")
+    return doc
+
+
+@router.get("/derivations/{email}/{doc_id}/assets/{filename}")
+async def derivation_asset_route(email: str, doc_id: str, filename: str):
+    """Serve a plot copied into a derivation.
+
+    Same containment discipline as code_artifact: resolve everything, then
+    check, so a traversal attempt lands outside the doc's asset directory and
+    is refused. These files are copies precisely so they outlive the swept run
+    directory the figure came from.
+    """
+    from fastapi.responses import FileResponse
+
+    from backend.derivations import doc_assets_dir
+
+    try:
+        base = os.path.realpath(doc_assets_dir(email, doc_id))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not found")
+    target = os.path.realpath(os.path.join(base, filename))
+
+    # commonpath, not startswith: the latter says /a/b-evil is inside /a/b.
+    if target != base and os.path.commonpath([base, target]) != base:
+        raise HTTPException(status_code=404, detail="not found")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="not found")
+
+    return FileResponse(target)
+
+
+@router.delete("/derivations/{email}/{doc_id}")
+async def delete_derivation_route(email: str, doc_id: str):
+    from backend.derivations import delete_doc
+
+    if not delete_doc(email, doc_id):
+        raise HTTPException(status_code=404, detail="Derivation not found")
+    return {"ok": True}
+
+
+@router.get("/derivation-jobs/{email}")
+async def list_derivation_jobs_route(email: str):
+    from backend.mathjobs import list_jobs, sweep_stale
+
+    # A job left BUILDING by a restart would otherwise spin forever in the UI.
+    sweep_stale(email)
+    return {"jobs": list_jobs(email)}
+
+
+@router.get("/derivation-jobs/{email}/{job_id}")
+async def get_derivation_job_route(email: str, job_id: str):
+    from backend.mathjobs import get_job
+
+    record = get_job(email, job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return record
+
+
+@router.post("/derivation-jobs/{email}/{job_id}/cancel")
+async def cancel_derivation_job_route(email: str, job_id: str):
+    """Stop a running build. Explicit only — closing the tab does not cancel."""
+    from backend.mathjobs import request_cancel
+
+    if not request_cancel(email, job_id):
+        raise HTTPException(status_code=404, detail="Job not found or already finished")
+    return {"ok": True}
+
+
+class EditDerivationRequest(BaseModel):
+    """A change asked for by talking to the derivation directly, not the tutor."""
+    request: str
+
+
+@router.post("/derivations/{email}/{doc_id}/edit")
+async def edit_derivation_route(email: str, doc_id: str, body: EditDerivationRequest):
+    """Ask the builder to change this derivation. Returns a job immediately.
+
+    Same pipeline as a tutor-delegated change: both resume the derivation's own
+    builder session, so an edit is incremental either way.
+    """
+    from backend.derivations import get_doc
+    from backend.mathjobs import start_derivation_job
+
+    doc = get_doc(email, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Derivation not found")
+
+    request = (body.request or "").strip()
+    if not request:
+        raise HTTPException(status_code=400, detail="request is empty")
+
+    return start_derivation_job(
+        email=email,
+        chat_session_id=doc.get("session_id") or None,
+        title=doc.get("title", ""),
+        concept_id=doc.get("concept_id", ""),
+        request=request,
+        base_doc_id=doc_id,
+    )

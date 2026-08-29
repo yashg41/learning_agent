@@ -17,6 +17,7 @@
          and should win without !important. -->
     <link rel="stylesheet" href="/static/notes.css">
     <link rel="stylesheet" href="/static/demo-pane.css">
+    <link rel="stylesheet" href="/static/derivation.css">
     <script>
         // Applied before first paint so the page never flashes the wrong theme.
         // ?theme= wins (useful for screenshots), then the saved choice, then
@@ -91,6 +92,8 @@
                                 title="Notes canvas (⌘E)">&#9998; Notes</button>
                         <button id="demo-btn" class="header-btn" onclick="toggleDemo()"
                                 title="Interactive demos — ask the tutor to build one">&#9654; Demo</button>
+                        <button id="derivation-btn" class="header-btn" onclick="toggleDerivation()"
+                                title="Derivations — ask the tutor to work one out">&#8747; Maths</button>
                         <button class="rail-toggle" id="toggle-right" onclick="toggleRail('right')"
                                 title="Hide panel (⌘])">⊟</button>
                     </div>
@@ -304,6 +307,48 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Derivation pane (hidden by default; toggled by the Maths
+                 button). Read-only: a derivation is a sequence, so blocks
+                 stack in order with no positioning. Rendered in this document
+                 rather than an iframe — unlike a demo, the content is
+                 structured data we own the renderer for, which is what lets it
+                 reuse the page's KaTeX. -->
+            <div class="derivation-pane" id="derivation-pane" style="display:none">
+                <div class="derivation-header">
+                    <select class="derivation-picker" id="derivation-picker"
+                            onchange="onDerivationPicked()" title="Switch derivation"></select>
+                    <div class="derivation-header-actions">
+                        <button class="header-btn derivation-ask-btn" onclick="askTutorAboutDerivation()"
+                                title="Ask the tutor about this derivation">? Ask</button>
+                        <button class="header-btn" id="derivation-revise-btn" onclick="toggleDerivationChat()"
+                                title="Revise this derivation">&#9998; Revise</button>
+                        <button class="header-btn" onclick="toggleDerivation()"
+                                title="Hide derivations">&times;</button>
+                    </div>
+                </div>
+                <!-- Appears while something in the pane is highlighted. Unlike
+                     the demo equivalent this needs no postMessage: the pane is
+                     same-origin, so the selection is readable directly. -->
+                <div class="derivation-selection-bar" id="derivation-selection-bar" style="display:none">
+                    <span class="derivation-selection-label">Selected:</span>
+                    <span class="derivation-selection-text" id="derivation-selection-text"></span>
+                    <button class="derivation-selection-ask" onclick="askTutorAboutDerivation()">Ask tutor about this</button>
+                </div>
+                <div class="derivation-body" id="derivation-body"></div>
+                <!-- Revise THIS derivation. Docked rather than floating, for
+                     the same reason as the demo box: a floating window would
+                     cover the steps being discussed. -->
+                <div class="derivation-chat" id="derivation-chat" style="display:none">
+                    <div class="derivation-chat-log" id="derivation-chat-log"></div>
+                    <div class="derivation-chat-input">
+                        <input type="text" id="derivation-chat-text"
+                               placeholder="Change this derivation — “expand step 3”. Not a chat."
+                               onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDerivationEdit();}">
+                        <button id="derivation-chat-send" onclick="sendDerivationEdit()">Send</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Right Panel (Knowledge Dashboard) -->
@@ -440,5 +485,8 @@
     <!-- After notes.js: reuses its pane-divider helpers (syncPaneSplit) and
          cooperates with toggleNotes for pane exclusivity. -->
     <script src="/static/demo-pane.js"></script>
+    <!-- After both: joins the same pane-exclusivity handshake, and reuses the
+         page's KaTeX (loaded above) rather than shipping its own. -->
+    <script src="/static/derivation-pane.js"></script>
 </body>
 </html>

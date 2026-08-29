@@ -15,7 +15,16 @@ choose would arrive too late to influence the choice.
 | Skill | For | Covers |
 |---|---|---|
 | [interactive-demo](interactive-demo/SKILL.md) | the demo builder agent | Structure and constraints for a self-contained HTML demo. Overflow in `references/patterns.md`. |
+| [derivation-builder](derivation-builder/SKILL.md) | the derivation builder agent | Block kinds, writing in waves, verifying every step with sympy, copying plots in. |
 | [code-execution](code-execution/SKILL.md) | the tutor | `run_code` mechanics: the `verified:<id>` placeholder, `%pip install`, background jobs, reading a result. |
+| [teaching-mathematics](teaching-mathematics/SKILL.md) | the tutor | The intuition-then-derivation shape, per-domain guidance, notation, checking algebra with sympy. |
+
+The split for maths follows the rule above. **Whether** to reach for a
+derivation is a decision, so the trigger words and `request_derivation` live in
+[15_mathematics.md](../../backend/prompt_files/15_mathematics.md); **how** to
+explain one is mechanics, so it lives in `teaching-mathematics`. That section was
+938 words before the split — 30% of the whole tutor prompt, on every turn,
+including the ones about dictionaries.
 
 ## What actually gets sent
 

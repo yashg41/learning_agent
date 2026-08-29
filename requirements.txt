@@ -11,3 +11,9 @@ python-multipart
 # image dimensions. Imported lazily — without it the app still runs and only
 # PDF import is disabled.
 PyMuPDF
+# Checks each derivation step. sympy does the algebra; lark is the LaTeX parser
+# backend it uses. sympy also ships a parse_latex that needs the antlr4 runtime
+# instead — lark is the pure-Python one, so it is what we depend on. Without
+# lark every step verification fails closed and a derivation cannot be checked.
+sympy
+lark

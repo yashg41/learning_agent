@@ -107,5 +107,16 @@ def demo_builder_prompt() -> str:
     return _read("demo_builder.md")
 
 
-# Back-compat: agent.py imports this name directly.
+def derivation_builder_prompt() -> str:
+    """The derivation builder's entire system prompt.
+
+    Like the demo builder: forks the tutor's conversation for context but not
+    its system prompt, so the one job it has is not competing with the quiz
+    protocol and the memory rules.
+    """
+    return _read("derivation_builder.md")
+
+
+# Back-compat: agent.py imports these names directly.
 DEMO_BUILDER_PROMPT = demo_builder_prompt()
+DERIVATION_BUILDER_PROMPT = derivation_builder_prompt()

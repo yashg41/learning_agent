@@ -66,7 +66,7 @@ Anything the learner is meant to actually run should be a verified placeholder.
 
 - **Fresh process every call.** No shared state — variables never carry between
   runs. Every snippet must stand alone, including its imports.
-- **Preinstalled**: numpy, matplotlib, qiskit, scikit-learn.
+- **Preinstalled**: numpy, matplotlib, qiskit, qiskit-aer, sympy, lark. NOT scikit-learn — `%pip install scikit-learn` first if you need it.
 - **Prints are how you see values.** A bare expression on the last line shows
   nothing, unlike a notebook.
 - **`plt.show()` works** and saves the figure. You get the filename back, not

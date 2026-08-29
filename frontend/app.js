@@ -184,6 +184,66 @@ function initAttachments(chatFor, { inputEl, dropZone, attachBtnEl, attachInputE
 // A $$…$$ span, non-greedy so consecutive formulas do not merge into one.
 const MATH_SPAN_RE = /\$\$[\s\S]+?\$\$/g;
 
+// A single-$ span, on one line and not adjacent to another $ on either side
+// (so the $$ spans this runs alongside are never half-matched). The body may
+// not contain a $ or a newline: real inline math is short and self-contained,
+// and both restrictions stop a stray delimiter from swallowing a paragraph.
+const MATH_SOLO_DOLLAR_RE = /(?<!\$)\$([^$\n]+)\$(?!\$)/g;
+
+// Characters that only appear in notation, never in a price. `$5,000` and
+// "from $5 to $10" have none of them; `$z_{\alpha/2}$`, `$p(1-p)$` and
+// `$(p_1 - p_0)^2$` each have at least one.
+const MATH_LATEXY_RE = /[\\^_{}()]/;
+
+/**
+ * Promote single-$ inline math to the $$…$$ the renderer understands.
+ *
+ * The model is told to write $$…$$ for inline math too, and mostly does — but
+ * a long turn heavy on notation slips back to the $…$ habit, and the result
+ * is raw LaTeX on the learner's screen. Normalising here is a repair for that
+ * slip, not a second supported delimiter.
+ *
+ * Deliberately biased toward math: a body carrying any LaTeX-ish character is
+ * promoted. That misreads a price written like `$x^2` — vanishingly rare, and
+ * a mangled price costs less than an unreadable formula, which is the call the
+ * app makes everywhere else notation is involved.
+ *
+ * Must run BEFORE marked sees the text, so the promoted span is held out with
+ * the rest. Promoting later would let the parser reach a bare `_` and split
+ * the formula across <em> elements, which is the exact bug the hold-out exists
+ * to prevent.
+ */
+function promoteInlineMath(text) {
+    if (text.indexOf("$") === -1) return text;
+    // Code is exempt. A shell `$HOME`, an f-string or a `$rate_a` variable is
+    // not math, and MATH_BASE.ignoredTags would have kept it literal — but that
+    // guard runs on the DOM, long after this. So the split has to happen here:
+    // promote prose, pass code through untouched.
+    return splitOnCode(text).map(part =>
+        part.isCode
+            ? part.text
+            : part.text.replace(MATH_SOLO_DOLLAR_RE, (m, body) =>
+                MATH_LATEXY_RE.test(body) ? `$$${body}$$` : m)
+    ).join("");
+}
+
+// A fenced block (``` … ```, closed or still streaming) or an inline `…` span.
+// Fences come first so a stray backtick inside one cannot end the region early.
+const CODE_REGION_RE = /```[\s\S]*?(?:```|$)|`[^`\n]*`/g;
+
+/** Split text into alternating prose and code parts, in source order. */
+function splitOnCode(text) {
+    const parts = [];
+    let last = 0;
+    for (const m of text.matchAll(CODE_REGION_RE)) {
+        if (m.index > last) parts.push({ text: text.slice(last, m.index), isCode: false });
+        parts.push({ text: m[0], isCode: true });
+        last = m.index + m[0].length;
+    }
+    if (last < text.length) parts.push({ text: text.slice(last), isCode: false });
+    return parts;
+}
+
 /**
  * Render markdown, holding $$…$$ spans out of the parser.
  *
@@ -204,6 +264,17 @@ const MATH_SPAN_RE = /\$\$[\s\S]+?\$\$/g;
 function renderMarkdown(text) {
     if (!text) return "";
     if (typeof marked === "undefined") return escapeHtml(text);
+
+    // Normalise the model's $…$ slips up to $$…$$ first, so everything below
+    // — the backtick unwrap and the hold-out — sees a single delimiter.
+    text = promoteInlineMath(text);
+
+    // A formula the model wrapped in backticks is still a formula, but marked
+    // turns it into <code> and MATH_BASE.ignoredTags then skips it — so it
+    // reaches the learner as raw LaTeX in a code chip. Unwrap before the
+    // hold-out. Only single backticks around a WHOLE span: a fenced block is
+    // real code and must keep its ticks.
+    text = text.replace(/`(\$\$[\s\S]+?\$\$)`/g, "$1");
 
     const spans = [];
     // The placeholder must survive markdown untouched and never occur in real
@@ -254,6 +325,7 @@ function enrichMessage(el) {
     renderMathIn(el);
     renderMermaidIn(el);
     expandVerifiedIn(el);
+    expandDerivationsIn(el);
     highlightCodeIn(el);
     addRunButtonsIn(el);
 }
@@ -484,6 +556,77 @@ function markVerifiedUnavailable(pre, block) {
     block.className = "";
     block.textContent =
         "This code sample is no longer available. Ask and I'll run it again.";
+}
+
+/**
+ * Expand ```derivation:<doc_id> fences into the rendered derivation.
+ *
+ * Exactly the verified: mechanism, for the same reason: the derivation shown
+ * in chat is the one that was built and CHECKED, not a copy the model retyped.
+ * Retyping is how a step that never passed sympy ends up on screen wearing a
+ * tick.
+ *
+ * Ids arrive from chat text, so the shape is validated before it reaches the
+ * network — and the pane's own renderer does the drawing, so nothing here has
+ * to trust the block content as markup.
+ */
+function expandDerivationsIn(el) {
+    const email = getEmail();
+    promoteBareDerivationRefs(el);
+    el.querySelectorAll("pre code").forEach(block => {
+        const cls = Array.from(block.classList)
+            .find(c => c.startsWith("language-derivation:"));
+        if (!cls) return;
+        const pre = block.parentElement;
+        if (!pre || pre.dataset.derivationState) return;
+
+        const docId = cls.slice("language-derivation:".length).trim();
+        if (!/^d_[0-9a-f]{6,32}$/.test(docId) || !email) {
+            markDerivationUnavailable(pre);
+            return;
+        }
+
+        pre.dataset.derivationState = "loading";
+        block.textContent = "Loading derivation…";
+
+        fetch(`${API_BASE}/api/derivations/${encodeURIComponent(email)}/${encodeURIComponent(docId)}`)
+            .then(res => res.ok ? res.json() : Promise.reject(res.status))
+            .then(doc => {
+                if (typeof renderDerivationInline !== "function") {
+                    markDerivationUnavailable(pre);
+                    return;
+                }
+                pre.dataset.derivationState = "ready";
+                const host = document.createElement("div");
+                host.className = "dv-inline";
+                host.innerHTML = renderDerivationInline(doc, email);
+                pre.replaceWith(host);
+                if (typeof typesetDeriv === "function") typesetDeriv(host);
+            })
+            .catch(() => markDerivationUnavailable(pre));
+    });
+}
+
+/** Same rescue as promoteBareVerifiedRefs, for derivation citations. */
+function promoteBareDerivationRefs(el) {
+    const RE = /^\s*(?:```)?\s*derivation:(d_[0-9a-f]{6,32})\s*(?:```)?\s*$/;
+    el.querySelectorAll("p").forEach(p => {
+        const m = (p.textContent || "").match(RE);
+        if (!m) return;
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.className = `language-derivation:${m[1]}`;
+        pre.appendChild(code);
+        p.replaceWith(pre);
+    });
+}
+
+function markDerivationUnavailable(pre) {
+    pre.dataset.derivationState = "missing";
+    pre.classList.add("is-verified-missing");
+    const block = pre.querySelector("code") || pre;
+    block.className = "";
+    block.textContent = "This derivation is no longer available.";
 }
 
 /**
@@ -1127,8 +1270,14 @@ async function loadSessionHistory(email, sessionId) {
                         );
                     } else {
                         // Restores the chip's job id; resumeDemoJobs then
-                        // re-attaches any build still running.
+                        // re-attaches any build still running. Each call
+                        // no-ops unless the chip is its own kind.
                         attachDemoJob(
+                            turn.tool_use_id || `hist-${turn.index}`,
+                            turn.content,
+                            container,
+                        );
+                        attachDerivationJob(
                             turn.tool_use_id || `hist-${turn.index}`,
                             turn.content,
                             container,
@@ -1176,7 +1325,10 @@ async function loadSessionHistory(email, sessionId) {
 
 function getEmail() {
     const el = document.getElementById("email-input");
-    return el.value.trim();
+    // Lowercased because this is an identity key, not a display string: the
+    // backend stores it in ChromaDB metadata and filters on exact match, so
+    // "YASHG41" and "yashg41" would be two learners with two half-histories.
+    return el.value.trim().toLowerCase();
 }
 
 function cleanToolName(name) {
@@ -1262,6 +1414,26 @@ function addToolCard(toolName, toolInput, toolUseId, container) {
         summary = toolInput.level || "profile update";
     } else if (displayName === "save_demo" || displayName === "request_demo") {
         summary = toolInput.title || "interactive demo";
+    } else if (displayName === "request_derivation") {
+        summary = toolInput.title || "derivation";
+    }
+
+    // Same background-build shape as request_demo: the chip starts building and
+    // the job poller drives it to ready/failed — see derivation-pane.js.
+    if (displayName === "request_derivation") {
+        div.classList.add("is-derivation", "is-building");
+        div.innerHTML = `
+            <div class="tool-header">
+                <span class="tool-icon">∫</span>
+                <span class="tool-name">derivation</span>
+                <span class="tool-summary">${escapeHtml(summary)}</span>
+                <span class="derivation-chip-status">building…</span>
+                <button class="derivation-open-btn" type="button" style="display:none">Open</button>
+            </div>
+        `;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
     }
 
     // A demo requested from the tutor is built in the background, so the chip
@@ -1381,6 +1553,30 @@ function attachDemoJob(toolUseId, resultContent, container) {
 
     card.dataset.jobId = jobId;
     if (typeof trackDemoJob === "function") trackDemoJob(jobId, card);
+}
+
+/** Bind a request_derivation chip to its background build.
+ *
+ * Same shape as attachDemoJob and for the same reason: the job id exists only
+ * in the tool RESULT, so the chip is matched back by tool_use_id.
+ */
+function attachDerivationJob(toolUseId, resultContent, container) {
+    if (!toolUseId || !resultContent) return;
+    container = container || mainMessagesEl();
+    const scope = container.id || "chat-messages";
+    const card = document.getElementById(`tool-${scope}-${toolUseId}`);
+    if (!card || !card.classList.contains("is-derivation")) return;
+
+    let jobId = null;
+    try {
+        jobId = JSON.parse(resultContent).job_id || null;
+    } catch {
+        return;  // not a request_derivation result
+    }
+    if (!jobId) return;
+
+    card.dataset.jobId = jobId;
+    if (typeof startDerivJobPolling === "function") startDerivJobPolling();
 }
 
 function addEventLog(event) {
@@ -1520,6 +1716,7 @@ class ChatController {
         // {demo_id, title, selection}. Only the id and selection go to the
         // server, which builds the digest — see run_agent's demo_ref.
         this.pendingDemoRef = null;
+        this.pendingDerivationRef = null;
         this.attachStripEl = attachStripEl;
         this.attachBtnEl = attachBtnEl;
         this.attachInputEl = attachInputEl;
@@ -1629,6 +1826,32 @@ class ChatController {
 
             strip.appendChild(chip);
         }
+
+        // Same chip, for a derivation the learner pointed at.
+        if (this.pendingDerivationRef) {
+            const chip = document.createElement("div");
+            chip.className = "attach-demo-chip";
+
+            const label = document.createElement("span");
+            const sel = this.pendingDerivationRef.selection;
+            label.textContent = sel && sel.text
+                ? `∫ ${sel.text.slice(0, 28)}`
+                : `∫ ${this.pendingDerivationRef.title || "derivation"}`;
+            label.title = this.pendingDerivationRef.title || "";
+            chip.appendChild(label);
+
+            const rm = document.createElement("button");
+            rm.className = "attach-demo-remove";
+            rm.textContent = "×";
+            rm.title = "Don't ask about this derivation";
+            rm.onclick = (e) => {
+                e.stopPropagation();
+                this.setDerivationRef(null);
+            };
+            chip.appendChild(rm);
+
+            strip.appendChild(chip);
+        }
     }
 
     /** Stage (or clear) a demo the next message is asking about. */
@@ -1637,9 +1860,15 @@ class ChatController {
         this.renderAttachments();
     }
 
+    setDerivationRef(ref) {
+        this.pendingDerivationRef = ref;
+        this.renderAttachments();
+    }
+
     clearAttachments() {
         this.pendingAttachments = [];
         this.pendingDemoRef = null;
+        this.pendingDerivationRef = null;
         this.renderAttachments();
         // Reset the picker too, or re-choosing the same file fires no change.
         if (this.attachInputEl) this.attachInputEl.value = "";
@@ -1655,6 +1884,7 @@ class ChatController {
         const message = this.inputEl.value.trim();
         const attachments = this.pendingAttachments.slice();
         const demoRef = this.pendingDemoRef;
+        const derivationRef = this.pendingDerivationRef;
         // An image on its own is a complete question ("what's wrong here?"),
         // so only bail when there's neither text nor an image.
         if (!message && !attachments.length) return;
@@ -1716,6 +1946,14 @@ class ChatController {
                 requestBody.demo_ref = {
                     demo_id: demoRef.demo_id,
                     selection: demoRef.selection || null,
+                };
+            }
+            // Same contract as demo_ref: id and highlight only. The server
+            // builds the digest, so the blocks never enter the transcript.
+            if (derivationRef && derivationRef.doc_id) {
+                requestBody.derivation_ref = {
+                    doc_id: derivationRef.doc_id,
+                    selection: derivationRef.selection || null,
                 };
             }
 
@@ -1875,10 +2113,17 @@ class ChatController {
                                     this.messagesEl,
                                 );
                             } else if (this.isMain) {
-                                // request_demo returns the job id here — the
-                                // call itself has no way to know it. This is
-                                // what binds the chip to the background build.
+                                // request_demo / request_derivation return the
+                                // job id here — the call itself has no way to
+                                // know it. This is what binds the chip to the
+                                // background build. Each no-ops on the other's
+                                // chip kind.
                                 attachDemoJob(
+                                    event.tool_use_id,
+                                    event.content,
+                                    this.messagesEl,
+                                );
+                                attachDerivationJob(
                                     event.tool_use_id,
                                     event.content,
                                     this.messagesEl,
@@ -3489,6 +3734,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!savedEmail) {
         try { savedEmail = localStorage.getItem("pymentor:email"); } catch (e) {}
     }
+    // Both sources can carry a stale casing — a ?email= deep link built from
+    // old ChromaDB metadata, or a localStorage value saved before this was
+    // normalized. Fold here so restoring an identity can't re-split it.
+    if (savedEmail) savedEmail = savedEmail.trim().toLowerCase();
     if (savedEmail) {
         document.getElementById("email-input").value = savedEmail;
         const wanted = params.get("session");

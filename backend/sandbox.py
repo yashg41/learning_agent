@@ -33,14 +33,17 @@ from backend.memory import _safe_email, USERS_DIR
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PACKAGES = ["qiskit", "qiskit-aer", "numpy", "matplotlib"]
+# lark rides along with sympy: it backs sympy's LaTeX parser, and without it
+# parse_latex raises at CALL time (not import time), which would silently
+# report every derivation step "unchecked" instead of verifying it.
+DEFAULT_PACKAGES = ["qiskit", "qiskit-aer", "numpy", "matplotlib", "sympy", "lark"]
 DEFAULT_TIMEOUT_SEC = 15
 MAX_OUTPUT_BYTES = 50_000
 
 # A venv is only trusted once this marker lands, and only for this schema.
 # Bump VENV_SCHEMA when DEFAULT_PACKAGES changes to force a rebuild.
 VENV_MARKER = ".pymentor_ready"
-VENV_SCHEMA = 1
+VENV_SCHEMA = 2
 
 # Run directories older than this are swept on the next run.
 RUN_DIR_TTL_SEC = 3600
