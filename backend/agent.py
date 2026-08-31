@@ -130,6 +130,17 @@ _TUTOR_TOOLS_BY_FAMILY = {
         # Same split as demos: the tutor asks, the builder writes.
         "mcp__learning-tools__request_derivation",
     ],
+    # The correctness layer. All six are tutor-facing — unlike demos and
+    # derivations there is no builder here, because checking a form is fast
+    # and synchronous and belongs inside the turn that makes the claim.
+    "sanskrit": [
+        "mcp__learning-tools__derive_form",
+        "mcp__learning-tools__decline",
+        "mcp__learning-tools__identify_metre",
+        "mcp__learning-tools__transliterate_sanskrit",
+        "mcp__learning-tools__analyse_sanskrit",
+        "mcp__learning-tools__lookup_word",
+    ],
 }
 
 # Built-ins, not MCP: the tutor's only route to anything newer than the model's

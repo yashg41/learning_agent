@@ -22,3 +22,14 @@ lark
 # indirect dependency that the app hard-requires is one upstream change away
 # from becoming a startup crash with a confusing traceback.
 pyyaml
+# The Sanskrit grammar engine: generates forms by Pāṇinian rule and returns the
+# sūtra chain behind them, which is what lets the Sanskrit tutor check a
+# declension instead of recalling one. Imported lazily — without it the app
+# still runs and the Sanskrit tools report "could not check" rather than
+# guessing. NOTE: the wheel ships the engine but NOT the Dhātupāṭha/kośa data;
+# that is a separate ~32 MB download, see backend/sanskrit_setup.py.
+vidyut
+# Script conversion (Devanagari/IAST/SLP1). vidyut.lipi covers what we use
+# today, but this is the maintained standalone and the fallback if the bindings
+# lag the Rust crates, which they currently do by ~19 months.
+indic-transliteration

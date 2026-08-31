@@ -522,3 +522,34 @@ body.tts-ready [lang="sa"].is-speaking::after {
     .tts-notice { transition: none; }
     body.tts-ready [lang="sa"]::after { transition: none; }
 }
+
+/* ===================================================================
+   The verified mark
+   ===================================================================
+   A form the tutor generated with a grammar tool rather than recalled.
+   Positive evidence only — unmarked text is not an accusation, because
+   prose and quoted verse are legitimately unmarked. The mark means "this
+   came from Pāṇini", and its absence means nothing in particular.
+
+   Deliberately quiet: it should be findable when a learner wonders "did
+   it check that?", and invisible the rest of the time. A loud badge on
+   every form would train them to stop seeing it. */
+.verified-mark {
+    display: inline-block;
+    margin-inline-start: 0.25em;
+    font-family: var(--font-sans);
+    font-size: 0.72em;
+    line-height: 1;
+    vertical-align: middle;
+    color: var(--success);
+    opacity: 0.65;
+    cursor: help;
+    user-select: none;
+    transition: opacity var(--duration-fast) var(--ease);
+}
+
+.verified-mark:hover { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+    .verified-mark { transition: none; }
+}

@@ -74,6 +74,12 @@ RUN_CODE_TIMEOUT_SEC = 10
 # 71-99%, so 0.6 sits in an empty gap. See prose_ratio().
 MAX_PROSE_RATIO = 0.6
 
+# A Pāṇinian derivation runs to ~20 steps, most of which restate the same
+# intermediate form while metadata rules fire. The whole chain would be re-sent
+# on every later turn for no teaching value, so derive_form keeps only the steps
+# that actually changed the form, capped here.
+MAX_SUTRA_STEPS = 12
+
 # Which tool families each app gets.
 #
 # One backend serves more than one tutor, and they do not want the same tools:
@@ -93,7 +99,7 @@ APP_TOOL_FAMILIES = {
     # Code goes: there is no Python to run, and leaving run_code in would
     # invite the tutor to "verify" morphology by writing a script instead of
     # calling the analyser that actually knows.
-    "sanskrit": ("demos",),
+    "sanskrit": ("demos", "sanskrit"),
 }
 
 DEFAULT_APP = "pymentor"
@@ -1938,6 +1944,228 @@ def create_learning_tools(
     # Create MCP Server
     # =====================================================================
 
+    # =====================================================================
+    # Sanskrit correctness tools
+    #
+    # These exist for one reason: the tutor writes plausible Sanskrit, and a
+    # declension that is wrong in the instrumental plural teaches a false
+    # paradigm more convincingly than no paradigm at all. Worse than the
+    # algebra case — a learner can check an equation by substituting numbers,
+    # but cannot check रामैः except by already knowing it.
+    #
+    # Every one returns a tri-state `verified`. None means "could not check"
+    # and must never be presented as agreement.
+    # =====================================================================
+
+    @tool(
+        "derive_form",
+        "Derive a Sanskrit verb form from its root using Pāṇinian rules, and "
+        "return the sūtra chain that produced it. Use this BEFORE stating any "
+        "conjugated form. Also the way to answer 'why is it X and not Y' — the "
+        "steps are the explanation. Roots may be given as IAST (bhū, paṭh), "
+        "Devanagari, or Dhātupāṭha code. If the root is not recognised this "
+        "says so rather than guessing: the library will happily invent a form "
+        "from a typo.",
+        {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Verb root, e.g. 'bhū', 'paṭh', 'kṛ'"},
+                "lakara": {
+                    "type": "string",
+                    "description": (
+                        "Tense/mood: Lat (present), Lrt (future), Lan (imperfect), "
+                        "Lot (imperative), VidhiLin (optative), Lit (perfect), Lun (aorist)"
+                    ),
+                },
+                "purusha": {
+                    "type": "string",
+                    "description": "Prathama (3rd), Madhyama (2nd), Uttama (1st)",
+                },
+                "vacana": {"type": "string", "description": "Eka, Dvi, or Bahu"},
+                "prayoga": {
+                    "type": "string",
+                    "description": "Kartari (active), Karmani (passive), Bhave",
+                },
+            },
+            "required": ["root"],
+        },
+    )
+    async def derive_form_tool(args):
+        try:
+            from backend.sanskritverify import derive_verb
+
+            res = derive_verb(
+                root=args.get("root", ""),
+                lakara=args.get("lakara") or "Lat",
+                purusha=args.get("purusha") or "Prathama",
+                vacana=args.get("vacana") or "Eka",
+                prayoga=args.get("prayoga") or "Kartari",
+            )
+            # Sūtra chains run to ~20 steps and every tool result is re-sent on
+            # every later turn, so the chain is trimmed to the steps that
+            # actually changed the form. The full one is rarely the lesson.
+            steps = res.get("steps") or []
+            if len(steps) > MAX_SUTRA_STEPS:
+                kept, seen = [], None
+                for st in steps:
+                    if st["result"] != seen:
+                        kept.append(st)
+                        seen = st["result"]
+                steps = kept[-MAX_SUTRA_STEPS:]
+                res["steps_note"] = "showing the steps that changed the form"
+            res["steps"] = steps
+            return _text_result(json.dumps(res, ensure_ascii=False, default=str))
+        except Exception as e:
+            logger.error(f"derive_form error: {e}", exc_info=True)
+            return _error_result(f"Error deriving form: {e}")
+
+    @tool(
+        "decline",
+        "Generate the full 8x3 declension table for a Sanskrit nominal stem, "
+        "in the case order Indian textbooks print. Use this BEFORE stating any "
+        "case form. Give the BARE stem (rāma, not rāmaḥ; nadī, not nadīm).",
+        {
+            "type": "object",
+            "properties": {
+                "stem": {"type": "string", "description": "Bare stem, e.g. 'rāma', 'nadī', 'phala'"},
+                "gender": {
+                    "type": "string",
+                    "description": "m (masculine), f (feminine), or n (neuter)",
+                },
+            },
+            "required": ["stem", "gender"],
+        },
+    )
+    async def decline_tool(args):
+        try:
+            from backend.sanskritverify import decline
+
+            res = decline(args.get("stem", ""), args.get("gender", "m"))
+            return _text_result(json.dumps(res, ensure_ascii=False, default=str))
+        except Exception as e:
+            logger.error(f"decline error: {e}", exc_info=True)
+            return _error_result(f"Error declining stem: {e}")
+
+    @tool(
+        "identify_metre",
+        "Scan a Sanskrit verse: split it into syllables and mark each one "
+        "laghu (L) or guru (G), naming the metre where it can. Use this BEFORE "
+        "saying anything about metre or rhythm, and when the learner is about "
+        "to recite — the weights are what tell them where the beat falls.",
+        {
+            "type": "object",
+            "properties": {
+                "verse": {"type": "string", "description": "The verse, in Devanagari or IAST"},
+            },
+            "required": ["verse"],
+        },
+    )
+    async def identify_metre_tool(args):
+        try:
+            from backend.sanskritverify import scan_metre
+
+            return _text_result(json.dumps(
+                scan_metre(args.get("verse", "")), ensure_ascii=False, default=str))
+        except Exception as e:
+            logger.error(f"identify_metre error: {e}", exc_info=True)
+            return _error_result(f"Error scanning verse: {e}")
+
+    @tool(
+        "transliterate_sanskrit",
+        "Convert Sanskrit between Devanagari, IAST and SLP1. Use it to show a "
+        "learner the same word in both scripts, or to read something they "
+        "typed in Latin letters.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The text to convert"},
+                "to": {
+                    "type": "string",
+                    "enum": ["devanagari", "iast", "slp1"],
+                    "description": "Target scheme. The source is detected.",
+                },
+            },
+            "required": ["text", "to"],
+        },
+    )
+    async def transliterate_sanskrit_tool(args):
+        try:
+            from backend.sanskritverify import detect_scheme, to_devanagari, to_slp1
+
+            text = args.get("text", "")
+            target = (args.get("to") or "devanagari").lower()
+            source = detect_scheme(text)
+
+            slp = to_slp1(text)
+            if slp is None:
+                return _error_result(
+                    "Could not read that text. Is vidyut installed? "
+                    "Run `python -m backend.sanskrit_setup --check`."
+                )
+
+            if target == "slp1":
+                out = slp
+            elif target == "devanagari":
+                out = to_devanagari(slp)
+            else:
+                from vidyut.lipi import Scheme, transliterate as _tr
+                out = _tr(slp, Scheme.Slp1, Scheme.Iast)
+
+            return _text_result(json.dumps(
+                {"source": source, "target": target, "text": out},
+                ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"transliterate_sanskrit error: {e}", exc_info=True)
+            return _error_result(f"Error transliterating: {e}")
+
+    @tool(
+        "analyse_sanskrit",
+        "Split continuous Sanskrit into words and identify each one — the "
+        "sandhi-resolution step that is the hardest part of reading. Use this "
+        "BEFORE claiming where word boundaries fall in a phrase the learner is "
+        "working through. Needs either the vidyut data bundle or the network; "
+        "it says which when it cannot run.",
+        {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Continuous Sanskrit, Devanagari or IAST"},
+            },
+            "required": ["text"],
+        },
+    )
+    async def analyse_sanskrit_tool(args):
+        try:
+            from backend.sanskritsegment import segment
+
+            res = segment(args.get("text", ""))
+            return _text_result(json.dumps(res, ensure_ascii=False, default=str))
+        except Exception as e:
+            logger.error(f"analyse_sanskrit error: {e}", exc_info=True)
+            return _error_result(f"Error analysing text: {e}")
+
+    @tool(
+        "lookup_word",
+        "Look up a Sanskrit word: its stem, morphology and meaning. Use this "
+        "BEFORE glossing a word the learner asks about. Reports what it could "
+        "not find rather than inventing a plausible gloss.",
+        {
+            "type": "object",
+            "properties": {
+                "word": {"type": "string", "description": "The word, Devanagari or IAST"},
+            },
+            "required": ["word"],
+        },
+    )
+    async def lookup_word_tool(args):
+        try:
+            from backend.sanskritsegment import lookup
+
+            res = lookup(args.get("word", ""))
+            return _text_result(json.dumps(res, ensure_ascii=False, default=str))
+        except Exception as e:
+            logger.error(f"lookup_word error: {e}", exc_info=True)
+            return _error_result(f"Error looking up word: {e}")
+
     # Grouped by family so an app can take or leave a whole capability. The
     # groups are also the documentation: what "demos" means is this list, not a
     # comment that can drift from it.
@@ -1971,6 +2199,14 @@ def create_learning_tools(
             save_demo_tool,         # builder only
             update_demo_tool,       # builder only
             get_demo_html_tool,     # builder only
+        ],
+        "sanskrit": [
+            derive_form_tool,
+            decline_tool,
+            identify_metre_tool,
+            transliterate_sanskrit_tool,
+            analyse_sanskrit_tool,
+            lookup_word_tool,
         ],
         "derivations": [
             request_derivation_tool,  # tutor

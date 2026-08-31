@@ -450,32 +450,110 @@ the one genuinely harmful thing this feature could do.
 
 ---
 
-## 8. What is *not* built yet
+## 8. The correctness layer
 
-Stated plainly, because it is the most important limitation:
+This is what makes the tutor trustworthy rather than merely fluent, and it is the
+newest part of the system.
 
-**The Sanskrit tutor has no correctness layer.** It teaches from the model's own
-knowledge, unverified. If it gives you a declension, it might be confidently
-wrong — and a wrong paradigm learned now costs months later.
+**The problem it solves.** Every form the tutor states was, until recently, the
+model recalling — so it could hand you a declension table with total confidence
+and be wrong. That is worse here than in most subjects: you can sanity-check an
+equation by substituting numbers, but you cannot check रामैः except by already
+knowing it, which is the thing you came to learn.
 
-The plan (Phase 2) is a set of tools backed by `vidyut` (MIT, Ambuda's Rust
-toolkit, pip-installable — verified working on this machine):
+Six tools now generate Sanskrit by Pāṇinian rule, via **`vidyut`** (MIT, Ambuda's
+Rust toolkit):
 
-| Tool | Backed by |
-|---|---|
-| `analyse_sanskrit(text)` | `vidyut.cheda` / `kosha` — segmentation + morphology |
-| `derive_form(root, params)` | `vidyut.prakriya` — a form **with its sūtra chain** |
-| `explain_sandhi(a, b)` | Samsaadhanii — the rule chain with named sūtras |
-| `decline(stem, gender)` | Samsaadhanii `noun_gen`, cached locally |
-| `identify_metre(verse)` | `chandas` (MIT) — scansion, verified working |
-| `lookup_word(word)` | Cologne CDSL parsed into local SQLite |
+| Tool | Backed by | Needs the data bundle? |
+|---|---|---|
+| `derive_form` | `vidyut.prakriya` — the form **with its sūtra chain** | no |
+| `decline` | `vidyut.prakriya` — full 8×3 table | no |
+| `identify_metre` | `vidyut.chandas` — syllables + laghu/guru | no |
+| `transliterate_sanskrit` | `vidyut.lipi` | no |
+| `analyse_sanskrit` | `vidyut.cheda`, falling back to Samsaadhanii | either |
+| `lookup_word` | `vidyut.kosha`, falling back to Samsaadhanii | either |
 
-Then the prompt rule modelled on PyMentor's maths section: **never assert a form,
-a split, or a metre you did not verify with the tool.** That is what makes the
-tutor trustworthy, and it is why this should not stay unbuilt for long.
+### The tri-state, and why it is the whole design
 
-Also outstanding: the reading environment (graded ladder from Amarahāsa → 
-Hitopadeśa, with a click-a-word interlinear reader), and the placement diagnostic.
+Every tool returns `verified` as **`true`**, **`false`**, or **`null`**, and the
+third is not a rounding error:
+
+- `true` — the grammar generated this
+- `false` — the grammar generated something else, named in `detail`
+- `null` — **could not check**, which is *not* agreement
+
+Collapsing `null` into `true` would put a verified marker on a guess, and
+collapsing it into `false` would tell a learner their correct form is wrong. Both
+are worse than saying nothing. `sanskritverify.py` never raises; every path
+returns one of the three.
+
+### The trap that shaped the design
+
+**vidyut does not validate roots.** Given the nonsense root `zzzz` it returns
+`zzati` — a well-formed-looking verb built from nothing. So a typo would have
+produced a fabricated form wearing our verified marker, which is worse than no
+checking at all, because the marker is a promise.
+
+Hence `KNOWN_ROOTS`: a curated whitelist, each entry derived and compared against
+its textbook form before being added, and re-checked by the test suite. Roots
+whose stem substitution lives in the Dhātupāṭha (√gam → gacch, √sthā → tiṣṭh) are
+deliberately **absent**, because without the data bundle vidyut silently returns
+`gamati` — plausible, and wrong. Those are refused with the reason and the fix.
+
+### Two tiers
+
+Four tools work with **no download at all**. Two need vidyut's ~32 MB data bundle:
+
+```
+python -m backend.sanskrit_setup          # download + verify
+python -m backend.sanskrit_setup --check  # verify only
+```
+
+Until then, `analyse_sanskrit` falls back to the **Samsaadhanii** API (University
+of Hyderabad) — which works: तपोवनम् correctly splits to तपः + वनम् today. It sits
+behind a permanent cache and an 8-second timeout, because a university CGI being
+slow must degrade the lesson, never stall it. If both routes fail, the tool says
+so and the tutor is instructed to pass that on rather than guess.
+
+### Visible verification
+
+A checked form is cited as `[sv_…]`, which the frontend replaces with a small ✓
+and a tooltip. **Positive evidence only** — unmarked text is not an accusation,
+since prose and quoted verse are legitimately unmarked. A mark means "this came
+from Pāṇini"; its absence means nothing in particular. Flagging absence would
+fire constantly and quickly stop being read.
+
+### What it looks like in practice
+
+Asked to conjugate √gam — the first root anyone reaches for, and one that needs
+the bundle — the tutor replied:
+
+> *"I just tried to verify it and couldn't… rather than hand you a form wearing a
+> false checkmark, let me tell you what I can and can't say."*
+
+That is the design working. A tutor that says "I could not check this" is more
+useful than one that is confidently wrong.
+
+### Known caveat
+
+vidyut gives nadī nominative singular as **नदीः** where textbooks print **नदी** —
+it is returning the form before a rule that the isolated-word context does not
+trigger. This is **flagged in the result**, not silently patched: quietly
+"correcting" a grammar engine means shipping a second, unverified grammar of your
+own.
+
+---
+
+## 8b. What is still not built
+
+- **The reading environment** — the graded ladder (Amarahāsa → Hitopadeśa) and the
+  click-a-word interlinear reader.
+- **The placement diagnostic** — see §3 on where a CBSE-schooled adult actually
+  stands.
+- **A real dictionary.** `lookup_word` gives morphology, not glosses. Cologne's
+  Monier-Williams needs parsing into local SQLite; `pycdsl` is broken and cannot
+  be used.
+- **Pronunciation scoring** — deferred deliberately; see the plan.
 
 ---
 

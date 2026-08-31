@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     MODEL_NAME: str = "claude-sonnet-5"
 
     DATA_DIR: str = os.path.join(_APP_ROOT, "data")
+
+    # Where vidyut's linguistic data bundle lives. Empty means "the default
+    # under DATA_DIR"; set it to point at a pre-baked copy instead of
+    # downloading at runtime. Its absence is never fatal — the Sanskrit tools
+    # report what they cannot check, the same way a missing PyMuPDF only
+    # disables PDF import. See backend/sanskrit_setup.py.
+    VIDYUT_DATA_DIR: str = ""
     CHROMA_DIR: str = os.path.join(_APP_ROOT, "data", "chroma")
 
     API_HOST: str = "127.0.0.1"

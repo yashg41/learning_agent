@@ -104,7 +104,7 @@ def test_no_duplicate_tool_names_per_app():
 
 def test_families_referenced_by_apps_all_exist():
     """A typo in APP_TOOL_FAMILIES must not silently yield fewer tools."""
-    known = set(_TUTOR_TOOLS_BY_FAMILY) | {"sanskrit"}  # sanskrit lands in Phase 2
+    known = set(_TUTOR_TOOLS_BY_FAMILY)
     for app, families in APP_TOOL_FAMILIES.items():
         for family in families:
             assert family in known, f"app '{app}' names unknown family '{family}'"
