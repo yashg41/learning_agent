@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from backend import transcripts
+from backend import memory, transcripts
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def env(tmp_path, monkeypatch):
     claude.mkdir()
     (users / "learner@x.com" / "sessions" / "s1").mkdir(parents=True)
 
-    monkeypatch.setattr(transcripts, "USERS_DIR", str(users))
+    monkeypatch.setattr(memory, "USERS_DIR", str(users))
     monkeypatch.setattr(
         "backend.replay._get_claude_project_dir", lambda: str(claude)
     )

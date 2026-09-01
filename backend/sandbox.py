@@ -29,7 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from backend.memory import _safe_email, USERS_DIR
+from backend import memory
+from backend.memory import _safe_email
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ def _lock_for(email: str) -> asyncio.Lock:
 
 
 def _venv_dir(email: str) -> Path:
-    return Path(USERS_DIR) / _safe_email(email) / "venv"
+    return Path(memory.USERS_DIR) / _safe_email(email) / "venv"
 
 
 def _scratch_dir(email: str) -> Path:

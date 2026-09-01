@@ -11,7 +11,8 @@ import re
 import logging
 
 from backend.config import settings
-from backend.memory import USERS_DIR, _safe_email, save_summary, get_summary, get_session_dir
+from backend import memory
+from backend.memory import _safe_email, save_summary, get_summary, get_session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,10 @@ def session_exists_in_memory(email: str, session_id: str) -> bool:
     the directory as a side effect — asking whether a session exists should
     not bring it into existence.
     """
-    from backend.memory import USERS_DIR, _safe_email
+    from backend import memory
+    from backend.memory import _safe_email
 
-    session_dir = os.path.join(USERS_DIR, _safe_email(email), "sessions", session_id)
+    session_dir = os.path.join(memory.USERS_DIR, _safe_email(email), "sessions", session_id)
     return os.path.isfile(os.path.join(session_dir, "conversation.jsonl")) or os.path.isfile(
         os.path.join(session_dir, "conversation.json")
     )
@@ -139,7 +141,7 @@ async def replay_from_memory(email: str, session_id: str, system_prompt: str | N
     # Check if we have a compacted summary
     summary_data = get_summary(email, session_id)
 
-    user_data_dir = os.path.join(USERS_DIR, safe)
+    user_data_dir = os.path.join(memory.USERS_DIR, safe)
 
     if summary_data:
         # Strategy 1: Summary-based restore

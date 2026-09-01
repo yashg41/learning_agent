@@ -246,7 +246,9 @@ def _dhatupatha_dir():
 
     base = (
         Path(settings.VIDYUT_DATA_DIR) if settings.VIDYUT_DATA_DIR
-        else Path(settings.DATA_DIR) / "vidyut"
+        # SHARED_DATA_DIR, not DATA_DIR: the bundle is app-independent read-only
+        # data and lives beside the per-app roots. See sanskrit_setup.data_dir().
+        else Path(settings.SHARED_DATA_DIR) / "vidyut"
     )
     return base / "prakriya" if (base / ".vidyut_ready").is_file() else None
 

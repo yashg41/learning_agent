@@ -17,8 +17,11 @@ from backend.demojobs import BUILDING, FAILED, READY
 def jobs_dir(tmp_path, monkeypatch):
     """Point the job store at a temp dir and clear in-memory state."""
     import backend.codejobs as cj
+    from backend import memory
 
-    monkeypatch.setattr(cj, "USERS_DIR", str(tmp_path))
+    # memory owns USERS_DIR; codejobs reads it as memory.USERS_DIR so there is
+    # one authoritative binding to patch.
+    monkeypatch.setattr(memory, "USERS_DIR", str(tmp_path))
     monkeypatch.setattr(cj, "JOBS", {})
     # TASKS is demojobs' registry, shared through spawn(). Patch it there so
     # the name codejobs imported resolves to the same empty dict.

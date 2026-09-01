@@ -61,7 +61,10 @@ _FAILED_TOKEN_RE = re.compile(r"^\s*\?")
 
 
 def _cache_dir() -> Path:
-    d = Path(settings.DATA_DIR) / "cache" / "sanskrit"
+    # Beside the vidyut bundle rather than in a per-app root: this is a
+    # derived cache of the same upstream data, and a sandhi split does not
+    # belong to a learner or to a tutor.
+    d = Path(settings.SHARED_DATA_DIR) / "cache" / "sanskrit"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -95,7 +98,8 @@ def _cache_put(kind: str, key: str, value: dict) -> None:
 def _vidyut_data_dir() -> Path:
     if settings.VIDYUT_DATA_DIR:
         return Path(settings.VIDYUT_DATA_DIR)
-    return Path(settings.DATA_DIR) / "vidyut"
+    # Shared across apps — see sanskrit_setup.data_dir().
+    return Path(settings.SHARED_DATA_DIR) / "vidyut"
 
 
 def _local_available() -> bool:

@@ -24,7 +24,8 @@ import logging
 import os
 import shutil
 
-from backend.memory import USERS_DIR, _safe_email, get_session_dir
+from backend import memory
+from backend.memory import _safe_email, get_session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ def _builder_dir(email: str) -> str:
     and get_session_dir would create a sessions/<id>/ directory that the UI
     would then list as an empty chat.
     """
-    d = os.path.join(USERS_DIR, _safe_email(email), "builder_transcripts")
+    d = os.path.join(memory.USERS_DIR, _safe_email(email), "builder_transcripts")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -140,12 +141,12 @@ def restore_all() -> int:
     """
     restored = 0
     try:
-        users = os.listdir(USERS_DIR)
+        users = os.listdir(memory.USERS_DIR)
     except OSError:
         return 0
 
     for user in users:
-        sessions_dir = os.path.join(USERS_DIR, user, "sessions")
+        sessions_dir = os.path.join(memory.USERS_DIR, user, "sessions")
         if not os.path.isdir(sessions_dir):
             continue
         try:
@@ -160,7 +161,7 @@ def restore_all() -> int:
 
         # Builder transcripts, so a migrated demo can still be edited in place
         # rather than rebuilt.
-        builder_dir = os.path.join(USERS_DIR, user, "builder_transcripts")
+        builder_dir = os.path.join(memory.USERS_DIR, user, "builder_transcripts")
         if not os.path.isdir(builder_dir):
             continue
         try:

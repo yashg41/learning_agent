@@ -329,7 +329,7 @@ def test_clip_output_limit_keeps_both_ends():
 @pytest.fixture
 def archive_email(tmp_path, monkeypatch):
     """Point the archive at a temp dir so tests never touch real user data."""
-    monkeypatch.setattr("backend.codejobs.USERS_DIR", str(tmp_path))
+    monkeypatch.setattr("backend.memory.USERS_DIR", str(tmp_path))
     return "archive-test@example.com"
 
 

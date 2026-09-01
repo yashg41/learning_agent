@@ -50,7 +50,10 @@ def data_dir() -> Path:
     """Where the bundle lives. Configurable so it can be baked into an image."""
     if settings.VIDYUT_DATA_DIR:
         return Path(settings.VIDYUT_DATA_DIR)
-    return Path(settings.DATA_DIR) / "vidyut"
+    # SHARED_DATA_DIR, not DATA_DIR: the bundle is ~77MB of read-only
+    # linguistic data and is identical for every app, so it lives beside
+    # the per-app roots rather than inside one of them.
+    return Path(settings.SHARED_DATA_DIR) / "vidyut"
 
 
 def is_installed() -> bool:

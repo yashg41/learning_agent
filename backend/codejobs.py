@@ -39,7 +39,8 @@ from backend.demojobs import (
     spawn,
 )
 from backend.demos import _write_atomic
-from backend.memory import _safe_email, USERS_DIR
+from backend import memory
+from backend.memory import _safe_email
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ def _now() -> str:
 
 
 def _verified_dir(email: str) -> str:
-    d = os.path.join(USERS_DIR, _safe_email(email), "verified")
+    d = os.path.join(memory.USERS_DIR, _safe_email(email), "verified")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -120,7 +121,7 @@ def load_verified(email: str, run_id: str) -> str | None:
 
 
 def _jobs_dir(email: str) -> str:
-    d = os.path.join(USERS_DIR, _safe_email(email), "code_jobs")
+    d = os.path.join(memory.USERS_DIR, _safe_email(email), "code_jobs")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -361,8 +362,8 @@ def _known_emails() -> list[str]:
     """Users with a code_jobs directory on disk."""
     try:
         return [
-            name for name in os.listdir(USERS_DIR)
-            if os.path.isdir(os.path.join(USERS_DIR, name, "code_jobs"))
+            name for name in os.listdir(memory.USERS_DIR)
+            if os.path.isdir(os.path.join(memory.USERS_DIR, name, "code_jobs"))
         ]
     except OSError:
         return []
