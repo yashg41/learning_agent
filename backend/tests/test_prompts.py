@@ -227,3 +227,14 @@ def test_builder_prompts_default_to_the_shared_copy():
     assert (PROMPTS_DIR / "_common" / "demo_builder.md").is_file()
     assert (PROMPTS_DIR / "_common" / "derivation_builder.md").is_file()
     assert "You build ONE interactive HTML demo" in demo_builder_prompt()
+
+
+def test_reading_section_sits_between_correctness_and_web_lookup():
+    """The order carries meaning: the correctness rules are established before
+    reading (a printed form is not a verified one), and web lookup follows
+    immediately, which is where open_book belongs."""
+    from backend.prompts import _tutor_sections
+
+    names = [p.name for p in _tutor_sections("sanskrit")]
+    assert names.index("15_correctness.md") < names.index("20_reading.md")
+    assert names.index("20_reading.md") < names.index("25_web_lookup.md")

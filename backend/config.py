@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     VIDYUT_DATA_DIR: str = ""
     CHROMA_DIR: str = os.path.join(_APP_ROOT, "data", "chroma")
 
+    # Hosts the server may fetch a book PDF from, comma-separated. A leading
+    # dot is not needed — subdomains of each entry are included.
+    #
+    # Starts CLOSED, and deliberately so: open_book lets the TUTOR pass a URL
+    # it found by searching, so this is a server-side request with a
+    # model-chosen destination. Every other SSRF check in bookresolve.py still
+    # applies regardless of this list; set it empty to allow any public host.
+    BOOK_FETCH_ALLOWED_HOSTS: str = "archive.org,googleapis.com,books.google.com"
+
     API_HOST: str = "127.0.0.1"
     API_PORT: int = 8001
     DEBUG: bool = True

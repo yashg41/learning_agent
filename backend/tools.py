@@ -99,7 +99,10 @@ APP_TOOL_FAMILIES = {
     # Code goes: there is no Python to run, and leaving run_code in would
     # invite the tutor to "verify" morphology by writing a script instead of
     # calling the analyser that actually knows.
-    "sanskrit": ("demos", "sanskrit"),
+    # "reader" is Sanskrit-only for now: it exists for the learner who wants to
+    # read an actual edition of an actual text, which is this tutor's whole
+    # goal. PyMentor teaches from runnable code, not from scans.
+    "sanskrit": ("demos", "sanskrit", "reader"),
 }
 
 DEFAULT_APP = "pymentor"
@@ -2166,6 +2169,254 @@ def create_learning_tools(
             logger.error(f"lookup_word error: {e}", exc_info=True)
             return _error_result(f"Error looking up word: {e}")
 
+    # =================================================================
+    # Reader — turning the pages of a book the learner has open
+    #
+    # The tutor SEES the pages: they ride into the turn as image blocks
+    # whenever the position has moved (see backend/books.py needs_resend).
+    # These tools move the position; the pane follows, because the position
+    # lives on the server rather than in the client.
+    #
+    # None of them return page content. A tool result is re-sent on every
+    # later turn, so answering "here is page 38" in text would put the page
+    # into the transcript permanently AND duplicate what the images already
+    # carry. The result says where the reader now is; the images arrive next
+    # turn.
+    # =================================================================
+
+    def _resolve_book(args) -> tuple[str, dict | None]:
+        """(email, record) for the book a tool call refers to.
+
+        A missing book_id means "the one they have open", which is what the
+        tutor will usually intend: there is normally one book, and making the
+        model carry an id it has to remember is a needless failure mode.
+        """
+        from backend.books import active_book, get_book
+
+        email = _email_from_dir(user_data_dir)
+        book_id = (args.get("book_id") or "").strip()
+        return email, (get_book(email, book_id) if book_id else active_book(email))
+
+    def _position_result(email: str, record: dict, moved_to: int) -> dict:
+        from backend.books import MAX_WINDOW_PAGES_TO_MODEL
+
+        pos = record["position"]
+        shown = min(pos["window"], MAX_WINDOW_PAGES_TO_MODEL)
+        last = min(pos["page"] + shown - 1, record["page_count"])
+        span = f"page {pos['page']}" if last == pos["page"] else f"pages {pos['page']}–{last}"
+        return {
+            "ok": True,
+            "book_id": record["book_id"],
+            "title": record["title"],
+            "page": pos["page"],
+            "window": pos["window"],
+            "page_count": record["page_count"],
+            # Without this the model describes the page it has just turned to,
+            # because turning felt like looking. It has not seen it yet.
+            "note": (
+                f"The reader pane has moved to {span}. You will SEE these pages "
+                "in the learner's next message — do not describe them yet."
+            ),
+        }
+
+    @tool(
+        "go_to_page",
+        "Turn the reader pane to a specific page of the book the learner has "
+        "open. The pane on their screen moves to match, and you are shown the "
+        "new pages with their next message. Use this when they ask to go "
+        "somewhere particular ('back a bit', 'chapter 3'). Page numbers are the "
+        "PDF's own sequence starting at 1, which in a scanned book is usually "
+        "offset from the printed page number.",
+        {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "description": "PDF page number, 1-based"},
+                "book_id": {
+                    "type": "string",
+                    "description": "Omit to use the book they already have open",
+                },
+                "window": {
+                    "type": "integer",
+                    "description": "How many pages to show at once (1-4). Omit to keep the current setting.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "One short phrase for the learner, e.g. 'on to the sandhi rules'",
+                },
+            },
+            "required": ["page"],
+        },
+    )
+    async def go_to_page_tool(args):
+        try:
+            from backend.books import set_position
+
+            email, record = _resolve_book(args)
+            if record is None:
+                return _error_result(
+                    "No book is open. Ask the learner to add one, or call "
+                    "open_book with a URL if they named a text."
+                )
+
+            page = int(args.get("page") or 1)
+            count = record["page_count"]
+            if page < 1 or page > count:
+                # Name the valid range: a bare "invalid page" makes the model
+                # retry blind.
+                return _error_result(
+                    f"Page {page} is outside \"{record['title']}\", which has "
+                    f"{count} pages. Pick a page between 1 and {count}."
+                )
+
+            window = args.get("window")
+            updated = set_position(
+                email, record["book_id"], page,
+                max(1, min(int(window), 4)) if window else None,
+            )
+            if updated is None:
+                return _error_result("That book could not be opened.")
+            return _text_result(json.dumps(
+                _position_result(email, updated, page), ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"go_to_page error: {e}", exc_info=True)
+            return _error_result(f"Error turning the page: {e}")
+
+    @tool(
+        "advance_pages",
+        "Move forward through the book by whole pages — the ordinary rhythm of "
+        "reading, 'that's this page done, let's go on'. Pass a negative number "
+        "to go back. Omit `by` to advance by exactly what is on screen. Stops "
+        "at the start and end of the book rather than failing.",
+        {
+            "type": "object",
+            "properties": {
+                "by": {
+                    "type": "integer",
+                    "description": "Pages to move; negative goes back. Omit for one screenful.",
+                },
+                "book_id": {"type": "string", "description": "Omit to use the open book"},
+                "reason": {
+                    "type": "string",
+                    "description": "One short phrase for the learner, e.g. 'on to the next verse'",
+                },
+            },
+            "required": [],
+        },
+    )
+    async def advance_pages_tool(args):
+        try:
+            from backend.books import set_position
+
+            email, record = _resolve_book(args)
+            if record is None:
+                return _error_result(
+                    "No book is open. Ask the learner to add one, or call "
+                    "open_book with a URL if they named a text."
+                )
+
+            pos = record["position"]
+            by = args.get("by")
+            step = int(by) if by not in (None, "") else pos.get("window", 1)
+            target = pos["page"] + step
+
+            # Clamped by set_position rather than refused: running off either
+            # end of a book is a normal event in a reading session.
+            at_end = target > record["page_count"]
+            updated = set_position(email, record["book_id"], target)
+            if updated is None:
+                return _error_result("That book could not be opened.")
+
+            result = _position_result(email, updated, target)
+            if at_end:
+                result["note"] = (
+                    f"That is the end of \"{record['title']}\" — the pane is at "
+                    f"the last page ({record['page_count']}). Tell the learner "
+                    "they have finished it."
+                )
+            return _text_result(json.dumps(result, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"advance_pages error: {e}", exc_info=True)
+            return _error_result(f"Error moving through the book: {e}")
+
+    @tool(
+        "open_book",
+        "Open a book for reading from a URL you found. Give a direct PDF link "
+        "or an archive.org page — archive.org is by far the best source for "
+        "out-of-copyright Sanskrit texts and grammars, and its books resolve "
+        "reliably. Google Books usually does NOT offer a downloadable PDF and "
+        "will be refused; when that happens, search archive.org for the same "
+        "title instead. The download runs in the background: say one sentence "
+        "about what you are opening and carry on teaching — do not wait for it, "
+        "and do not promise to read from it until it is ready.",
+        {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "https:// URL of a PDF, or an archive.org details page",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "What to call it in the learner's library. Omit to use the source's own title.",
+                },
+            },
+            "required": ["url"],
+        },
+    )
+    async def open_book_tool(args):
+        try:
+            from backend.bookjobs import start_book_job
+
+            url = (args.get("url") or "").strip()
+            if not url:
+                return _error_result("open_book needs a url.")
+
+            email = _email_from_dir(user_data_dir)
+            record = start_book_job(email, url, args.get("title") or "")
+            return _text_result(json.dumps({
+                "job_id": record["job_id"],
+                "status": record["state"],
+                "note": (
+                    "The download is running in the background. Tell the learner "
+                    "in one sentence what you are opening, then carry on with "
+                    "what you were teaching. It will appear in their reader when "
+                    "it is ready; you will not see the pages until they write "
+                    "again after that."
+                ),
+            }, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"open_book error: {e}", exc_info=True)
+            return _error_result(f"Error opening that book: {e}")
+
+    @tool(
+        "list_books",
+        "The books this learner has, and which one is open. Check this before "
+        "offering to fetch a text — they may already have it.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def list_books_tool(args):
+        try:
+            from backend.books import active_book, list_books
+
+            email = _email_from_dir(user_data_dir)
+            books = list_books(email)
+            open_book = active_book(email)
+            return _text_result(json.dumps({
+                "books": [
+                    {
+                        "book_id": b["book_id"],
+                        "title": b["title"],
+                        "page_count": b["page_count"],
+                        "position": b.get("position"),
+                    }
+                    for b in books
+                ],
+                "open": open_book["book_id"] if open_book else None,
+            }, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"list_books error: {e}", exc_info=True)
+            return _error_result(f"Error listing books: {e}")
+
     # Grouped by family so an app can take or leave a whole capability. The
     # groups are also the documentation: what "demos" means is this list, not a
     # comment that can drift from it.
@@ -2207,6 +2458,14 @@ def create_learning_tools(
             transliterate_sanskrit_tool,
             analyse_sanskrit_tool,
             lookup_word_tool,
+        ],
+        # All tutor-facing: turning a page is instant and belongs inside the
+        # turn that decides to turn it, so there is no builder half here.
+        "reader": [
+            go_to_page_tool,
+            advance_pages_tool,
+            open_book_tool,
+            list_books_tool,
         ],
         "derivations": [
             request_derivation_tool,  # tutor

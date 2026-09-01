@@ -238,6 +238,132 @@ _NEEDS_DATA = {
 }
 
 
+def _dhatupatha_dir():
+    """Where the Dhātupāṭha lives, or None if the bundle is not installed."""
+    from pathlib import Path
+
+    from backend.config import settings
+
+    base = (
+        Path(settings.VIDYUT_DATA_DIR) if settings.VIDYUT_DATA_DIR
+        else Path(settings.DATA_DIR) / "vidyut"
+    )
+    return base / "prakriya" if (base / ".vidyut_ready").is_file() else None
+
+
+# Built once on first use: aupadeśika spelling -> Dhatu, plus a lookup from the
+# form a learner would actually type. Loading is ~2,200 entries and a few
+# hundred ms, so it is worth caching but not worth doing at import.
+_DHATU_INDEX: dict | None = None
+
+
+def _load_dhatupatha() -> dict:
+    """Index the real Dhātupāṭha, keyed by how someone might type a root.
+
+    This is what makes √gam work. The aupadeśika spellings carry anubandha
+    markers — √gam is `ga\\mx~`, √sthā is `zWA\\`, √dṛś is `df\\Si~r` — which
+    nobody types and which my hand-written guesses got wrong in all three
+    cases. Stripping the markers gives the bare form a learner recognises, and
+    keeps the entry that actually derives the textbook stem.
+    """
+    global _DHATU_INDEX
+    if _DHATU_INDEX is not None:
+        return _DHATU_INDEX
+
+    _DHATU_INDEX = {}
+    data_dir = _dhatupatha_dir()
+    if data_dir is None:
+        return _DHATU_INDEX
+
+    try:
+        from vidyut.prakriya import Data
+
+        entries = Data(str(data_dir)).load_dhatu_entries()
+    except Exception as e:
+        logger.info(f"Dhātupāṭha unavailable: {type(e).__name__}")
+        return _DHATU_INDEX
+
+    # Index each root under SEVERAL keys rather than one "correct" stripping.
+    # The aupadeśika carries markers that are not punctuation: √gam is `ga\mx~`
+    # (trailing anubandha LETTER x), √dṛś is `df\Si~r`, √kṛ is `qukfY` (leading
+    # `qu` and trailing `Y`), √sthā is `zWA\` (initial z for retroflex ṣ). No
+    # single rule strips all of those, and guessing one is what made my first
+    # three hand-written entries wrong. Indexing every plausible normalisation
+    # is cheap and matches whatever the learner actually typed.
+    punct = re.compile(r"[~\\^\d]")
+    for entry in entries:
+        raw = str(entry.dhatu.aupadeshika)
+        base = punct.sub("", raw).lower()
+        keys = {raw.lower(), base}
+
+        # Drop a trailing anubandha letter, then a second (gamx -> gam).
+        trimmed = base
+        for _ in range(2):
+            if len(trimmed) > 2 and trimmed[-1] in "xyfrlnmsktpwqgjbdY":
+                trimmed = trimmed[:-1]
+                keys.add(trimmed)
+
+        # Drop the leading qu/wu/qU markers (qukfY -> kfY -> kf).
+        for prefix in ("qu", "wu", "qU"):
+            if base.startswith(prefix):
+                rest = base[len(prefix):]
+                keys.add(rest)
+                if len(rest) > 2 and rest[-1] in "xyfrlnmsY":
+                    keys.add(rest[:-1])
+
+        for key in keys:
+            if key:
+                # First entry wins: the Dhātupāṭha is in traditional order, so
+                # the earlier one is the more common root for a shared spelling.
+                _DHATU_INDEX.setdefault(key, entry)
+
+    logger.info(f"Dhātupāṭha loaded: {len(_DHATU_INDEX)} roots")
+    return _DHATU_INDEX
+
+
+def lookup_dhatu(root: str):
+    """Find a root in the Dhātupāṭha. Returns a DhatupathaEntry or None."""
+    index = _load_dhatupatha()
+    if not index:
+        return None
+
+    candidates = [root, to_slp1(root) or "", root.lower()]
+
+    slp = (to_slp1(root) or "")
+    if slp:
+        # The Dhātupāṭha spells some roots with sounds the citation form does
+        # not show. √sthā is listed as `zWA` (retroflex ṣ, because the s
+        # becomes ṣ by rule) while a learner types `sthā`/`sTA`; √dṛś is
+        # `dfSi~r` with an extra i. Both are one letter away from the obvious
+        # spelling, which is exactly the kind of near-miss worth handling
+        # rather than refusing.
+        variants = [slp]
+        if slp.startswith("s") and len(slp) > 1 and slp[1] in "TWtw":
+            variants.append("z" + slp[1:])
+        # NOTE: do NOT try slp+"a" / slp+"i" as general fallbacks. It looks
+        # harmless and is not: `pA` then matches `pata` (√pat, "fall") and
+        # returns पतति for √pā "drink" — a real root, a real form, and the
+        # wrong answer, delivered with a verified marker. A near-miss must
+        # refuse rather than land on a neighbour.
+        candidates += variants
+
+    for key in candidates:
+        if key and key.lower() in index:
+            return index[key.lower()]
+
+    # Last resort, and deliberately NARROW: only for roots we name explicitly.
+    # A general `slp + "i"` fallback matched √pat for √pā and returned पतति for
+    # "drink", so the mapping is written out per root instead of inferred.
+    exact = {
+        "sTA": "zWA",     # √sthā is listed with retroflex ṣ
+        "dfS": "dfSi",    # √dṛś is listed as dfSi~r
+    }
+    alt = exact.get(slp)
+    if alt and alt.lower() in index:
+        return index[alt.lower()]
+    return None
+
+
 def resolve_root(root: str) -> tuple[str | None, str | None]:
     """Map what the caller typed to a validated Dhātupāṭha code.
 
@@ -263,6 +389,14 @@ def resolve_root(root: str) -> tuple[str | None, str | None]:
     if slp and slp.lower() in _ROOT_ALIASES:
         return _ROOT_ALIASES[slp.lower()], None
 
+    # With the bundle installed the whitelist is no longer the boundary: the
+    # real Dhātupāṭha is, and it validates against 2,229 attested roots rather
+    # than the 19 hand-checked ones. This is the whole point of the download.
+    if lookup_dhatu(raw) is not None:
+        return raw, None
+
+    # Only reached when the bundle is absent — with it installed the lookup
+    # above resolves these, which is the whole point of installing it.
     if key in _NEEDS_DATA or (slp or "").lower() in _NEEDS_DATA:
         name = _NEEDS_DATA.get(key) or _NEEDS_DATA[(slp or "").lower()]
         return None, (
@@ -313,12 +447,25 @@ def derive_verb(
     if slp is None:
         return {"verified": None, "detail": why, "forms": []}
 
-    # The curated gaṇa wins over a caller-supplied one: the pair is what was
-    # actually tested, and a right root in the wrong gaṇa derives silently
-    # wrong output (√kṛ in bhvādi is not karoti).
-    known_gana, expected_3sg, gloss = KNOWN_ROOTS[slp]
-    if gana != known_gana and gana == "Bhvadi":
-        gana = known_gana
+    # Prefer the real Dhātupāṭha entry when the bundle is installed: it carries
+    # the correct aupadeśika spelling AND gaṇa together, which is what makes
+    # √gam derive gacchati rather than the gamati a bare string produces. The
+    # curated whitelist is the fallback for a machine without the data.
+    # The hand-verified whitelist WINS over a Dhātupāṭha match. Those 19 were
+    # each compared against their textbook form; a lookup by stripped spelling
+    # is a good guess but only a guess, and for a root in both the checked
+    # answer is the one to trust.
+    entry = None if slp in KNOWN_ROOTS else lookup_dhatu(root)
+    gloss = ""
+    if entry is not None:
+        gloss = str(getattr(entry, "artha", "") or "")[:40]
+    elif slp in KNOWN_ROOTS:
+        # The curated gaṇa wins over a caller-supplied default: a right root in
+        # the wrong gaṇa derives silently wrong output (√kṛ in bhvādi is not
+        # karoti).
+        known_gana, _expected, gloss = KNOWN_ROOTS[slp]
+        if gana == "Bhvadi":
+            gana = known_gana
 
     try:
         enums = {
@@ -332,7 +479,10 @@ def derive_verb(
         return {"verified": None, "detail": f"unknown grammatical value: {e}", "forms": []}
 
     try:
-        dhatu = prak.Dhatu.mula(slp, enums["gana"])
+        # entry.dhatu already carries the aupadeśika spelling and its gaṇa, so
+        # using it avoids reconstructing a root from a string — which is where
+        # the anubandha markers get lost and the wrong stem comes out.
+        dhatu = entry.dhatu if entry is not None else prak.Dhatu.mula(slp, enums["gana"])
         kwargs = dict(
             dhatu=dhatu,
             prayoga=enums["prayoga"],
@@ -443,13 +593,16 @@ def decline(stem: str, gender: str = "m") -> dict:
             except Exception:
                 forms = []
             produced += len(forms)
-            cells.append({
-                "devanagari": " / ".join(to_devanagari(f) for f in forms),
-                "slp1": forms,
-            })
+            # Devanagari only. Carrying the SLP1 alongside doubled the payload
+            # for no gain — the tutor reads Devanagari and the learner sees it,
+            # while SLP1 is an internal transport. It mattered: the full dict
+            # landed at ~1900 chars against agent.py's 2000-char transcript cap,
+            # so a slightly longer stem truncated the JSON mid-structure and the
+            # tutor read the wreckage as "the tool is broken".
+            cells.append(" / ".join(to_devanagari(f) for f in forms))
         rows.append({
-            "case": vib_sa, "case_en": vib_en,
-            "eka": cells[0], "dvi": cells[1], "bahu": cells[2],
+            "case": vib_sa, "en": vib_en,
+            "sg": cells[0], "du": cells[1], "pl": cells[2],
         })
 
     if not produced:

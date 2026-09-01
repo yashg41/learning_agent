@@ -23,6 +23,7 @@
          and should win without !important. -->
     <link rel="stylesheet" href="/static/sanskrit/notes.css">
     <link rel="stylesheet" href="/static/sanskrit/demo-pane.css">
+    <link rel="stylesheet" href="/static/sanskrit/reader.css">
     <script>
         // Applied before first paint so the page never flashes the wrong theme.
         // ?theme= wins (useful for screenshots), then the saved choice, then
@@ -95,6 +96,8 @@
                                 title="Notes canvas (⌘E)">&#9998; Notes</button>
                         <button id="demo-btn" class="header-btn" onclick="toggleDemo()"
                                 title="Interactive demos — ask the tutor to build one">&#9654; Demo</button>
+                        <button id="reader-btn" class="header-btn" onclick="toggleReader()"
+                                title="Read a book page by page — the tutor sees the same pages">&#128214; Read</button>
                         <button class="rail-toggle" id="toggle-right" onclick="toggleRail('right')"
                                 title="Hide panel (⌘])">⊟</button>
                     </div>
@@ -294,7 +297,64 @@
                 </div>
             </div>
 
+            <!-- Reader pane. A book read page by page, with the tutor seeing
+                 the same pages: page images are attached to the turn whenever
+                 the position has moved (see backend/books.py needs_resend).
+                 Both sides can turn the page — the learner with these
+                 controls, the tutor with go_to_page — and the position lives
+                 server-side so whichever moved it, the other follows. -->
+            <div class="reader-pane" id="reader-pane" style="display:none">
+                <div class="reader-header">
+                    <select class="reader-picker" id="reader-picker" onchange="onBookPicked()"
+                            title="Switch book"></select>
+                    <div class="reader-header-actions">
+                        <button class="header-btn" id="reader-prev" onclick="readerPrev()"
+                                title="Previous page (←)">&lsaquo;</button>
+                        <input class="reader-page-input" id="reader-page-input" type="text"
+                               inputmode="numeric" onchange="readerJump(this.value)"
+                               title="Jump to a page">
+                        <span class="reader-page-count" id="reader-page-count"></span>
+                        <button class="header-btn" id="reader-next" onclick="readerNext()"
+                                title="Next page (→)">&rsaquo;</button>
+                        <!-- 5 and 10 are for skimming layout. The tutor is sent
+                             at most 4 pages; the caption says so when they
+                             differ. -->
+                        <select class="reader-window" id="reader-window"
+                                onchange="setReaderWindow(this.value)"
+                                title="Pages shown at once">
+                            <option value="1">1 page</option>
+                            <option value="2" selected>2 pages</option>
+                            <option value="5">5 pages</option>
+                            <option value="10">10 pages</option>
+                        </select>
+                        <button class="header-btn" id="reader-zoom-out" onclick="readerZoomBy(-1)"
+                                title="Smaller — shrink the page">&minus;</button>
+                        <span class="reader-zoom" id="reader-zoom-level" onclick="readerZoomReset()"
+                              title="Page size — click to reset to 100%">100%</span>
+                        <button class="header-btn" id="reader-zoom-in" onclick="readerZoomBy(1)"
+                                title="Bigger — enlarge the page">+</button>
+                        <button class="header-btn" onclick="askTutorAboutPage()"
+                                title="Ask the tutor about this page">Ask tutor</button>
+                        <!-- Worded, not a glyph. A "+" here sat next to the
+                             zoom "+" and read as a second zoom control. -->
+                        <button class="header-btn" onclick="addBookMenu()"
+                                title="Add another book — upload a PDF or paste a link">+ Book</button>
+                        <button class="header-btn" onclick="deleteActiveBook()"
+                                title="Remove this book">&#128465;</button>
+                        <button class="header-btn" onclick="toggleReader()"
+                                title="Hide the reader">&times;</button>
+                    </div>
+                </div>
+                <div class="reader-caption">
+                    <span class="reader-title" id="reader-title"></span>
+                    <span class="reader-model-note" id="reader-model-note"></span>
+                </div>
+                <div class="reader-body" id="reader-body"></div>
+            </div>
+
         </div>
+
+        <input type="file" id="reader-pdf-input" accept="application/pdf,.pdf" hidden>
 
         <!-- Right Panel (Knowledge Dashboard) -->
         <div class="right-panel">
@@ -430,6 +490,11 @@
     <!-- After notes.js: reuses its pane-divider helpers (syncPaneSplit) and
          cooperates with toggleNotes for pane exclusivity. -->
     <script src="/static/sanskrit/demo-pane.js"></script>
+    <!-- After both: wraps openRightPane, toggleNotes and toggleDemo rather
+         than editing them, because notes.js and demo-pane.js are byte-identical
+         forks of the PyMentor copies and PyMentor has no reader. The wrappers
+         need their targets already defined. -->
+    <script src="/static/sanskrit/reader-pane.js"></script>
     <!-- Last: binds one delegated click handler for every Devanagari run
          app.js has tagged, so it must load after app.js defines them. It
          disables itself if the browser has no Indic voice. -->

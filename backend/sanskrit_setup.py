@@ -58,6 +58,72 @@ def is_installed() -> bool:
     return (d / MARKER).is_file()
 
 
+def adopt(source: Path | None = None) -> bool:
+    """Accept a bundle that was placed (or unzipped) by hand.
+
+    Downloading is blocked on some machines by a TLS-inspecting proxy that no
+    amount of client code can talk past, so copying the file across from
+    somewhere else has to be a first-class path rather than a workaround.
+
+    Validates the shape before writing the marker: a half-extracted bundle is
+    worse than none, because the tools would half-work and report nonsense
+    rather than saying they are unavailable.
+
+    `source` may be the zip itself or a directory holding the extracted files.
+    Defaults to looking inside the target directory, which is where someone
+    following the printed instructions will have put things.
+    """
+    target = data_dir()
+    target.mkdir(parents=True, exist_ok=True)
+
+    if source and source.is_file() and source.suffix == ".zip":
+        print(f"Extracting {source.name}…")
+        with zipfile.ZipFile(source) as z:
+            for name in z.namelist():
+                pth = Path(name)
+                if pth.is_absolute() or ".." in pth.parts:
+                    raise RuntimeError(f"refusing unsafe path in archive: {name}")
+            z.extractall(target)
+    elif source and source.is_dir() and source.resolve() != target.resolve():
+        print(f"Copying from {source}…")
+        for child in source.iterdir():
+            dest = target / child.name
+            if dest.exists():
+                continue
+            if child.is_dir():
+                shutil.copytree(child, dest)
+            else:
+                shutil.copy2(child, dest)
+
+    # The archive nests everything under one directory; flatten so the paths
+    # the tools use are the same however the bundle arrived.
+    entries = [p for p in target.iterdir() if p.name != MARKER]
+    if len(entries) == 1 and entries[0].is_dir() and entries[0].name != "kosha":
+        inner = entries[0]
+        for child in inner.iterdir():
+            shutil.move(str(child), str(target / child.name))
+        inner.rmdir()
+
+    # The bundle is one directory per component. `kosha` and `prakriya` are the
+    # two the tools actually load, so their presence is what makes a bundle
+    # usable; the rest are checked only to report a partial extract clearly.
+    # (Checked against the real 0.4.0 archive, which contains chandas, cheda,
+    # kosha, prakriya and sandhi — an earlier guess at `dhatupatha.tsv` at the
+    # top level was wrong and would have rejected a perfectly good bundle.)
+    required = ("kosha", "prakriya")
+    missing = [n for n in required if not (target / n).exists()]
+    if missing:
+        found = ", ".join(sorted(p.name for p in target.iterdir())) or "(nothing)"
+        print(f"\nThat does not look like the vidyut bundle — missing: {', '.join(missing)}")
+        print(f"Found in {target}: {found}")
+        print("\nUnzip data-0.4.0.zip so that <dir>/kosha and <dir>/prakriya exist.")
+        return False
+
+    (target / MARKER).write_text(VIDYUT_VERSION, encoding="utf-8")
+    print(f"Adopted the bundle at {target}")
+    return True
+
+
 def _fetch(url: str, dest: Path) -> None:
     """Download, trying three transports before giving up.
 
@@ -102,11 +168,60 @@ def _fetch(url: str, dest: Path) -> None:
 
     raise RuntimeError(
         "Could not download the data bundle. Tried — " + "; ".join(errors) + ".\n\n"
-        f"Download it by hand instead:\n"
-        f"  1. {DATA_URL}\n"
+        + _diagnose()
+        + f"\nTo install it by hand:\n"
+        f"  1. download {DATA_URL}\n"
         f"  2. unzip it so that <dir>/kosha and <dir>/dhatupatha.tsv exist\n"
         f"  3. put it at {data_dir()}, or set VIDYUT_DATA_DIR in .env\n"
         f"  4. re-run: python -m backend.sanskrit_setup --check"
+    )
+
+
+def _diagnose() -> str:
+    """Work out WHY the download failed, so the fix is obvious.
+
+    Worth the extra requests: "it failed" sends you hunting through Python's
+    TLS stack, when the actual cause is usually a corporate proxy that allows
+    github.com and blocks the host release downloads actually come from. That
+    is not a bug anyone can fix in this file, and knowing it saves an hour.
+    """
+    import socket
+
+    def reachable(host: str) -> bool:
+        try:
+            with socket.create_connection((host, 443), timeout=6):
+                return True
+        except OSError:
+            return False
+
+    github_ok = reachable("github.com")
+    assets_ok = reachable("release-assets.githubusercontent.com")
+
+    if not github_ok:
+        return "  You appear to be offline — github.com is unreachable.\n"
+
+    if github_ok and not assets_ok:
+        return (
+            "  DIAGNOSIS: github.com is reachable but\n"
+            "  release-assets.githubusercontent.com is NOT. That host is where\n"
+            "  GitHub release downloads actually come from, and a corporate\n"
+            "  proxy or VPN is blocking it.\n\n"
+            "  Nothing in this script can work around that. Either:\n"
+            "    · run this again on a different network (home wifi is usually\n"
+            "      enough), or\n"
+            "    · download the file on another machine and copy it across.\n"
+        )
+
+    # Both hosts resolve, so this is TLS interception rather than a block: the
+    # proxy re-signs certificates with a root Python's bundled CA store has
+    # never heard of, even though the system keychain trusts it.
+    return (
+        "  DIAGNOSIS: the hosts are reachable, so this is most likely TLS\n"
+        "  interception — a proxy re-signing certificates with a root that\n"
+        "  Python does not trust, even where the system does. Check with:\n"
+        "    echo | openssl s_client -connect release-assets.githubusercontent.com:443 \\\n"
+        "      2>/dev/null | grep issuer=\n"
+        "  If the issuer is not a public CA, that is your proxy.\n"
     )
 
 
@@ -171,7 +286,7 @@ def check() -> bool:
     ok &= bool(v["verified"])
 
     d = sv.decline("rAma", "m")
-    first = d["rows"][0]["eka"]["devanagari"] if d.get("rows") else "—"
+    first = d["rows"][0]["sg"] if d.get("rows") else "—"
     print(f"  declension            {'OK' if d['verified'] else 'FAILED'}  (rāma nom. sg. → {first})")
     ok &= bool(d["verified"])
 
@@ -198,12 +313,22 @@ def main() -> int:
     logging.basicConfig(level=logging.WARNING)
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true", help="verify only, do not download")
+    ap.add_argument(
+        "--adopt", metavar="PATH", nargs="?", const="",
+        help="use a bundle downloaded by hand: pass the .zip, a directory, or "
+             "nothing if you already unzipped it into the data directory",
+    )
     args = ap.parse_args()
 
     print("Sanskrit tooling")
     print("=" * 52)
 
-    if not args.check:
+    if args.adopt is not None:
+        src = Path(args.adopt).expanduser() if args.adopt else None
+        if not adopt(src):
+            return 1
+        print()
+    elif not args.check:
         try:
             install()
         except Exception as e:

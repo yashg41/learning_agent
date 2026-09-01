@@ -179,10 +179,19 @@ def test_run_agent_forwards_app_to_the_tools(monkeypatch):
 
     from backend import agent
 
-    source = inspect.getsource(agent.run_agent)
-    call = source[source.index("run_agent_internal("):]
-    call = call[: call.index(")")]
-    assert "app=app" in call, (
+    # Parse rather than slice on the first ")": a comment inside the call
+    # containing a bracket broke the naive version, which is a brittle test
+    # failing on a working system — the worst kind.
+    import ast
+
+    tree = ast.parse(inspect.getsource(agent.run_agent).lstrip())
+    forwarded = any(
+        isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "run_agent_internal"
+        and any(kw.arg == "app" for kw in node.keywords)
+        for node in ast.walk(tree)
+    )
+    assert forwarded, (
         "run_agent must forward `app` to run_agent_internal, or every tutor "
         "gets the default app's tools and curriculum"
     )
@@ -199,3 +208,59 @@ def test_every_agent_entrypoint_takes_an_app():
         assert "app" in inspect.signature(fn).parameters, (
             f"{name}() has no `app` parameter"
         )
+
+
+def test_book_pages_are_not_persisted_as_attachments():
+    """Book page images must never reach episodic.save_attachment.
+
+    saved_attachments is built by looping over `attachments`. If the book's
+    page images were merged into that list before the loop, every page turn
+    would write a duplicate PNG into data/uploads/ and record it on the
+    transcript — for images the server generated and can regenerate for free.
+
+    Asserted by source order because exercising it needs a live SDK
+    subprocess. The merge belongs at the run_agent_internal call site.
+    """
+    import inspect
+
+    from backend import agent
+
+    source = inspect.getsource(agent.run_agent)
+    assert "book_images" in source, "run_agent no longer handles book_ref"
+    assert source.index("saved_attachments = []") < source.index("book_images"), (
+        "merge book images into `attachments` only AFTER saved_attachments is "
+        "built, or every page turn duplicates a PNG into data/uploads/"
+    )
+
+
+def test_book_frame_is_built_after_the_session_is_resolved():
+    """needs_resend keys on the session id, so it needs the RESOLVED one.
+
+    session_id is reassigned several times above (active-session fallback,
+    fork, restore-from-memory). Building the frame before that would compare
+    against the caller's argument — usually None — so a new session would
+    never re-send the page images, and the model would discuss a page it has
+    never seen with complete confidence.
+    """
+    import inspect
+
+    from backend import agent
+
+    source = inspect.getsource(agent.run_agent)
+    assert source.index("session_ctx: dict") < source.index("needs_resend("), (
+        "build the book_ref frame after the session id is resolved"
+    )
+
+
+def test_sanskrit_can_read_a_book():
+    """The reader tools are what let the tutor turn the page itself."""
+    bare = {_bare(n) for n in tutor_tool_names("sanskrit")}
+    for name in ("go_to_page", "advance_pages", "list_books"):
+        assert name in bare, f"the Sanskrit tutor cannot {name}"
+
+
+def test_pymentor_has_no_reader():
+    """PyMentor teaches from runnable code, not from scans of books."""
+    assert "reader" not in app_tool_families("pymentor")
+    bare = {_bare(n) for n in tutor_tool_names("pymentor")}
+    assert "go_to_page" not in bare

@@ -57,6 +57,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Code job sweep failed: {e}")
 
+    # And for book fetches: a download interrupted by a restart cannot resume,
+    # and its chip would spin in the reader for the life of the tab.
+    try:
+        from backend.bookjobs import sweep_stale as sweep_book_jobs
+
+        swept = sweep_book_jobs()
+        if swept:
+            logger.info(f"Resolved {swept} stale book job(s)")
+    except Exception as e:
+        logger.warning(f"Book job sweep failed: {e}")
+
     logger.info("Ready!")
     yield
     logger.info("Shutting down.")

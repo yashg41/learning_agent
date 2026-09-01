@@ -3,11 +3,23 @@
 Isolated in its own module because PyMuPDF is the only heavy binary dependency
 in this repo. `import fitz` happens inside the functions, never at module
 scope: a missing wheel must degrade to "PDF import unavailable" rather than
-break API startup for everyone.
+break API startup for everyone. This module is the ONLY place that imports
+fitz — backend/books.py renders through the primitives below rather than
+reaching for the library itself, so that invariant survives a second caller.
 
 Pages are written into the user's existing uploads directory and served by
 GET /api/uploads/{email}/{filename} — the same route chat attachments use, so
 there is no second asset tree and no second path-traversal check to get right.
+
+Two callers with different needs:
+  - rasterize_pdf (notes) renders EVERY page at once. A note background is a
+    scrollable column of the whole document, so there is nothing to defer.
+  - backend/books.py renders single pages on demand via open_document +
+    render_page. A 400-page book is ~200MB and several minutes if rendered
+    upfront, for pages the learner will mostly never open.
+Deliberately not one function with a mode flag: the caps differ (200 pages vs
+2000), the output differs (files on disk vs bytes), and a single function
+serving both would have to be read twice to understand either.
 """
 
 import logging
@@ -47,6 +59,94 @@ def is_available() -> bool:
     return True
 
 
+def trim_to_pdf_header(data: bytes) -> bytes:
+    """Verify the bytes are a PDF and trim any wrapper before the header.
+
+    Checked by content, not by the filename or a Content-Type header: a .txt
+    renamed to .pdf, or an HTML error page served from a .pdf URL, should fail
+    here rather than deep inside the parser. That second case is the common one
+    for backend/books.py, where archive.org and Google Books both answer a bad
+    request with an HTML page at HTTP 200.
+
+    The header is not always at byte 0. Real files turn up with a UTF-8 BOM, or
+    wrapped by an exporter — Java's serialization header (\\xac\\xed) in front of
+    the document is common in enterprise systems. Scan a bounded prefix and
+    trim, rather than demanding a pristine offset 0.
+
+    Raises ValueError if there is no PDF header in the first PDF_HEADER_SEARCH
+    bytes.
+    """
+    start = data.find(PDF_MAGIC, 0, PDF_HEADER_SEARCH)
+    if start == -1:
+        raise ValueError("That file is not a PDF")
+    if start > 0:
+        logger.info(f"Trimming {start} bytes of wrapper before the PDF header")
+        return data[start:]
+    return data
+
+
+def open_document(data: bytes):
+    """Open PDF bytes as a fitz.Document, with the usual rejections applied.
+
+    The caller owns the returned document and MUST close it — an open document
+    holds its whole page cache in memory. Use try/finally; with uvicorn
+    reload=True these otherwise pile up across restarts.
+
+    Raises ValueError for anything the caller should report as a 400, and
+    PdfImportUnavailable when the dependency is missing. Page-count limits are
+    deliberately NOT enforced here: the two callers have different ceilings
+    (MAX_PDF_PAGES for notes, MAX_BOOK_PAGES for books), so each checks its own
+    against `doc.page_count`.
+    """
+    try:
+        import fitz
+    except ImportError as e:
+        raise PdfImportUnavailable("PyMuPDF is not installed") from e
+
+    data = trim_to_pdf_header(data)
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Could not read that PDF: {e}") from e
+
+    # Close before raising: these paths would otherwise leak the document that
+    # was successfully opened a line ago.
+    try:
+        if doc.needs_pass:
+            raise ValueError("Password-protected PDFs are not supported")
+        if doc.page_count == 0:
+            raise ValueError("That PDF has no pages")
+    except Exception:
+        doc.close()
+        raise
+    return doc
+
+
+def render_page(doc, index: int, dpi: int, fmt: str = "png", quality: int = 72) -> bytes:
+    """Render one 0-based page of an open document to encoded image bytes.
+
+    Returns bytes rather than writing a file so the caller decides where it
+    lands — books.py writes two copies of every page (a PNG to display and a
+    smaller JPEG for the model) from a single get_pixmap.
+
+    `alpha=False` because a scanned page has no transparency to preserve and an
+    alpha channel would inflate every file for nothing.
+    """
+    try:
+        import fitz
+    except ImportError as e:
+        raise PdfImportUnavailable("PyMuPDF is not installed") from e
+
+    if index < 0 or index >= doc.page_count:
+        raise ValueError(f"page {index + 1} is outside this document (1-{doc.page_count})")
+
+    zoom = dpi / 72
+    pix = doc[index].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    if fmt == "jpg" or fmt == "jpeg":
+        return pix.tobytes("jpg", jpg_quality=quality)
+    return pix.tobytes("png")
+
+
 def rasterize_pdf(data: bytes, out_dir: str, email: str) -> list[dict]:
     """Render every page to a PNG and return page geometry.
 
@@ -59,30 +159,13 @@ def rasterize_pdf(data: bytes, out_dir: str, email: str) -> list[dict]:
     except ImportError as e:
         raise PdfImportUnavailable("PyMuPDF is not installed") from e
 
-    # Checked by content, not by the filename: a .txt renamed to .pdf should
-    # fail here rather than deep inside the parser.
-    #
-    # The header is not always at byte 0. Real files turn up with a UTF-8 BOM,
-    # or wrapped by an exporter — Java's serialization header (\xac\xed) in
-    # front of the document is common in enterprise systems. Scan a bounded
-    # prefix and trim, rather than demanding a pristine offset 0.
-    start = data.find(PDF_MAGIC, 0, PDF_HEADER_SEARCH)
-    if start == -1:
-        raise ValueError("That file is not a PDF")
-    if start > 0:
-        logger.info(f"Trimming {start} bytes of wrapper before the PDF header")
-        data = data[start:]
+    # Content check, wrapper trim, password and empty-document rejection all
+    # live in open_document — shared with backend/books.py so the lessons
+    # encoded there (BOM, Java serialization wrapper, HTML error pages) are
+    # applied identically by both callers.
+    doc = open_document(data)
 
     try:
-        doc = fitz.open(stream=data, filetype="pdf")
-    except Exception as e:
-        raise ValueError(f"Could not read that PDF: {e}") from e
-
-    try:
-        if doc.needs_pass:
-            raise ValueError("Password-protected PDFs are not supported")
-        if doc.page_count == 0:
-            raise ValueError("That PDF has no pages")
         if doc.page_count > MAX_PDF_PAGES:
             raise ValueError(
                 f"That PDF has {doc.page_count} pages (max {MAX_PDF_PAGES})"

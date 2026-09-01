@@ -3,7 +3,8 @@
 One command. Run setup.sh once first to install dependencies.
 
 Three processes, because they have genuinely different lifecycles:
-  - the learning agent reloads on file changes (uvicorn --reload)
+  - the learning agent runs the code as it was at startup, so the codebase can
+    be edited while a session is live; edits land on the next start
   - Dropzone must NOT reload, or a file save would wipe its in-memory buffer
     mid-study-session
   - cloudflared publishes the https address the tablet needs
@@ -13,6 +14,7 @@ Whether you connect a tablet is your choice — the URL and QR are always there.
 Escape hatches, none needed for normal use:
   DROPZONE=0   learning agent only
   TUNNEL=0     no tunnel (laptop + same-Wi-Fi LAN only, no clipboard on tablet)
+  RELOAD=1     restart the agent on backend/ edits (kills in-flight builds)
 """
 
 import atexit
@@ -34,6 +36,15 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 START_DROPZONE = os.environ.get("DROPZONE", "1") not in ("0", "false", "no")
 START_TUNNEL = os.environ.get("TUNNEL", "1") not in ("0", "false", "no")
+
+# Off by default: the server runs the code as it was at startup, so the
+# codebase can be edited while a session is live. Auto-reload restarts the
+# process, and a restart is fatal to work in flight — demojobs.sweep_stale
+# marks every queued/building demo "server restarted while building", and the
+# `claude` CLI subprocess carrying the SDK's MCP channel dies mid-turn, so any
+# in-flight tool call comes back as "Stream closed". Edits are picked up on
+# the next start. RELOAD=1 opts back in.
+RELOAD = os.environ.get("RELOAD", "0") in ("1", "true", "yes")
 
 _children: list[subprocess.Popen] = []
 
@@ -293,7 +304,7 @@ if __name__ == "__main__":
             "backend.main:app",
             host=settings.API_HOST,
             port=settings.API_PORT,
-            reload=settings.DEBUG,
+            reload=RELOAD,
             # Watch ONLY the source tree. uvicorn's default is the whole cwd,
             # which includes data/ — and the code runner writes cell.py and
             # sitecustomize.py into data/users/<email>/scratch/ on every Run

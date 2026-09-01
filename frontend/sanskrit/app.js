@@ -280,6 +280,13 @@ function renderMarkdown(text) {
     // real code and must keep its ticks.
     text = text.replace(/`(\$\$[\s\S]+?\$\$)`/g, "$1");
 
+    // A <div class="verse"> indented four spaces is a CODE BLOCK to markdown,
+    // so the tag reaches the learner as literal text and the verse loses its
+    // Devanagari sizing and its audio controls. The prompt says column 1, but
+    // the example it shows is itself indented for legibility and the model
+    // copies that — so un-indent it here rather than relying on the wording.
+    text = text.replace(/^[ \t]+(<div class="verse">)/gm, "$1");
+
     const spans = [];
     // The placeholder must survive markdown untouched and never occur in real
     // text: letters and digits only, no punctuation for the parser to act on.
@@ -1595,6 +1602,9 @@ class ChatController {
         // {demo_id, title, selection}. Only the id and selection go to the
         // server, which builds the digest — see run_agent's demo_ref.
         this.pendingDemoRef = null;
+        // The book being read, staged from the Reader pane as {book_id, title}.
+        // Only the id goes to the server, which owns the reading position.
+        this.pendingBookRef = null;
         this.attachStripEl = attachStripEl;
         this.attachBtnEl = attachBtnEl;
         this.attachInputEl = attachInputEl;
@@ -1704,6 +1714,30 @@ class ChatController {
 
             strip.appendChild(chip);
         }
+
+        // The open book, staged the same visible-and-removable way.
+        if (this.pendingBookRef) {
+            const chip = document.createElement("div");
+            chip.className = "attach-book-chip";
+
+            const label = document.createElement("span");
+            label.className = "attach-book-title";
+            label.textContent = `📖 ${this.pendingBookRef.title || "book"}`;
+            label.title = this.pendingBookRef.title || "";
+            chip.appendChild(label);
+
+            const rm = document.createElement("button");
+            rm.className = "attach-book-remove";
+            rm.textContent = "×";
+            rm.title = "Don't ask about this page";
+            rm.onclick = (e) => {
+                e.stopPropagation();
+                this.setBookRef(null);
+            };
+            chip.appendChild(rm);
+
+            strip.appendChild(chip);
+        }
     }
 
     /** Stage (or clear) a demo the next message is asking about. */
@@ -1712,10 +1746,26 @@ class ChatController {
         this.renderAttachments();
     }
 
+    /**
+     * Stage (or clear) the book the next message is about.
+     *
+     * Only the id travels — the SERVER holds the reading position and decides
+     * whether this turn carries page images. A page number named here would
+     * disagree with the record the moment the tutor turned a page mid-turn.
+     */
+    setBookRef(ref) {
+        this.pendingBookRef = ref;
+        this.renderAttachments();
+    }
+
 
     clearAttachments() {
         this.pendingAttachments = [];
         this.pendingDemoRef = null;
+        // pendingBookRef is deliberately NOT cleared here. Attachments and a
+        // demo reference belong to one message; an open book is the context of
+        // the whole reading session, and re-staging it after every turn would
+        // be busywork. Closing the reader (or the chip's ×) clears it.
         this.renderAttachments();
         // Reset the picker too, or re-choosing the same file fires no change.
         if (this.attachInputEl) this.attachInputEl.value = "";
@@ -1731,6 +1781,7 @@ class ChatController {
         const message = this.inputEl.value.trim();
         const attachments = this.pendingAttachments.slice();
         const demoRef = this.pendingDemoRef;
+        const bookRef = this.pendingBookRef;
         // An image on its own is a complete question ("what's wrong here?"),
         // so only bail when there's neither text nor an image.
         if (!message && !attachments.length) return;
@@ -1799,6 +1850,14 @@ class ChatController {
             }
             // Same contract as demo_ref: id and highlight only. The server
             // builds the digest, so the blocks never enter the transcript.
+
+            // Id only. The server holds the reading position and decides
+            // whether this turn carries the page images — a page number named
+            // here would disagree with the record the moment the tutor turned
+            // a page mid-turn.
+            if (bookRef && bookRef.book_id) {
+                requestBody.book_ref = { book_id: bookRef.book_id };
+            }
 
             const res = await fetch(`${API_BASE}/api/chat/stream`, {
                 method: "POST",
@@ -1964,6 +2023,15 @@ class ChatController {
                                     event.content,
                                     this.messagesEl,
                                 );
+                                // The tutor can turn the page itself. The pane
+                                // learns about it here rather than by polling:
+                                // the result is already on the wire and lands
+                                // the instant the turn happens. Guarded by
+                                // isMain — a side-chat must not move the book
+                                // the learner is reading.
+                                if (typeof onReaderToolResult === "function") {
+                                    onReaderToolResult(event.content);
+                                }
                             }
                             break;
 
@@ -2029,6 +2097,13 @@ class ChatController {
                 this.inputEl.disabled = false;
                 this.streaming = false;
                 this.inputEl.focus();
+
+                // Belt and braces for a tool-driven page turn whose event was
+                // missed (a backgrounded tab drops nothing, but a dropped
+                // connection mid-turn does). One request, not a poll.
+                if (this.isMain && typeof reconcileReader === "function") {
+                    reconcileReader();
+                }
 
                 // Once a conversation has a real subject, replace the
                 // first-message title with one drawn from what was actually

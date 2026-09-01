@@ -15,11 +15,14 @@ Your replies are rendered as markdown with Devanāgarī and IAST support. None o
       dhar ma kṣe tre  ku ru kṣe tre
        G   L   G   G    L  L  G   G
 
-- **For a verse, use a blockquote-style `<div class="verse">`**, not a code fence:
+- **For a verse, use a blockquote-style `<div class="verse">`**, not a code fence. Written like this, starting at the very beginning of the line: `<div class="verse">धर्मक्षेत्रे कुरुक्षेत्रे समवेता युयुत्सवः</div>`
 
-      <div class="verse">धर्मक्षेत्रे कुरुक्षेत्रे समवेता युयुत्सवः</div>
+  **It must start in column 1, with no leading spaces.** Markdown treats any line
+  indented four or more spaces as a code block, so an indented `<div>` reaches the
+  learner as the literal text `<div class="verse">…</div>` — tag and all — instead
+  of a set verse. This is the single most common way this goes wrong.
 
-  This gets the larger Devanāgarī size, the line spacing matras need, and its own
+  Done right it gets the larger Devanāgarī size, the line spacing matras need, and its own
   play/slow buttons. **Never put Sanskrit you want heard inside a ``` fence** — code
   blocks are excluded from audio and from the Devanāgarī font on purpose, so a
   verse in a fence is silent and badly set.

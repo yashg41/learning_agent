@@ -116,15 +116,56 @@ def test_invented_root_is_refused():
 
 
 def test_roots_needing_the_data_bundle_say_so():
-    """√gam is the first root anyone reaches for.
+    """√gam is the first root anyone reaches for, and it is data-dependent.
 
-    Without the Dhātupāṭha vidyut returns `gamati` rather than an error —
-    plausible and wrong. Refusing it must name the fix, not just decline.
+    WITH the Dhātupāṭha it must derive गच्छति. WITHOUT it, vidyut returns
+    `gamati` rather than an error — plausible and wrong — so it must be refused
+    with the fix named, never guessed at.
     """
-    code, why = resolve_root("gam")
-    assert code is None
-    assert "gacchati" in why
-    assert "sanskrit_setup" in why
+    from backend.sanskritverify import _dhatupatha_dir
+
+    if _dhatupatha_dir() is not None:
+        result = derive_verb("gam")
+        assert result["verified"] is True, result["detail"]
+        assert "गच्छति" in result["forms"], result["forms"]
+    else:
+        code, why = resolve_root("gam")
+        assert code is None
+        assert "gacchati" in why
+        assert "sanskrit_setup" in why
+
+
+@needs_vidyut
+@pytest.mark.parametrize("typed,expected", [
+    ("gam", "गच्छति"),      # needs the Dhātupāṭha's irregular stem
+    ("sthā", "तिष्ठति"),     # listed under a retroflex spelling (zWA)
+    ("dṛś", "पश्यति"),       # listed as dfSi~r, and suppletive
+    ("pā", "पिबति"),         # suppletive, and a near-miss for √pat
+    ("kṛ", "करोति"),         # listed as qukfY
+])
+def test_irregular_roots_resolve_to_the_right_stem(typed, expected):
+    """The roots where a near-miss returns a real-but-wrong form.
+
+    √pā is the cautionary one: a general `slp + "a"` fallback matched √pat
+    ("fall") and returned पतति for "drink" — a real root, a real form, and the
+    wrong answer wearing a verified marker. Near-misses must refuse, not land
+    on a neighbour.
+    """
+    from backend.sanskritverify import _dhatupatha_dir
+
+    if _dhatupatha_dir() is None:
+        pytest.skip("needs the vidyut data bundle")
+
+    result = derive_verb(typed)
+    assert result["verified"] is True, result["detail"]
+    assert expected in result["forms"], f"{typed} gave {result['forms']}"
+
+
+@needs_vidyut
+def test_near_misses_are_refused_not_redirected():
+    """A typo must not resolve to a neighbouring real root."""
+    for typo in ("gaam", "zzzz", "xyzzy", "qqq"):
+        assert derive_verb(typo)["verified"] is None, typo
 
 
 def test_common_spellings_resolve():
@@ -173,12 +214,12 @@ def test_rama_paradigm_matches_the_textbook():
     assert result["verified"] is True
 
     by_case = {r["case"]: r for r in result["rows"]}
-    assert by_case["prathamā"]["eka"]["devanagari"] == "रामः"
-    assert by_case["prathamā"]["bahu"]["devanagari"] == "रामाः"
-    assert by_case["dvitīyā"]["eka"]["devanagari"] == "रामम्"
-    assert by_case["tṛtīyā"]["eka"]["devanagari"] == "रामेण"
-    assert by_case["tṛtīyā"]["bahu"]["devanagari"] == "रामैः"
-    assert by_case["ṣaṣṭhī"]["eka"]["devanagari"] == "रामस्य"
+    assert by_case["prathamā"]["sg"] == "रामः"
+    assert by_case["prathamā"]["pl"] == "रामाः"
+    assert by_case["dvitīyā"]["sg"] == "रामम्"
+    assert by_case["tṛtīyā"]["sg"] == "रामेण"
+    assert by_case["tṛtīyā"]["pl"] == "रामैः"
+    assert by_case["ṣaṣṭhī"]["sg"] == "रामस्य"
 
 
 @needs_vidyut
@@ -186,9 +227,9 @@ def test_neuter_paradigm():
     result = decline("Pala", "n")
     by_case = {r["case"]: r for r in result["rows"]}
     # The neuter's defining feature: nominative and accusative are identical.
-    assert by_case["prathamā"]["eka"]["devanagari"] == "फलम्"
-    assert by_case["dvitīyā"]["eka"]["devanagari"] == "फलम्"
-    assert by_case["prathamā"]["bahu"]["devanagari"] == "फलानि"
+    assert by_case["prathamā"]["sg"] == "फलम्"
+    assert by_case["dvitīyā"]["sg"] == "फलम्"
+    assert by_case["prathamā"]["pl"] == "फलानि"
 
 
 @needs_vidyut
@@ -208,8 +249,8 @@ def test_declension_covers_all_eight_cases_and_three_numbers():
     result = decline("rAma", "m")
     assert len(result["rows"]) == 8
     for row in result["rows"]:
-        for number in ("eka", "dvi", "bahu"):
-            assert row[number]["devanagari"], f"{row['case']} {number} is empty"
+        for number in ("sg", "du", "pl"):
+            assert row[number], f"{row['case']} {number} is empty"
 
 
 # --- Metre ------------------------------------------------------------------
@@ -266,3 +307,28 @@ def test_everything_degrades_when_vidyut_is_missing(monkeypatch):
 
     assert sv.to_slp1("रामः") is None
     assert sv.is_available() is False
+
+
+@needs_vidyut
+@pytest.mark.parametrize("stem,gender", [
+    ("rAjan", "m"), ("nadI", "f"), ("rAma", "m"), ("Pala", "n"),
+])
+def test_paradigm_fits_the_transcript_budget(stem, gender):
+    """A truncated payload is read as a broken tool, not as a long one.
+
+    Every tool result is written into the SDK transcript, which agent.py cuts
+    at TOOL_RESULT_MAX_CHARS. The first version of this payload carried SLP1
+    alongside Devanagari for all 24 cells and landed at ~1900 chars — close
+    enough that a longer stem truncated the JSON mid-structure. The tutor read
+    the wreckage as "vidyut isn't installed" and told the learner so, which is
+    the worst possible failure: a working tool reported as broken.
+    """
+    import json
+
+    from backend.agent import TOOL_RESULT_MAX_CHARS
+
+    payload = json.dumps(decline(stem, gender), ensure_ascii=False)
+    assert len(payload) < TOOL_RESULT_MAX_CHARS * 0.75, (
+        f"{stem} paradigm is {len(payload)} chars against a "
+        f"{TOOL_RESULT_MAX_CHARS} cap — too close to truncation"
+    )

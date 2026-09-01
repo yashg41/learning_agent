@@ -62,6 +62,10 @@ class ChatRequest(BaseModel):
     # model sees, and the html is never sent.
     demo_ref: dict | None = None
     derivation_ref: dict | None = None
+    # A book the learner is reading: {"book_id": "b_xxx"}. Id only — the server
+    # owns the reading position (both the learner and the tutor can turn a
+    # page), and it decides whether this turn carries the page images.
+    book_ref: dict | None = None
     # Which tutor is being addressed. Selects the system prompt, the tool
     # families and the curriculum tracks. Defaults to pymentor so every
     # existing client keeps working without sending it.
@@ -157,6 +161,7 @@ async def chat_stream(body: ChatRequest):
                 attachments=[a.model_dump() for a in attachments],
                 demo_ref=body.demo_ref,
                 derivation_ref=body.derivation_ref,
+                book_ref=body.book_ref,
                 app=body.app,
             )
         except Exception as e:
@@ -1916,3 +1921,246 @@ async def edit_derivation_route(email: str, doc_id: str, body: EditDerivationReq
         request=request,
         base_doc_id=doc_id,
     )
+
+
+# --- Reader Endpoints ---
+#
+# Books the learner reads page-by-page with the tutor. Page images are served
+# from the book's own directory rather than data/uploads/, so these routes
+# carry their own containment check against their own anchor — the uploads
+# anchor is load-bearing and must not be widened to cover a second tree.
+#
+# Position is held server-side (see backend/books.py) because both sides can
+# turn the page: the learner clicks, the tutor calls go_to_page, and whichever
+# moved it, the other reconciles against the record.
+
+
+class BookPosition(BaseModel):
+    page: int
+    window: int | None = None
+
+
+class BookFromUrl(BaseModel):
+    url: str
+    title: str = ""
+
+
+@router.get("/reader-capabilities")
+async def reader_capabilities():
+    """What the reader can offer, so the UI can explain rather than 501."""
+    from backend.pdfimport import is_available
+
+    return {"pdf_import": is_available(), "url_fetch": is_available()}
+
+
+@router.get("/books/{email}")
+async def list_books_route(email: str):
+    from backend.books import list_books
+
+    return {"books": list_books(email)}
+
+
+@router.post("/books/{email}/upload")
+async def upload_book(email: str, file: UploadFile = File(...), title: str = ""):
+    """Store an uploaded PDF as a book and render its opening pages.
+
+    Multipart rather than base64, for the same reason as the notes importer: a
+    30MB book would become ~40MB of JSON string in browser memory.
+
+    Synchronous — unlike the notes importer this renders only the first few
+    pages (~0.5s), because a book's pages are rendered on demand. That is what
+    keeps opening a 400-page grammar off the background-job path entirely.
+    """
+    from backend.books import create_book
+    from backend.pdfimport import MAX_PDF_BYTES, PdfImportUnavailable
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    if len(data) > MAX_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF exceeds {MAX_PDF_BYTES // (1024 * 1024)}MB limit",
+        )
+
+    name = file.filename or "document.pdf"
+    try:
+        record = await asyncio.to_thread(
+            create_book,
+            email,
+            pdf_bytes=data,
+            title=title or os.path.splitext(name)[0],
+            source={"kind": "upload", "url": "", "filename": name, "identifier": ""},
+        )
+    except PdfImportUnavailable:
+        raise HTTPException(
+            status_code=501,
+            detail="Reading books needs PyMuPDF on the server (pip install PyMuPDF)",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "book": record}
+
+
+@router.get("/books/{email}/{book_id}")
+async def get_book_route(email: str, book_id: str):
+    from backend.books import get_book
+
+    record = get_book(email, book_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Book not found")
+    return record
+
+
+@router.delete("/books/{email}/{book_id}")
+async def delete_book_route(email: str, book_id: str):
+    from backend.books import delete_book
+
+    if not delete_book(email, book_id):
+        raise HTTPException(status_code=404, detail="Book not found")
+    return {"ok": True}
+
+
+@router.put("/books/{email}/{book_id}/position")
+async def set_book_position(email: str, book_id: str, body: BookPosition):
+    """Move the reading position and render what is now visible.
+
+    Renders the window plus a small read-ahead so clicking Next is instant.
+    On a worker thread: chat streams SSE from this same event loop.
+    """
+    from backend.books import (
+        READ_AHEAD,
+        ensure_pages,
+        set_position,
+        window_pages,
+    )
+    from backend.pdfimport import PdfImportUnavailable
+
+    record = set_position(email, book_id, body.page, body.window)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    pos = record["position"]
+    try:
+        await asyncio.to_thread(
+            ensure_pages,
+            email,
+            book_id,
+            window_pages(record, pos["page"], pos["window"], READ_AHEAD),
+        )
+    except PdfImportUnavailable:
+        raise HTTPException(status_code=501, detail="PyMuPDF is not installed")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return record
+
+
+@router.get("/books/{email}/{book_id}/page/{n}.png")
+async def get_book_page(email: str, book_id: str, n: int, dpi: int = 0):
+    """One rendered page image.
+
+    Its own route rather than the uploads one: book pages live under
+    books/<book_id>/, and the uploads route resolves against
+    EpisodicMemory.uploads_dir_for(email), which is its trust anchor. Same
+    realpath + commonpath check, different anchor.
+
+    The page may not be rendered yet — pages render on demand, not upfront (a
+    400-page book is ~200MB and minutes of CPU at display DPI). Render it here
+    rather than 404-ing: dragging the scrollbar to an unseen page is a
+    legitimate way to reach one.
+    """
+    from fastapi.responses import FileResponse
+
+    from backend.books import _safe_book_id, book_dir, ensure_pages, page_image_path
+    from backend.pdfimport import PdfImportUnavailable
+
+    try:
+        book_id = _safe_book_id(book_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not found")
+    if n < 1:
+        raise HTTPException(status_code=404, detail="not found")
+
+    # n is an int path param so traversal cannot enter through it, but book_id
+    # is a string and the check costs one call.
+    base = os.path.realpath(book_dir(email, book_id))
+    target = os.path.realpath(page_image_path(email, book_id, n))
+    if target != base and os.path.commonpath([base, target]) != base:
+        raise HTTPException(status_code=404, detail="not found")
+
+    # A deep zoom asks for more pixels than the stored 144 DPI copy has. Render
+    # it fresh at the requested DPI and do NOT cache: a 300 DPI page is several
+    # MB, and only a handful of pages in a book are ever zoomed into, so a
+    # third stored copy of all of them would cost far more than re-rendering.
+    if dpi:
+        from fastapi.responses import Response as _Response
+
+        from backend.books import render_page_at_dpi
+
+        try:
+            data = await asyncio.to_thread(
+                render_page_at_dpi, email, book_id, n, dpi
+            )
+        except (PdfImportUnavailable, ValueError):
+            data = None
+        if data is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return _Response(
+            content=data,
+            media_type="image/png",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    if not os.path.isfile(target):
+        try:
+            await asyncio.to_thread(ensure_pages, email, book_id, [n])
+        except (PdfImportUnavailable, ValueError):
+            raise HTTPException(status_code=404, detail="not found")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="not found")
+
+    # Immutable once rendered: page N of book B never changes.
+    return FileResponse(target, headers={"Cache-Control": "private, max-age=86400"})
+
+
+# --- Book fetch jobs ---
+#
+# Downloading a book is slow and unpredictable, so open_book (and the URL box
+# in the reader) return a job id immediately. Mirrors the demo-job routes.
+
+
+@router.post("/books/{email}/from-url")
+async def open_book_from_url(email: str, body: BookFromUrl):
+    """Start a background fetch. Returns the job record, not the book."""
+    from backend.bookjobs import start_book_job
+
+    if not (body.url or "").strip():
+        raise HTTPException(status_code=400, detail="a url is required")
+    return start_book_job(email, body.url, body.title)
+
+
+@router.get("/book-jobs/{email}")
+async def list_book_jobs_route(email: str):
+    from backend.bookjobs import list_jobs
+
+    return {"jobs": list_jobs(email)}
+
+
+@router.get("/book-jobs/{email}/{job_id}")
+async def get_book_job_route(email: str, job_id: str):
+    from backend.bookjobs import get_job
+
+    record = get_job(email, job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return record
+
+
+@router.post("/book-jobs/{email}/{job_id}/cancel")
+async def cancel_book_job_route(email: str, job_id: str):
+    """Stop a running fetch. Explicit only — closing the tab must not cancel."""
+    from backend.bookjobs import request_cancel
+
+    if not request_cancel(email, job_id):
+        raise HTTPException(status_code=404, detail="Job not found or already finished")
+    return {"ok": True}

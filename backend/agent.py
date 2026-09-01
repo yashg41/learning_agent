@@ -5,6 +5,7 @@ Tier 2 (Episodic Memory): ChromaDB conversation store (episodic.py)
 Tier 3 (Semantic Memory): JSON knowledge graph (knowledge.py)
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -141,6 +142,15 @@ _TUTOR_TOOLS_BY_FAMILY = {
         "mcp__learning-tools__analyse_sanskrit",
         "mcp__learning-tools__lookup_word",
     ],
+    # Turning the pages of a book the learner has open. Also all tutor-facing:
+    # the position is a single write and the pane follows it, so there is
+    # nothing here to hand to a builder.
+    "reader": [
+        "mcp__learning-tools__go_to_page",
+        "mcp__learning-tools__advance_pages",
+        "mcp__learning-tools__open_book",
+        "mcp__learning-tools__list_books",
+    ],
 }
 
 # Built-ins, not MCP: the tutor's only route to anything newer than the model's
@@ -260,6 +270,7 @@ async def run_agent(
     attachments: list[dict] | None = None,
     demo_ref: dict | None = None,
     derivation_ref: dict | None = None,
+    book_ref: dict | None = None,
     app: str = "pymentor",
 ) -> str | None:
     """Run the learning agent for a user.
@@ -286,6 +297,11 @@ async def run_agent(
         demo_ref: {"demo_id": str, "selection": {...}} when the learner asked
             about a demo. A structural digest is prepended to the prompt; the
             model never sees the demo's html unless it calls get_demo_source.
+        book_ref: {"book_id": str} when the learner is reading a book. The id
+            only — the server owns the reading position, so a page named by the
+            client could disagree with the record the moment the tutor turned
+            one. A digest is prepended on every turn; the page images ride
+            along only when the position moved (see books.needs_resend).
 
     Returns the session_id.
     """
@@ -420,6 +436,64 @@ async def run_agent(
     # also what marks this run as "the tutor" rather than "the builder".
     session_ctx: dict = {"session_id": session_id}
 
+    # A book the learner is reading with the tutor. Two mechanisms, and they
+    # are deliberately different:
+    #
+    #   - the DIGEST is text, ~60 tokens, and goes in on EVERY turn. It is what
+    #     keeps the model oriented on the turns where no image is sent.
+    #   - the IMAGES are ~1,400 tokens EACH and go in only when the position
+    #     changed since the last turn of this session.
+    #
+    # Re-sending the images every turn would cost tens of thousands of tokens
+    # over a conversation about one page spread — and they land in the SDK
+    # transcript, so they would be replayed on every later turn as well. Same
+    # reasoning that keeps demo html out of the prompt (see demo_digest).
+    #
+    # Placed here, AFTER the session resolution above, because needs_resend
+    # keys on the session id: a new session has an empty transcript, so an
+    # unchanged position must still re-send. Keyed on the unresolved argument
+    # this would compare against None and silently never re-send.
+    book_images: list[dict] = []
+    if book_ref and book_ref.get("book_id"):
+        from backend.books import (
+            book_digest,
+            needs_resend,
+            page_images_for_model,
+        )
+
+        book_id = book_ref["book_id"]
+        digest = book_digest(email, book_id)
+        if digest:
+            if needs_resend(email, book_id, session_id):
+                # Rendering is CPU-bound and this event loop is streaming SSE.
+                book_images = await asyncio.to_thread(
+                    page_images_for_model, email, book_id
+                )
+
+            if book_images:
+                frame = (
+                    f"[The learner is reading with you. {digest}\n\n"
+                    "The page images for this position are attached to THIS "
+                    "message, above — read them directly. Do not look for a "
+                    "file on disk and do not ask them to paste the text.\n\n"
+                    "To move, call go_to_page or advance_pages; the reader "
+                    "pane follows you. Do not ask them to turn the page.]\n\n"
+                )
+                # NB: mark_sent happens after the run, against the session id
+                # the SDK actually returns — see below.
+            else:
+                frame = (
+                    f"[The learner is reading with you. {digest}\n\n"
+                    "You were shown these page images earlier in this "
+                    "conversation — they are still the current position. Work "
+                    "from what you already read; do not claim you cannot see "
+                    "the page, and do not ask them to re-send it.\n\n"
+                    "To move, call go_to_page or advance_pages.]\n\n"
+                )
+            prompt = frame + prompt
+        else:
+            logger.warning(f"book_ref {book_id} not found for {email}")
+
     # Run the SDK query
     result_session_id = await run_agent_internal(
         prompt=prompt,
@@ -429,7 +503,16 @@ async def run_agent(
         on_event=on_event,
         email=email,
         fork_session=do_fork,
-        attachments=attachments,
+        # Book pages are merged in HERE, not into `attachments` above: that
+        # list is what saved_attachments was built from, so folding them in
+        # earlier would write a duplicate PNG into data/uploads/ and record it
+        # on the transcript on every single page turn.
+        #
+        # They are also outside MAX_ATTACHMENTS_PER_TURN by construction, and
+        # that is deliberate: the cap is validated in the route against what a
+        # CLIENT posted, to stop 40MB of base64 arriving over the wire. These
+        # are server-generated and bounded by MAX_WINDOW_PAGES_TO_MODEL.
+        attachments=(attachments or []) + book_images,
         saved_attachments=saved_attachments,
         session_ctx=session_ctx,
         # Without this the tools are built for the default app, so the
@@ -437,6 +520,20 @@ async def run_agent(
         # answered "Unknown track 'sanskrit'" for its own curriculum.
         app=app,
     )
+
+    # Record which session has now seen this book position, against the id the
+    # SDK actually returned.
+    #
+    # NOT the session_id computed before the run: on the first turn of a
+    # session that is None, and a placeholder or a restore rewrites it too. The
+    # images would then be marked as sent under None, and the NEXT new session
+    # — also None at this point — would look like the same one and skip them.
+    # The model would then discuss, fluently and with total confidence, a page
+    # it had never been shown. Only the returned id is stable enough to key on.
+    if book_images and result_session_id and book_ref:
+        from backend.books import mark_sent
+
+        mark_sent(email, book_ref["book_id"], result_session_id)
 
     # Save session mapping
     if result_session_id:
