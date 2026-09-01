@@ -107,3 +107,44 @@ def test_email_is_sanitised_identically_in_both_apps():
 
     assert _safe_email("yashg41") == "yashg41"
     assert _safe_email("Yashg41 ") == _safe_email("yashg41")
+
+
+# --- Routes ----------------------------------------------------------------
+
+
+def _routes_for(app: str, monkeypatch) -> set:
+    """The URL paths a process serving `app` would register.
+
+    backend.main reads settings.APP at import, so the module is reloaded with
+    the setting changed rather than a live server being started.
+    """
+    import importlib
+
+    from backend import config, main
+
+    monkeypatch.setattr(config.settings, "APP", app)
+    reloaded = importlib.reload(main)
+    paths = {r.path for r in reloaded.app.routes}
+    # Leave the module as the rest of the session expects to find it.
+    monkeypatch.undo()
+    importlib.reload(main)
+    return paths
+
+
+def test_each_app_serves_its_own_ui_at_the_root(monkeypatch):
+    for app in sorted(APP_TRACKS):
+        paths = _routes_for(app, monkeypatch)
+        for expected in ("/", "/graph", "/memory"):
+            assert expected in paths, f"{app} does not serve {expected}"
+
+
+def test_no_app_serves_the_other_ones_prefix(monkeypatch):
+    """The /sanskrit/* prefix is gone: a process serves one tutor, at the root.
+
+    If it came back, the two would be reachable from one process again — and
+    the data split assumes exactly one app per process, since the root is
+    chosen once at import from settings.APP.
+    """
+    for app in sorted(APP_TRACKS):
+        stray = [p for p in _routes_for(app, monkeypatch) if p.startswith("/sanskrit")]
+        assert not stray, f"{app} still serves {stray}"

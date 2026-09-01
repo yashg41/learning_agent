@@ -13,17 +13,17 @@
          but its conjunct-substitution rules are effectively empty in the
          Google Fonts build, so संयुक्ताक्षर render as separate letters. -->
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+Devanagari:wght@400;600&display=swap">
-    <link rel="stylesheet" href="/static/sanskrit/tokens.css">
+    <link rel="stylesheet" href="/static/tokens.css">
     <link rel="stylesheet" href="/api/palette.css">
     <!-- Before styles.css: KaTeX ships its own .katex rules, and the overrides
          in styles.css (sizing, overflow on wide equations) have to win. -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-    <link rel="stylesheet" href="/static/sanskrit/styles.css">
+    <link rel="stylesheet" href="/static/styles.css">
     <!-- After styles.css: the notes pane overrides a few shared button rules
          and should win without !important. -->
-    <link rel="stylesheet" href="/static/sanskrit/notes.css">
-    <link rel="stylesheet" href="/static/sanskrit/demo-pane.css">
-    <link rel="stylesheet" href="/static/sanskrit/reader.css">
+    <link rel="stylesheet" href="/static/notes.css">
+    <link rel="stylesheet" href="/static/demo-pane.css">
+    <link rel="stylesheet" href="/static/reader.css">
     <script>
         // Applied before first paint so the page never flashes the wrong theme.
         // ?theme= wins (useful for screenshots), then the saved choice, then
@@ -483,21 +483,21 @@
         window.mermaid = mermaid;
         window.dispatchEvent(new Event("mermaid-ready"));
     </script>
-    <script src="/static/sanskrit/app.js"></script>
+    <script src="/static/app.js"></script>
     <!-- After app.js: notes.js uses renderMarkdown/escapeHtml and reads the
          currentEmail / currentSessionId globals it declares. -->
-    <script src="/static/sanskrit/notes.js"></script>
+    <script src="/static/notes.js"></script>
     <!-- After notes.js: reuses its pane-divider helpers (syncPaneSplit) and
          cooperates with toggleNotes for pane exclusivity. -->
-    <script src="/static/sanskrit/demo-pane.js"></script>
+    <script src="/static/demo-pane.js"></script>
     <!-- After both: wraps openRightPane, toggleNotes and toggleDemo rather
          than editing them, because notes.js and demo-pane.js are byte-identical
          forks of the PyMentor copies and PyMentor has no reader. The wrappers
          need their targets already defined. -->
-    <script src="/static/sanskrit/reader-pane.js"></script>
+    <script src="/static/reader-pane.js"></script>
     <!-- Last: binds one delegated click handler for every Devanagari run
          app.js has tagged, so it must load after app.js defines them. It
          disables itself if the browser has no Indic voice. -->
-    <script src="/static/sanskrit/audio.js"></script>
+    <script src="/static/audio.js"></script>
 </body>
 </html>

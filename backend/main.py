@@ -107,53 +107,50 @@ class NoCacheStaticFiles(StaticFiles):
         return resp
 
 
-if os.path.exists(frontend_path):
-    app.mount("/static", NoCacheStaticFiles(directory=frontend_path), name="static")
-
-
-# --- The Sanskrit tutor ------------------------------------------------
+# This process serves exactly ONE tutor, and its UI lives at the root.
 #
-# Every page lives under /sanskrit/, so the URL says which tutor you are
-# talking to. The alternative — one /graph shared between apps, told apart
-# by ?app= — reads as an afterthought and makes a bookmark ambiguous.
+# The alternative — both tutors in one process, told apart by a /sanskrit/
+# prefix — is what this replaced. It shared a data root, a Chroma store and an
+# active-session pointer between them, and the only thing keeping one learner's
+# two tutors apart was having typed two different emails.
 #
-# The views themselves are shared files: /sanskrit/graph serves the same
-# graph.html as /graph, which reads its app from the path. One renderer, two
-# curricula, no forked copy to keep in step.
+# APP_DIR is the front end for this app. Mounting it at /static rather than
+# mounting all of frontend/ has a pleasant consequence: tokens.css exists in
+# both roots, so the shared graph and memory pages ask for /static/tokens.css
+# and get the right theme automatically, with no path sniffing.
+APP_DIR = (
+    os.path.join(frontend_path, "sanskrit")
+    if settings.APP == "sanskrit"
+    else frontend_path
+)
 
-@app.get("/sanskrit")
-async def sanskrit_index():
-    """The Sanskrit tutor's own UI.
-
-    A separate page rather than a mode toggle on the existing one: the two
-    tutors share a backend but not a front end, and the panes differ (no code
-    runner, no derivations) as does the whole visual register.
-    """
-    return FileResponse(os.path.join(frontend_path, "sanskrit", "index.html"))
-
-
-@app.get("/sanskrit/graph")
-async def sanskrit_graph():
-    """Sanskrit's knowledge graph — same renderer, scoped by the path."""
-    return FileResponse(os.path.join(frontend_path, "graph.html"))
-
-
-@app.get("/sanskrit/memory")
-async def sanskrit_memory():
-    """Sanskrit's memory explorer — same renderer, scoped by the path."""
-    return FileResponse(os.path.join(frontend_path, "chroma.html"))
+if os.path.exists(APP_DIR):
+    app.mount("/static", NoCacheStaticFiles(directory=APP_DIR), name="static")
 
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(frontend_path, "index.html"))
+    """This app's chat UI.
 
-
-@app.get("/chroma")
-async def chroma_viewer():
-    return FileResponse(os.path.join(frontend_path, "chroma.html"))
+    The two tutors share a backend but not a front end: the panes differ (no
+    code runner or derivations in Sanskrit) as does the whole visual register.
+    """
+    return FileResponse(os.path.join(APP_DIR, "index.html"))
 
 
 @app.get("/graph")
 async def knowledge_graph():
+    """The knowledge graph — one renderer, scoped by which process serves it.
+
+    graph.html and chroma.html stay shared, unforked files. They learn which
+    app they belong to from /api/app.js, which the server generates: the
+    process IS the app, so the server is the only thing that unambiguously
+    knows, and a bare /graph bookmark can never be ambiguous.
+    """
     return FileResponse(os.path.join(frontend_path, "graph.html"))
+
+
+@app.get("/memory")
+@app.get("/chroma")   # the older name; kept so existing bookmarks still work
+async def memory_explorer():
+    return FileResponse(os.path.join(frontend_path, "chroma.html"))

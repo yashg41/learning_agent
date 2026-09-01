@@ -5,25 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PyMentor — Knowledge Graph</title>
 
+<!-- First, and synchronous: defines window.APP before anything reads it,
+     including the pre-paint theme script below. The server generates it
+     because this process IS one app — see /api/app.js. -->
+<script src="/api/app.js"></script>
+
 <!-- Shared tokens, then the curriculum palette derived per theme in
-     backend/knowledge.py. This page keeps no colours of its own. -->
+     backend/knowledge.py. This page keeps no colours of its own.
+     No theme swap needed: /static is mounted per app and tokens.css exists in
+     both front ends, so this resolves to the right one on its own. -->
 <link rel="stylesheet" href="/static/tokens.css" id="tokens-css">
 <link rel="stylesheet" href="/api/palette.css">
-<script>
-    // Swap in the Sanskrit token set before first paint, so the graph wears
-    // the amber theme rather than PyMentor's violet when reached from
-    // /sanskrit/graph. Inline and synchronous on purpose: doing this from a
-    // deferred script would flash the wrong accent.
-    if (location.pathname.startsWith("/sanskrit/")) {
-        document.getElementById("tokens-css").href = "/static/sanskrit/tokens.css";
-    }
-</script>
 <script>
     // Applied before first paint so the page never flashes the wrong theme.
     (function () {
         var forced = new URLSearchParams(location.search).get('theme');
         var saved = null;
-        try { saved = localStorage.getItem('pymentor:theme'); } catch (e) {}
+        try { saved = localStorage.getItem((window.APP || 'pymentor') + ':theme'); } catch (e) {}
         var prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
         var t = (forced === 'light' || forced === 'dark') ? forced
               : saved || (prefersLight ? 'light' : 'dark');
@@ -409,12 +407,12 @@ input[type="email"]:focus { outline: none; border-color: var(--accent); }
 // instead of 271.
 // =====================================================================
 
-// Which tutor's graph this is, taken from the path: /sanskrit/graph is the
-// Sanskrit curriculum, /graph is PyMentor's. The path rather than a query
-// param so a bookmark is unambiguous about which tutor it belongs to.
+// Which tutor's graph this is. The server tells us, via /api/app.js: this
+// process serves exactly one app, so there is nothing to infer from the URL
+// and a bare /graph bookmark can never mean the wrong tutor.
 // ?app= is still honoured as an override for quick comparisons.
 const APP = new URLSearchParams(location.search).get("app")
-    || (location.pathname.startsWith("/sanskrit/") ? "sanskrit" : "pymentor");
+    || window.APP || "pymentor";
 
 // Point the shared chrome at whichever tutor this is. Without this the
 // Sanskrit graph's nav walks you into PyMentor's chat.
@@ -430,9 +428,10 @@ if (APP === "sanskrit") {
             const el = document.getElementById(id);
             if (el) el.href = href;
         };
-        set("nav-chat", "/sanskrit");
-        set("nav-graph", "/sanskrit/graph");
-        set("nav-memory", "/sanskrit/memory");
+        // Root-relative: each app serves its own UI at /.
+        set("nav-chat", "/");
+        set("nav-graph", "/graph");
+        set("nav-memory", "/memory");
     });
 }
 
@@ -513,7 +512,7 @@ function applyTheme(t, persist = true) {
     const btn = document.getElementById("theme-btn");
     if (btn) btn.textContent = t === "light" ? "◑ Dark" : "◐ Light";
     if (persist) {
-        try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
+        try { localStorage.setItem(APP + ":theme", t); } catch (e) {}
     }
     drawGraph();
 }
@@ -534,7 +533,7 @@ function updateLearnerChip(email) {
 async function loadGraph() {
     const email = document.getElementById("email").value.trim();
     if (!email) return;
-    try { localStorage.setItem("pymentor:email", email); } catch (e) {}
+    try { localStorage.setItem(APP + ":email", email); } catch (e) {}
     updateLearnerChip(email);
 
     try {
@@ -1129,7 +1128,7 @@ resizeCanvas();
     // ?email= lets a link (or a test) target a learner directly.
     let saved = new URLSearchParams(location.search).get("email");
     if (!saved) {
-        try { saved = localStorage.getItem("pymentor:email"); } catch (e) {}
+        try { saved = localStorage.getItem(APP + ":email"); } catch (e) {}
     }
     if (saved) {
         document.getElementById("email").value = saved;

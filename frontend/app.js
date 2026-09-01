@@ -1,5 +1,16 @@
 // PyMentor Frontend — SSE streaming + knowledge dashboard + multi-session
 
+// Which tutor this front end talks to. Sent on every chat turn rather than
+// relying on the server's default: if that default ever changed, PyMentor
+// would silently become a different tutor. The Sanskrit fork declares the
+// same constant.
+const APP = "pymentor";
+
+// localStorage is keyed per app. Different ports already give the two tutors
+// separate stores today, but the same email is now two different learners, so
+// nothing here should be shared even if they ever sit behind one hostname.
+const NS = (key) => `${APP}:${key}`;
+
 const API_BASE = "";
 let currentEmail = "";
 let currentSessionId = null;
@@ -27,7 +38,7 @@ function applyTheme(t, persist = true) {
         btn.title = t === "light" ? "Switch to dark" : "Switch to light";
     }
     if (persist) {
-        try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
+        try { localStorage.setItem(NS("theme"), t); } catch (e) {}
     }
     // Rendered diagrams are baked SVG — they hold the old theme's colours
     // until redrawn, which leaves them unreadable on the opposite theme.
@@ -65,7 +76,7 @@ function toggleRail(side, force) {
         btn.title = (willCollapse ? "Show " : "Hide ")
             + (side === "left" ? "sidebar (⌘\\)" : "panel (⌘])");
     }
-    try { localStorage.setItem("pymentor:rail-" + side, willCollapse ? "1" : "0"); } catch (e) {}
+    try { localStorage.setItem(NS("rail-") + side, willCollapse ? "1" : "0"); } catch (e) {}
     syncFocusBtn();
 }
 
@@ -92,7 +103,7 @@ function syncFocusBtn() {
 function initRails() {
     ["left", "right"].forEach(side => {
         let v = null;
-        try { v = localStorage.getItem("pymentor:rail-" + side); } catch (e) {}
+        try { v = localStorage.getItem(NS("rail-") + side); } catch (e) {}
         if (v === "1") toggleRail(side, true);
     });
     syncFocusBtn();
@@ -841,7 +852,7 @@ async function onEmailChange() {
     currentEmail = email;
     // Persist identity: without this every refresh drops it and blanks every
     // panel, even though the notebook already used localStorage for cells.
-    try { localStorage.setItem("pymentor:email", email); } catch (e) {}
+    try { localStorage.setItem(NS("email"), email); } catch (e) {}
     updateLearnerChip(email);
 
     // Reset per-learner UI state BEFORE loading the new user's sessions, so
@@ -1926,7 +1937,7 @@ class ChatController {
         showThinking(this.messagesEl);
 
         try {
-            const requestBody = { message, email };
+            const requestBody = { message, email, app: APP };
             // Always send an explicit session id when we have one: the backend
             // otherwise falls back to the user's "active session" pointer,
             // which two concurrent chats would fight over.
@@ -2398,6 +2409,7 @@ async function endSideChat() {
                 body: JSON.stringify({
                     parent_session_id: sideChatParentId || currentSessionId,
                     topic: sideChatTopic || "",
+                    app: APP,
                 }),
             }
         );
@@ -2521,7 +2533,9 @@ async function submitEdit(messageDiv, newText) {
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ turn_index: turnIndex, message: newText }),
+                body: JSON.stringify({
+                    turn_index: turnIndex, message: newText, app: APP,
+                }),
             }
         );
         if (!res.ok) throw new Error(`Server returned ${res.status} ${res.statusText}`);
@@ -2805,7 +2819,7 @@ async function refreshKnowledge(email) {
 
 function collapsedGroupsKey() {
     const email = getEmail();
-    return email ? `pymentor:progress-collapsed:${email}` : "pymentor:progress-collapsed:_anon";
+    return email ? `${NS("progress-collapsed:")}${email}` : NS("progress-collapsed:_anon");
 }
 
 function loadCollapsedGroups() {
@@ -3245,7 +3259,7 @@ function makeOutputSink(pre) {
 
 function notebookKey() {
     const email = getEmail();
-    return email ? `pymentor:cells:${email}` : "pymentor:cells:_anon";
+    return email ? `${NS("cells:")}${email}` : NS("cells:_anon");
 }
 
 // Cap on output persisted per cell. localStorage tops out around 5MB per
@@ -3732,7 +3746,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const params = new URLSearchParams(location.search);
     let savedEmail = params.get("email");
     if (!savedEmail) {
-        try { savedEmail = localStorage.getItem("pymentor:email"); } catch (e) {}
+        try { savedEmail = localStorage.getItem(NS("email")); } catch (e) {}
     }
     // Both sources can carry a stale casing — a ?email= deep link built from
     // old ChromaDB metadata, or a localStorage value saved before this was

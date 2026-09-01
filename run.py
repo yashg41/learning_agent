@@ -17,6 +17,7 @@ Escape hatches, none needed for normal use:
   RELOAD=1     restart the agent on backend/ edits (kills in-flight builds)
 """
 
+import argparse
 import atexit
 import os
 import re
@@ -30,10 +31,16 @@ import urllib.request
 
 import uvicorn
 
-from backend.config import settings
+# NOTE: backend.config is deliberately NOT imported here. Which tutor this
+# process serves decides its data root, its Chroma store and its port, and all
+# three are derived when Settings is first constructed — so APP has to be in
+# the environment before that import happens. See _select_app() below, which
+# runs before the `from backend.config import settings` inside main().
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# Dropzone is a single shared utility — one fixed port, one token — so only one
+# supervisor may own it. It rides with PyMentor; see _select_app().
 START_DROPZONE = os.environ.get("DROPZONE", "1") not in ("0", "false", "no")
 START_TUNNEL = os.environ.get("TUNNEL", "1") not in ("0", "false", "no")
 
@@ -233,30 +240,93 @@ def local_ip() -> str | None:
         s.close()
 
 
-def banner(dz, tunnel_url: str | None):
-    port, token = dz.DROPZONE_PORT, dz.DROPZONE_TOKEN
+APP_LABELS = {"pymentor": "PyMentor", "sanskrit": "संस्कृतम्"}
+
+
+def _select_app() -> str:
+    """Parse the app argument and put it in the environment.
+
+    Must run BEFORE backend.config is imported: Settings derives DATA_DIR,
+    CHROMA_DIR and API_PORT from APP the moment it is constructed, and that
+    happens at import time.
+
+    backend.curriculum is safe to import this early — it is the single source
+    of truth for which apps exist and it imports nothing from config.
+    """
+    from backend.curriculum import APP_TRACKS
+
+    parser = argparse.ArgumentParser(
+        description="Start one of the tutors. Each gets its own data and port.",
+    )
+    parser.add_argument(
+        "app", nargs="?", default="pymentor", choices=sorted(APP_TRACKS),
+        help="which tutor to serve (default: pymentor)",
+    )
+    args = parser.parse_args()
+    os.environ["APP"] = args.app
+    return args.app
+
+
+def banner(app: str, settings, dz, tunnel_url: str | None):
+    """One block naming the app, its URL and — importantly — its data root.
+
+    The data root is the one-glance confirmation that the split is live. It is
+    also what you want to see when something feels like it went to the wrong
+    tutor. Printed unconditionally: it used to live inside the Dropzone branch,
+    so DROPZONE=0 gave no URL at all.
+    """
+    label = APP_LABELS.get(app, app)
     print()
     print("  " + "─" * 62)
-    print(f"  Learning app   http://{settings.API_HOST}:{settings.API_PORT}")
-    print()
-    print(f"  Dropzone       http://localhost:{port}/?t={token}")
-    if tunnel_url:
-        print(f"  On your tablet {tunnel_url}/t?t={token}")
-        print("                 (or just scan the QR on the Dropzone page)")
-    else:
-        ip = local_ip()
-        if ip:
-            print(f"  On your tablet http://{ip}:{port}/t?t={token}")
-            print("                 same Wi-Fi only; no clipboard copy over http")
-        if not shutil.which("cloudflared"):
-            print("                 run ./setup.sh to enable the https tunnel")
+    print(f"  {label:<14} http://{settings.API_HOST}:{settings.API_PORT}")
+    print(f"  {'Data':<14} {os.path.relpath(settings.DATA_DIR, ROOT)}")
+    if dz:
+        port, token = dz.DROPZONE_PORT, dz.DROPZONE_TOKEN
+        print()
+        print(f"  {'Dropzone':<14} http://localhost:{port}/?t={token}")
+        if tunnel_url:
+            print(f"  {'On your tablet':<14} {tunnel_url}/t?t={token}")
+            print(f"  {'':<14} (or just scan the QR on the Dropzone page)")
+        else:
+            ip = local_ip()
+            if ip:
+                print(f"  {'On your tablet':<14} http://{ip}:{port}/t?t={token}")
+                print(f"  {'':<14} same Wi-Fi only; no clipboard copy over http")
+            if not shutil.which("cloudflared"):
+                print(f"  {'':<14} run ./setup.sh to enable the https tunnel")
+    elif app != "pymentor":
+        print(f"  {'Dropzone':<14} runs with pymentor — start that too if you")
+        print(f"  {'':<14} need the tablet bridge")
     print("  " + "─" * 62)
     print()
 
 
 if __name__ == "__main__":
+    # Order matters: the app must be in the environment before Settings is
+    # constructed, because that is when the data root and port are derived.
+    APP = _select_app()
+    from backend.config import settings
+
     tunnel_url = None
     dz = None
+
+    # Refuse to start a second copy of the SAME tutor rather than failing
+    # obscurely inside uvicorn. Deliberately does NOT reclaim the port the way
+    # Dropzone's is reclaimed: a running tutor owns a `claude` CLI subprocess
+    # and possibly an in-flight demo build, and killing that from a second
+    # terminal is never what someone meant.
+    if port_in_use(settings.API_PORT):
+        print(f"\n  {APP} is already running on port {settings.API_PORT}.")
+        print("  Each tutor has its own port — pymentor 8001, sanskrit 8003 —")
+        print("  so the other one can run at the same time.\n")
+        sys.exit(1)
+
+    # Dropzone is one process on one fixed port with one token, so exactly one
+    # supervisor may own it. Two would fight over the port, and reclaim_port
+    # would have each start evict the other's in a loop. It rides with
+    # PyMentor; DROPZONE=1 forces it on for whoever asks.
+    if APP != "pymentor" and os.environ.get("DROPZONE") is None:
+        START_DROPZONE = False
 
     # uvicorn's reloader re-executes this module in a child process on every
     # file save. Without this guard each reload would spawn another Dropzone
@@ -296,8 +366,7 @@ if __name__ == "__main__":
             print()
             dz = None
 
-    if dz:
-        banner(dz, tunnel_url)
+    banner(APP, settings, dz, tunnel_url)
 
     try:
         uvicorn.run(
