@@ -722,7 +722,12 @@ window.addEventListener("mermaid-ready", () => {
  */
 function mermaidThemeVars() {
     const css = getComputedStyle(document.documentElement);
-    const v = n => css.getPropertyValue(n).trim();
+    // Collapse interior whitespace, not just the ends. A custom property
+    // keeps the newlines and indentation of its own declaration, and
+    // --font-sans is wrapped across two lines in tokens.css — so .trim()
+    // alone hands mermaid a font-family with a literal newline in it, which
+    // it then writes into inline style attributes on every label.
+    const v = n => css.getPropertyValue(n).replace(/\s+/g, " ").trim();
     return {
         background: v("--bg-secondary"),
         primaryColor: v("--bg-tertiary"),
@@ -733,7 +738,10 @@ function mermaidThemeVars() {
         lineColor: v("--text-muted"),
         textColor: v("--text-dim"),
         fontFamily: v("--font-sans") || "inherit",
-        fontSize: "14px",
+        // Matches --text-md, the app's prose size. A diagram sits inline with
+        // the explanation around it, so its labels reading a size smaller than
+        // that text made it look like a footnote rather than part of the point.
+        fontSize: "15px",
     };
 }
 
@@ -749,6 +757,41 @@ function initMermaid() {
         securityLevel: "strict",
         theme: "base",
         themeVariables: mermaidThemeVars(),
+        flowchart: {
+            // Labels are HTML in a <foreignObject>, which is what lets them
+            // inherit the app's font. The cost is that this file's global
+            // reset reaches inside them too; styles.css puts the line box
+            // back so mermaid's measured height matches what is painted.
+            htmlLabels: true,
+            // Headroom inside each node. The default is tight enough that a
+            // descender ("y" in "Fuzzy", "g" in "Caching") sits on the
+            // boundary and reads as clipped even when the box is nominally
+            // correct.
+            padding: 10,
+            // Diagrams here are mostly two-column mappings whose right-hand
+            // labels are long ("Offline: OLAP/Lakehouse"). The default
+            // spacing lets those crowd the arrowheads.
+            // Mermaid's own defaults. An earlier attempt raised rankSpacing to
+            // 60 on the theory that spacing "shrank with the downscale" — but
+            // rankSpacing is dagre's global ranksep on a COMPOUND graph, so it
+            // also applies between ranks inside a subgraph, and dagre adds
+            // virtual border nodes per cluster that each consume a rank. The
+            // extra 10px compounded into ~100px voids inside every cluster.
+            nodeSpacing: 50,
+            rankSpacing: 50,
+            // Draw at intrinsic size and let the figure scroll if it must.
+            //
+            // This was true, which made mermaid scale the whole SVG down to
+            // fit its container. Every value above is applied BEFORE that
+            // scale, so on a narrow column the padding, spacing and font were
+            // all shrunk away together and a six-step pipeline came out
+            // unreadably small — the settings looked right and had no effect.
+            // Scrolling a too-wide diagram beats scaling every diagram down;
+            // .mermaid-figure has carried overflow-x: auto for exactly this,
+            // and only now does it do anything. The expand button opens the
+            // diagram large when the inline card is still too tight.
+            useMaxWidth: false,
+        },
     });
 }
 
@@ -776,7 +819,12 @@ async function drawMermaid(fig) {
         initMermaid();
         const { svg } = await window.mermaid.render(`mmd-${++mermaidSeq}`, src);
         fig.innerHTML = svg;
+        // Order matters: labels first, so fitClusterTitles measures a title
+        // box that is already its true size rather than a clipped one.
+        fitLabelBoxes(fig);
+        fitClusterTitles(fig);
         attachMermaidNodeClicks(fig);
+        addExpandButton(fig);
     } catch (e) {
         // Invalid diagram syntax is a model mistake, not a page fault. Show
         // the source back rather than an empty box, so the learner still
@@ -807,6 +855,420 @@ function attachMermaidNodeClicks(fig) {
             autoResizeInput(input);
             input.focus();
         });
+    });
+}
+
+/**
+ * Let nodes be dragged in the zoom window, with their arrows following.
+ *
+ * Mermaid lays a diagram out once and bakes the result: each node is a <g>
+ * carrying transform="translate(x,y)", and each edge is a <path> whose "d" is
+ * a fixed list of points in the same coordinate space. Nothing recomputes, so
+ * moving a node means moving its <g> AND rewriting every path that touches it.
+ *
+ * Edges are matched to nodes by mermaid's own id convention — an edge path is
+ * id="L_<source>_<target>_<n>" against nodes id="flowchart-<name>-<n>". That
+ * convention is not guaranteed across versions, so a node whose edges cannot
+ * be parsed simply drags without them rather than throwing: the diagram stays
+ * usable and only the arrow-following degrades.
+ *
+ * Only the endpoint nearest the moved node is rewritten, and the rest of the
+ * path is left alone. Re-routing properly (re-running dagre) would relayout
+ * the whole diagram and fight the thing the user just did by hand.
+ */
+function enableNodeDragging(root) {
+    const nodes = root.querySelectorAll("g.node");
+    if (!nodes.length) return;
+
+    // id -> the node's own name, as edge ids spell it. "flowchart-A-3" -> "A".
+    const nameOf = (el) => {
+        const m = /^flowchart-(.+)-\d+$/.exec(el.id || "");
+        return m ? m[1] : null;
+    };
+
+    // Index edges by the pair they connect, so a drag only touches its own.
+    const edges = [];
+    root.querySelectorAll("g.edgePaths path").forEach(p => {
+        const m = /^L_(.+)_(.+)_\d+$/.exec(p.id || "");
+        if (m) edges.push({ path: p, from: m[1], to: m[2] });
+    });
+
+    nodes.forEach(node => {
+        const name = nameOf(node);
+        node.style.cursor = "move";
+
+        node.addEventListener("pointerdown", (e) => {
+            // Left button only, and swallow the event so the stage's pan
+            // handler does not also drag the whole canvas underneath.
+            if (e.button !== 0) return;
+            e.stopPropagation();
+            e.preventDefault();
+
+            const start = readTranslate(node);
+            const originX = e.clientX, originY = e.clientY;
+            // The stage may be zoomed; a screen pixel is not a user unit.
+            const scale = (zoomState && zoomState.scale) || 1;
+
+            const mine = name
+                ? edges.filter(x => x.from === name || x.to === name)
+                : [];
+            // Snapshot each path's original geometry once, so every move is
+            // computed from the original rather than compounding rounding.
+            const originals = mine.map(x => ({ ...x, d: x.path.getAttribute("d") }));
+
+            const onMove = (ev) => {
+                const dx = (ev.clientX - originX) / scale;
+                const dy = (ev.clientY - originY) / scale;
+                node.setAttribute(
+                    "transform", `translate(${start.x + dx},${start.y + dy})`
+                );
+                originals.forEach(o => {
+                    // A node at both ends (self-loop) moves the whole path.
+                    const both = o.from === name && o.to === name;
+                    o.path.setAttribute(
+                        "d", shiftPathEnd(o.d, dx, dy, both ? "all"
+                            : (o.to === name ? "end" : "start"))
+                    );
+                });
+            };
+            const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+            };
+            // On window, not the node: a fast drag outruns a small shape.
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp);
+        });
+    });
+}
+
+/** Current translate() of a node, defaulting to the origin. */
+function readTranslate(el) {
+    const m = /translate\(\s*([-\d.]+)[ ,]+([-\d.]+)/.exec(
+        el.getAttribute("transform") || ""
+    );
+    return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]) } : { x: 0, y: 0 };
+}
+
+/**
+ * Move one end of an SVG path by (dx,dy), leaving the rest in place.
+ *
+ * Paths here are absolute M/L/C sequences of plain numbers, so the coordinate
+ * pairs can be shifted directly. `which` picks the first pair, the last, or
+ * every one — anything else is returned untouched rather than mangled.
+ */
+function shiftPathEnd(d, dx, dy, which) {
+    const nums = d.match(/-?\d+(?:\.\d+)?/g);
+    if (!nums || nums.length < 4) return d;
+    const pairs = Math.floor(nums.length / 2);
+    let i = 0;
+    return d.replace(/-?\d+(?:\.\d+)?/g, (n) => {
+        const idx = i++;
+        const pair = Math.floor(idx / 2);
+        const move = which === "all"
+            || (which === "start" && pair === 0)
+            || (which === "end" && pair === pairs - 1);
+        if (!move) return n;
+        return String(parseFloat(n) + (idx % 2 === 0 ? dx : dy));
+    });
+}
+
+/**
+ * Grow every label box that is smaller than the text inside it.
+ *
+ * Mermaid sizes each <foreignObject> by measuring the label div, then writes
+ * that measurement as the element's width/height — and a foreignObject CLIPS
+ * to exactly its box. So the measured size IS the clip size, with no slack,
+ * and anything that makes the painted glyphs exceed the measurement is cut.
+ *
+ * That is what happened at 15px: mermaid measured 15.54px of text and wrote
+ * height="18", while this file's own line-height (1.2) and 2px vertical
+ * padding put the painted box at ~22px. Every descender — the g in "Incoming
+ * query", the y in "yes" — was shaved off along the bottom edge, uniformly,
+ * across the whole diagram.
+ *
+ * Rather than tune the CSS to whatever font size happens to be set (the
+ * previous 1.2/2px pair was tuned for 14px and silently stopped fitting when
+ * the font grew), measure what the browser actually laid out and correct the
+ * box to match. That holds at any font size, and it is mermaid's own approach
+ * — measure, then size — applied after its measurement is already stale.
+ */
+function fitLabelBoxes(fig) {
+    fig.querySelectorAll("foreignObject").forEach(fo => {
+        const div = fo.firstElementChild;
+        if (!div) return;
+        // scrollWidth/Height are the content's full laid-out size INCLUDING
+        // padding — precisely what the clip box has to cover. They ignore the
+        // clip itself, so they report the size the box should have been.
+        const needW = div.scrollWidth;
+        const needH = div.scrollHeight;
+        if (!needW || !needH) return;
+
+        const haveW = fo.width.baseVal.value;
+        const haveH = fo.height.baseVal.value;
+
+        // Grow only. Shrinking would fight mermaid's centring, which already
+        // positioned this box against its shape using the original numbers.
+        if (needH > haveH) {
+            fo.setAttribute("height", needH);
+            // Keep the text centred on the shape: mermaid placed the box by
+            // its top-left, so growing downward alone would push the label
+            // low inside its node instead of centring it.
+            fo.setAttribute("y", fo.y.baseVal.value - (needH - haveH) / 2);
+        }
+        if (needW > haveW) {
+            fo.setAttribute("width", needW);
+            fo.setAttribute("x", fo.x.baseVal.value - (needW - haveW) / 2);
+        }
+    });
+}
+
+/**
+ * Widen any subgraph box whose title is wider than it is.
+ *
+ * Mermaid sizes a cluster from the nodes inside it and gives it zero
+ * horizontal padding, while createLabel hard-codes white-space: nowrap on the
+ * title — so a title longer than its contents is simply cut off mid-word
+ * ("STORE — give me a safe, structure"). No config fixes this: wrappingWidth
+ * only reaches markdown-string labels, and subGraphTitleMargin is vertical.
+ * The SVG is in the DOM by now though, so correct it here.
+ *
+ * getBBox, not getBoundingClientRect: bbox is in the SVG's own user units,
+ * which is what the rect's x/width attributes are in. getBoundingClientRect
+ * returns screen pixels and would be wrong the moment the zoom window applies
+ * a transform: scale().
+ */
+function fitClusterTitles(fig) {
+    const PAD = 12;   // breathing room either side of the title
+    fig.querySelectorAll("g.cluster").forEach(cluster => {
+        const rect = cluster.querySelector("rect");
+        const label = cluster.querySelector(".cluster-label");
+        // Mermaid's internals are version-specific and lazily loaded; if this
+        // build shapes clusters differently, leave the diagram exactly as
+        // drawn rather than half-adjusting it.
+        if (!rect || !label) return;
+
+        let need, have;
+        try {
+            need = label.getBBox().width + PAD * 2;
+            have = rect.width.baseVal.value;
+        } catch (e) {
+            return;   // getBBox throws on a node that isn't rendered yet
+        }
+        if (!(need > have)) return;   // never shrink a cluster to its title
+
+        // Grow about the centre so the box spreads both ways instead of
+        // drifting right into whatever dagre placed beside it.
+        const grow = need - have;
+        rect.setAttribute("x", rect.x.baseVal.value - grow / 2);
+        rect.setAttribute("width", need);
+
+        // The title sits in a foreignObject sized to the old measurement, and
+        // a foreignObject CLIPS to its own box — widening the rect alone would
+        // leave the text cut at the same place inside a bigger container.
+        const fo = label.querySelector("foreignObject");
+        if (fo) fo.setAttribute("width", need - PAD * 2);
+    });
+}
+
+/**
+ * Add the corner control that opens this diagram in the zoom window.
+ *
+ * A separate button rather than a click on the diagram body: the nodes
+ * themselves already claim clicks to ask the tutor about a step, and taking
+ * that over would trade one affordance for another.
+ *
+ * drawMermaid re-runs on the same figure (theme flips, and enrichMessage's
+ * repeated passes over a turn) and each run reassigns fig.innerHTML, which
+ * destroys this button. So the guard asks whether the button is actually
+ * THERE rather than setting a dataset flag: a flag would survive the wipe
+ * that removed the button and suppress the rebuild, leaving figures with no
+ * way to expand after the first theme flip.
+ */
+function addExpandButton(fig) {
+    if (fig.querySelector(".diagram-expand-btn")) return;
+    const btn = document.createElement("button");
+    btn.className = "diagram-expand-btn";
+    btn.type = "button";
+    btn.title = "Open diagram larger";
+    btn.setAttribute("aria-label", "Open diagram larger");
+    btn.textContent = "⤢";
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openDiagramZoom(fig.dataset.mermaidSrc || "", btn);
+    });
+    fig.appendChild(btn);
+}
+
+// --- Diagram zoom window ---------------------------------------------
+// A diagram that is clear at a glance still hides detail when the chat
+// column is narrow. This opens one large, with zoom and pan, without
+// sending the learner to another page and losing their place in the thread.
+
+let zoomState = null;      // { scale, tx, ty } while the window is open
+let zoomOpener = null;     // button to hand focus back to on close
+let zoomSrc = null;        // source of the open diagram, for Reset
+
+function zoomEls() {
+    return {
+        win: document.getElementById("diagram-zoom"),
+        stage: document.getElementById("diagram-zoom-stage"),
+        canvas: document.getElementById("diagram-zoom-canvas"),
+    };
+}
+
+/** Push scale/translate to the canvas. One transform, so order is fixed. */
+function applyZoomTransform() {
+    const { canvas } = zoomEls();
+    if (!canvas || !zoomState) return;
+    const { scale, tx, ty } = zoomState;
+    canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+}
+
+function setZoomScale(next, originX, originY) {
+    if (!zoomState) return;
+    const { stage } = zoomEls();
+    const clamped = Math.max(0.25, Math.min(4, next));
+    if (stage && originX !== undefined) {
+        // Keep the point under the cursor fixed: convert it to canvas space at
+        // the old scale, then back at the new one. Zooming about the centre
+        // instead would walk whatever you are inspecting off the screen.
+        const r = stage.getBoundingClientRect();
+        const cx = originX - r.left;
+        const cy = originY - r.top;
+        const ratio = clamped / zoomState.scale;
+        zoomState.tx = cx - (cx - zoomState.tx) * ratio;
+        zoomState.ty = cy - (cy - zoomState.ty) * ratio;
+    }
+    zoomState.scale = clamped;
+    applyZoomTransform();
+}
+
+/**
+ * Zero the pan/zoom only.
+ *
+ * Kept separate from the Reset button's handler because openDiagramZoom calls
+ * this on every open: if this also re-rendered, the two would call each other
+ * forever ("Maximum call stack size exceeded" the moment the popup opened).
+ */
+function resetZoomView() {
+    zoomState = { scale: 1, tx: 0, ty: 0 };
+    applyZoomTransform();
+}
+
+/**
+ * The Reset button: restore the view AND mermaid's original layout.
+ *
+ * Dragging edits node transforms and edge geometry in place, so there is
+ * nothing to "un-edit" back to — re-rendering from the source is the reliable
+ * way to undo it. openDiagramZoom resets the view itself, so this must not
+ * also call resetZoomView; doing both is what created the recursion.
+ */
+function resetDiagramZoom() {
+    if (zoomSrc) openDiagramZoom(zoomSrc, zoomOpener);
+    else resetZoomView();
+}
+
+// Named for the diagram, not just "zoomBy": notes.js already defines a global
+// zoomBy(dir) for the notes canvas and both files share one script scope, so
+// the short name would clobber it and break its ⌘+/⌘- shortcuts.
+function diagramZoomBy(factor) {
+    if (zoomState) setZoomScale(zoomState.scale * factor);
+}
+
+/**
+ * Open the diagram large.
+ *
+ * Renders from the source rather than cloning the inline SVG: the source is
+ * already kept on the figure for theme redraws, and re-rendering lets mermaid
+ * lay the diagram out for this viewport instead of scaling up a small one.
+ */
+async function openDiagramZoom(src, opener) {
+    const { win, canvas } = zoomEls();
+    if (!win || !canvas || !src) return;
+    zoomOpener = opener || null;
+    zoomSrc = src;
+    win.style.display = "flex";
+    canvas.innerHTML = "";
+    resetZoomView();
+
+    // Preferred path: our own renderer, which keeps the layout as data and so
+    // can move a node and re-derive its edges. Declines anything it does not
+    // fully understand, and mermaid then draws it exactly as before — an
+    // unsupported diagram must look like it always did, never subtly wrong.
+    if (typeof drawInteractiveFlowchart === "function"
+            && drawInteractiveFlowchart(canvas, src)) {
+        return;
+    }
+
+    try {
+        initMermaid();
+        const { svg } = await window.mermaid.render(`mmd-zoom-${++mermaidSeq}`, src);
+        canvas.innerHTML = svg;
+        // Baked-SVG corrections, needed only on this fallback path.
+        fitLabelBoxes(canvas);
+        fitClusterTitles(canvas);
+        enableNodeDragging(canvas);
+    } catch (e) {
+        // Same reasoning as drawMermaid: show the source, never mermaid's
+        // own error SVG.
+        const pre = document.createElement("pre");
+        pre.textContent = src;
+        canvas.replaceChildren(pre);
+    }
+    const close = document.getElementById("diagram-zoom-close");
+    if (close) close.focus();
+}
+
+function closeDiagramZoom() {
+    const { win, canvas } = zoomEls();
+    if (!win) return;
+    win.style.display = "none";
+    // Drop the SVG: it is rebuilt on next open, and leaving it costs memory
+    // and would go stale against a theme flip while hidden.
+    if (canvas) canvas.innerHTML = "";
+    zoomState = null;
+    zoomSrc = null;
+    if (zoomOpener) { zoomOpener.focus(); zoomOpener = null; }
+}
+
+function initDiagramZoom() {
+    const { win, stage } = zoomEls();
+    if (!win || !stage) return;
+
+    stage.addEventListener("wheel", (e) => {
+        if (!zoomState) return;
+        e.preventDefault();
+        setZoomScale(zoomState.scale * (e.deltaY < 0 ? 1.1 : 1 / 1.1),
+                     e.clientX, e.clientY);
+    }, { passive: false });
+
+    // setPointerCapture so a fast drag that outruns the stage keeps panning,
+    // the same reason the side-chat window uses it.
+    let drag = null;
+    stage.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !zoomState) return;
+        drag = { x: e.clientX, y: e.clientY, tx: zoomState.tx, ty: zoomState.ty };
+        stage.setPointerCapture(e.pointerId);
+        stage.classList.add("is-panning");
+    });
+    stage.addEventListener("pointermove", (e) => {
+        if (!drag || !zoomState) return;
+        zoomState.tx = drag.tx + (e.clientX - drag.x);
+        zoomState.ty = drag.ty + (e.clientY - drag.y);
+        applyZoomTransform();
+    });
+    const endDrag = () => { drag = null; stage.classList.remove("is-panning"); };
+    stage.addEventListener("pointerup", endDrag);
+    stage.addEventListener("pointercancel", endDrag);
+
+    // Click the backdrop to dismiss, but not a click that lands on the window.
+    win.addEventListener("mousedown", (e) => {
+        if (e.target === win) closeDiagramZoom();
+    });
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && win.style.display === "flex") closeDiagramZoom();
     });
 }
 
@@ -1699,6 +2161,28 @@ function hideThinking(container) {
     el.remove();
 }
 
+/**
+ * Relabel the waiting indicator while the CLI compacts the session.
+ *
+ * Compaction summarises a session that has outgrown the context window. It
+ * takes minutes and emits no tokens, so "thinking…" ticking past three
+ * minutes reads as a crash — it was reported as one. The elapsed timer keeps
+ * running; only the words change, so a long wait stays visible but stops
+ * looking like a failure.
+ *
+ * Nothing resets this. The indicator is removed wholesale when the first
+ * token arrives, and the next turn builds a new one already saying
+ * "thinking…".
+ */
+function showCompacting(container) {
+    container = container || mainMessagesEl();
+    const el = container.querySelector(".thinking-indicator");
+    if (!el) return;
+    const label = el.querySelector(".thinking-label");
+    if (label) label.textContent = "condensing this long session…";
+    el.classList.add("is-compacting");
+}
+
 // =====================================================================
 // ChatController — one streaming conversation bound to one set of DOM
 // elements and one session id.
@@ -2005,6 +2489,13 @@ class ChatController {
                     if (this.isMain) addEventLog(event);
 
                     switch (event.type) {
+                        // The session outgrew the context window and the CLI is
+                        // summarising it. Minutes with no output, so tell the
+                        // learner rather than leaving a timer climbing.
+                        case "compacting":
+                            showCompacting(this.messagesEl);
+                            break;
+
                         case "session_init":
                             if (event.session_id) {
                                 this.sessionId = event.session_id;
@@ -3333,25 +3824,220 @@ function appendCellImage(el, src) {
     el.appendChild(img);
 }
 
-function toggleNotebook() {
-    notebookOpen = !notebookOpen;
-    document.getElementById("notebook-pane").style.display = notebookOpen ? "flex" : "none";
+// ── The right-hand panes are tabs ───────────────────────────────────────────
+//
+// Notebook, notes, demo and derivation share the column right of the divider.
+// Each pane you open gets a tab and keeps its state behind it (cells, scroll
+// position, a running demo); only the active tab's pane is shown, so moving
+// between them is instant.
+//
+// Each pane's own toggle still does the opening and closing — loading data,
+// flushing a save, tearing down a demo frame — and reports here:
+//   claimRightPane(name)    it opened, or was asked for again: make it active
+//   releaseRightPane(name)  it closed: drop its tab, fall back to the last used
+// The tab strip and every pane's visibility are then drawn from that state by
+// renderRightTabs(), so no pane ever decides another pane's display.
+const RIGHT_PANES = {
+    notebook:   { label: "Code runner", el: "notebook-pane",
+                  isOpen: () => typeof notebookOpen !== "undefined" && notebookOpen,
+                  close: () => typeof toggleNotebook === "function" && toggleNotebook(false) },
+    notes:      { label: "Notes", el: "notes-pane",
+                  isOpen: () => typeof notesOpen !== "undefined" && notesOpen,
+                  close: () => typeof toggleNotes === "function" && toggleNotes(false) },
+    demo:       { label: "Demo", el: "demo-pane",
+                  isOpen: () => typeof demoOpen !== "undefined" && demoOpen,
+                  close: () => typeof toggleDemo === "function" && toggleDemo(false) },
+    derivation: { label: "Maths", el: "derivation-pane",
+                  isOpen: () => typeof derivOpen !== "undefined" && derivOpen,
+                  close: () => typeof toggleDerivation === "function" && toggleDerivation(false) },
+};
+
+// Open tabs, least recently used first; the last entry is the focused tab.
+let rightTabs = [];
+
+// Split view: the two most recently used tabs show side by side (or stacked).
+// `sides` pins which pane sits on which side, so focusing one never swaps them;
+// a newly picked tab replaces the side you were NOT using.
+const rightSplit = { on: false, orient: "row", frac: 0.5, sides: [] };
+try {
+    Object.assign(rightSplit, JSON.parse(localStorage.getItem("rightSplit") || "{}"), { sides: [] });
+} catch (e) {}
+function saveRightSplit() {
+    try {
+        const { on, orient, frac } = rightSplit;
+        localStorage.setItem("rightSplit", JSON.stringify({ on, orient, frac }));
+    } catch (e) {}
+}
+
+function activeRightPane() { return rightTabs[rightTabs.length - 1] || null; }
+
+/** The panes on screen, in side order: one, or two in split view. */
+function visibleRightPanes() {
+    if (!rightSplit.on || rightTabs.length < 2) return rightTabs.slice(-1);
+    const want = rightTabs.slice(-2);
+    // Keep each pane on its side; a newcomer takes the slot the departed one left.
+    const sides = rightSplit.sides.length === 2 ? rightSplit.sides.slice() : want.slice();
+    const incoming = want.filter(n => !sides.includes(n));
+    for (let i = 0; i < 2; i++) {
+        if (!want.includes(sides[i])) sides[i] = incoming.shift();
+    }
+    rightSplit.sides = sides;
+    return rightSplit.sides;
+}
+
+/** True when `name` is open but not on screen. */
+function rightPaneInBackground(name) {
+    return RIGHT_PANES[name].isOpen() && !visibleRightPanes().includes(name);
+}
+
+/** `name` opened, was clicked, or was asked for again: focus it. */
+function claimRightPane(name) {
+    if (activeRightPane() === name) return renderRightTabs();
+    rightTabs = rightTabs.filter(n => n !== name).concat(name);
+    renderRightTabs();
+}
+
+/** `name` closed: drop its tab; the most recently used remaining tab shows. */
+function releaseRightPane(name) {
+    rightTabs = rightTabs.filter(n => n !== name);
+    renderRightTabs();
+}
+
+function toggleRightSplit() {
+    rightSplit.on = !rightSplit.on;
+    saveRightSplit();
+    renderRightTabs();
+}
+
+function toggleRightSplitOrient() {
+    rightSplit.orient = rightSplit.orient === "row" ? "column" : "row";
+    saveRightSplit();
+    renderRightTabs();
+}
+
+function renderRightTabs() {
+    // A pane can report closed without coming through here (a failed load);
+    // never draw a tab for a pane that is not actually open.
+    rightTabs = rightTabs.filter(n => RIGHT_PANES[n].isOpen());
+    const active = activeRightPane();
+    const shown = visibleRightPanes();
+    const split = shown.length === 2;
+
+    for (const [name, pane] of Object.entries(RIGHT_PANES)) {
+        const el = document.getElementById(pane.el);
+        if (!el) continue;
+        const side = shown.indexOf(name);
+        el.style.display = side >= 0 ? "flex" : "none";
+        el.style.order = side >= 0 ? String(side * 2) : "";
+        el.style.flex = !split || side < 0 ? ""
+            : `${side === 0 ? rightSplit.frac : 1 - rightSplit.frac} 1 0`;
+        el.classList.toggle("is-focused-pane", split && name === active);
+    }
+    const body = document.getElementById("right-body");
+    if (body) {
+        body.classList.toggle("is-split", split);
+        body.style.flexDirection = split ? rightSplit.orient : "";
+    }
+    const splitter = document.getElementById("right-split-divider");
+    if (splitter) {
+        splitter.style.display = split ? "block" : "none";
+        splitter.classList.toggle("is-column", rightSplit.orient === "column");
+    }
+    const stack = document.getElementById("right-stack");
+    if (stack) stack.style.display = active ? "flex" : "none";
+
+    const strip = document.getElementById("right-tabs");
+    if (strip) {
+        // Fixed order, not open order, so a tab never jumps when you click it.
+        const open = Object.keys(RIGHT_PANES).filter(n => rightTabs.includes(n));
+        const canSplit = open.length >= 2;
+        strip.innerHTML = open.map(n => `
+            <div class="right-tab${n === active ? " is-active" : ""}${shown.includes(n) ? " is-shown" : ""}" role="tab"
+                 aria-selected="${n === active}" data-pane="${n}">
+                <span class="right-tab-label">${RIGHT_PANES[n].label}</span>
+                <button class="right-tab-close" data-close="${n}"
+                        title="Close ${RIGHT_PANES[n].label}" aria-label="Close ${RIGHT_PANES[n].label}">&times;</button>
+            </div>`).join("") + `
+            <div class="right-tab-tools">
+                ${rightSplit.on && canSplit ? `<button class="right-tab-tool" data-tool="orient"
+                    title="${rightSplit.orient === "row" ? "Stack the two panes top and bottom" : "Put the two panes side by side"}">
+                    ${rightSplit.orient === "row" ? "⇅" : "⇆"}</button>` : ""}
+                <button class="right-tab-tool${rightSplit.on ? " is-on" : ""}" data-tool="split"
+                    ${canSplit ? "" : "disabled"}
+                    title="${canSplit ? (rightSplit.on ? "Show one pane" : "Show two panes at once") : "Open a second pane to split"}">
+                    ◫ Split</button>
+            </div>`;
+        strip.querySelectorAll(".right-tab").forEach(tab => {
+            tab.onclick = e => {
+                const closing = e.target.closest("[data-close]");
+                if (closing) RIGHT_PANES[closing.dataset.close].close();
+                else claimRightPane(tab.dataset.pane);
+            };
+        });
+        strip.querySelectorAll("[data-tool]").forEach(btn => {
+            btn.onclick = () => btn.dataset.tool === "split" ? toggleRightSplit() : toggleRightSplitOrient();
+        });
+    }
+    if (typeof syncPaneSplit === "function") syncPaneSplit();
+}
+
+// Clicking or typing inside a split pane focuses its tab, so the next tab you
+// pick replaces the OTHER side. Also wires the splitter between the two.
+function initRightSplit() {
+    for (const [name, pane] of Object.entries(RIGHT_PANES)) {
+        const el = document.getElementById(pane.el);
+        if (el) el.addEventListener("pointerdown", () => {
+            if (visibleRightPanes().length === 2 && activeRightPane() !== name) claimRightPane(name);
+        }, true);
+    }
+    const splitter = document.getElementById("right-split-divider");
+    const body = document.getElementById("right-body");
+    if (!splitter || !body) return;
+    splitter.addEventListener("pointerdown", e => {
+        e.preventDefault();
+        splitter.setPointerCapture(e.pointerId);
+        splitter.classList.add("is-dragging");
+        document.body.classList.add("is-resizing-panes");
+        const move = ev => {
+            const r = body.getBoundingClientRect();
+            const f = rightSplit.orient === "row"
+                ? (ev.clientX - r.left) / r.width
+                : (ev.clientY - r.top) / r.height;
+            rightSplit.frac = Math.max(0.2, Math.min(0.8, f));
+            renderRightTabs();
+        };
+        const up = () => {
+            splitter.removeEventListener("pointermove", move);
+            splitter.classList.remove("is-dragging");
+            document.body.classList.remove("is-resizing-panes");
+            saveRightSplit();
+        };
+        splitter.addEventListener("pointermove", move);
+        splitter.addEventListener("pointerup", up, { once: true });
+        splitter.addEventListener("pointercancel", up, { once: true });
+    });
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initRightSplit);
+else initRightSplit();
+
+/** Open, close (force true/false), or flip the notebook. */
+function toggleNotebook(force) {
+    // The header button on a background tab switches to it rather than closing.
+    if (force === undefined && rightPaneInBackground("notebook")) {
+        claimRightPane("notebook");
+        return;
+    }
+    notebookOpen = force !== undefined ? force : !notebookOpen;
     const runBtn = document.getElementById("run-code-btn");
     if (runBtn) runBtn.classList.toggle("is-on", notebookOpen);
-    // The divider serves whichever pane is open, so it has to re-evaluate
-    // here too. Guarded: notes.js may not be loaded.
-    if (typeof syncPaneSplit === "function") syncPaneSplit();
-    // The notebook and the notes canvas both want half the centre column;
-    // three panes at flex:1 leaves none of them usable.
-    if (notebookOpen && typeof notesOpen !== "undefined" && notesOpen
-        && typeof toggleNotes === "function") {
-        toggleNotes(false);
+    if (!notebookOpen) {
+        releaseRightPane("notebook");
+        return;
     }
-    if (notebookOpen && typeof demoOpen !== "undefined" && demoOpen
-        && typeof toggleDemo === "function") {
-        toggleDemo(false);
-    }
-    if (notebookOpen && document.querySelectorAll(".cell").length === 0) {
+    // Synchronous on purpose: sendCodeToRunner adds a cell straight after this
+    // and needs the pane visible to size it.
+    claimRightPane("notebook");
+    if (document.querySelectorAll(".cell").length === 0) {
         loadCells();
     }
 }
@@ -3780,6 +4466,9 @@ document.addEventListener("DOMContentLoaded", () => {
     initProgressGroups();
     if (typeof initNotes === "function") initNotes();
     if (typeof initDemoPane === "function") initDemoPane();
+
+    // Diagram zoom window: wheel-zoom and drag-pan handlers.
+    initDiagramZoom();
 
     // Side-chat window: drag/resize handlers and its own auto-resizing input.
     initSideChatWindow();

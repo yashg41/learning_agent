@@ -6,8 +6,8 @@ spending a model call.
 
     python3 backend/tests/smoke_derivation.py
 
-What it proves: open -> write in waves -> verify catches a wrong step and says
-which one, and the whole document renders. If this passes and the pane still
+What it proves: the runner-created doc -> waves written from scratch files ->
+verify catches a wrong step and says which one, and the whole document renders. If this passes and the pane still
 looks wrong, the bug is in the frontend, not the backend.
 """
 
@@ -21,6 +21,11 @@ def main():
     from backend import derivations as D
 
     D.USERS_DIR = tempfile.mkdtemp()
+
+    import backend.sandbox as sandbox
+    from pathlib import Path
+
+    sandbox.SCRATCH_ROOT = Path(tempfile.mkdtemp())
 
     import claude_agent_sdk as sdk
 
@@ -58,23 +63,27 @@ def main():
         return result["content"][0]["text"]
 
     async def run():
-        r = await captured["derivation_open"](
-            {"title": "Logistic gradient", "concept_id": "logistic_regression"})
-        doc_id = json.loads(text(r))["doc_id"]
-        print(f"open        -> {doc_id}")
+        # The job runner creates the doc; the builder is only told its id.
+        doc_id = D.create_doc(email, "Logistic gradient", "logistic_regression")["id"]
+        print(f"created     -> {doc_id}")
 
-        r = await captured["derivation_write"]({"doc_id": doc_id, "blocks": [
+        def wave(n, blocks):
+            path = sandbox.SCRATCH_ROOT / f"wave{n}.json"
+            path.write_text(json.dumps(blocks))
+            return str(path)
+
+        r = await captured["derivation_write"]({"doc_id": doc_id, "blocks_path": wave(1, [
             {"kind": "text", "content": "The gradient is the error times the input."},
-        ]})
+        ])})
         print(f"write #1    -> {text(r)}")
 
-        r = await captured["derivation_write"]({"doc_id": doc_id, "blocks": [
+        r = await captured["derivation_write"]({"doc_id": doc_id, "blocks_path": wave(2, [
             {"kind": "derivation", "title": "Steps", "steps": [
                 {"expr": "(a-b)^2", "reason": "start"},
                 {"expr": "a^2-2ab+b^2", "reason": "expand the square"},
                 {"expr": "a^2+b^2", "reason": "DELIBERATELY WRONG"},
             ]},
-        ]})
+        ])})
         print(f"write #2    -> {text(r)}")
 
         doc = D.get_doc(email, doc_id)

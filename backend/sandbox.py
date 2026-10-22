@@ -136,6 +136,38 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
+def _cell_path(venv: Path) -> str:
+    """PATH for a cell: the learner's venv first, the server's own never.
+
+    Cells used to inherit the server's PATH unchanged, and when the server runs
+    from an activated venv that venv's bin/ is the FIRST entry. A cell calling
+    `subprocess.run(["pip", "install", ...])` then got the server's pip and
+    installed into the app's own interpreter — observed: a derivation builder
+    put antlr4 into the server's .venv, where it changes which LaTeX parser
+    mathverify picks. %pip lines were always routed correctly (install_packages
+    uses venv/bin/python -m pip); only a bare `pip`/`python` in the code
+    resolved through PATH.
+
+    This is about pip and python landing in the right place, not a jail: a
+    cell can still name any absolute path.
+    """
+    bin_dir = venv / ("Scripts" if os.name == "nt" else "bin")
+    server_bins = {
+        os.path.realpath(os.path.join(prefix, "Scripts" if os.name == "nt" else "bin"))
+        for prefix in (sys.prefix, os.environ.get("VIRTUAL_ENV", ""))
+        if prefix
+    }
+    # Only a venv's bin/ is dropped. A base interpreter's bin/ (sys.prefix ==
+    # sys.base_prefix) can be where system tools live.
+    if sys.prefix == sys.base_prefix and not os.environ.get("VIRTUAL_ENV"):
+        server_bins = set()
+    kept = [
+        p for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p and os.path.realpath(p) not in server_bins
+    ]
+    return os.pathsep.join([str(bin_dir)] + kept)
+
+
 def _venv_ready(venv: Path) -> bool:
     """True only once the install *finished*.
 
@@ -734,7 +766,9 @@ async def run_code(
     before = {p.name for p in run_dir.iterdir()}
 
     env = {
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": _cell_path(venv_path),
+        # What a venv's own activate script sets; pip and tools consult it.
+        "VIRTUAL_ENV": str(venv_path),
         "HOME": str(_scratch_dir(email)),
         "MPLBACKEND": "Agg",
         # Without this the pipe block-buffers and "streaming" is a lie.

@@ -2,6 +2,8 @@
 
 A long-term tutoring agent that remembers everything across sessions. Teaches Python and the topics that build on it: classical ML, deep learning, LLMs, MLOps, and **quantum computing with Qiskit**. Comes with an in-browser code runner so learners can execute Python (and Qiskit circuits) without leaving the chat. Built with Claude Agent SDK, ChromaDB, and FastAPI.
 
+> **This file has drifted.** It still describes one tutor, 9 MCP tools and 35 concepts; there are now two tutors, 42 tool definitions and 282 concepts, and the sections below on tools, curriculum and project structure are out of date. Trust the code and its inline comments over this document. Accurate as of today: [How the Sanskrit tutor works](docs/sanskrit-tutor.md), and **[Lessons from the roadblocks](docs/lessons.md)** — the edge cases, false premises and misleading errors this project actually hit, written cause-first. Read the latter before changing anything to do with tool payloads, concurrent writes, or the `app` switch.
+
 ## Architecture
 
 The agent uses three memory tiers that work together:
@@ -17,9 +19,12 @@ The agent uses three memory tiers that work together:
 ```bash
 cd learning_app
 
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Create and activate the virtual environment.
+# Named .venv — setup.sh creates and reuses that name, and having a second
+# env at venv/ meant the server and the tests could run different
+# interpreters without anyone noticing.
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt

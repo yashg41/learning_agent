@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 import chromadb
+from chromadb.config import Settings as ChromaSettings
 
 from backend.config import settings
 from backend.memory import _normalize_email
@@ -30,7 +31,14 @@ class EpisodicMemory:
 
     def __init__(self, chroma_dir: str | None = None):
         path = chroma_dir or settings.CHROMA_DIR
-        self._client = chromadb.PersistentClient(path=path)
+        # Chroma posts anonymized usage stats to PostHog on startup. Nothing in
+        # this app wants that, and when the network is slow the retry shows up
+        # as a `backoff` ReadTimeout for us.i.posthog.com in our own logs —
+        # noise that reads like an app failure and isn't one. Off explicitly.
+        self._client = chromadb.PersistentClient(
+            path=path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
         self._conversations = self._client.get_or_create_collection(
             name="conversations",
             metadata={"hnsw:space": "cosine"},

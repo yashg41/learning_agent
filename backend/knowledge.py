@@ -4,15 +4,84 @@ Tracks Python concepts, mastery levels, prerequisites, and quiz history.
 Stored as JSON files in data/users/<email>/.
 """
 
+import asyncio
 import os
 import json
 import logging
+import tempfile
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+# One lock per knowledge file, keyed on its path rather than held on the store.
+# A KnowledgeStore is constructed per request in tools.py, agent.py and several
+# routes, so a per-instance lock would guard nothing — two handlers touching the
+# same user hold two different instances of the same file. Single uvicorn
+# process, so an asyncio.Lock is sufficient; this only orders coroutines on one
+# event loop, which is exactly where the interleaving happens. Mirrors
+# sandbox._lock_for, which solves the same hazard for venvs.
+_knowledge_locks: dict[str, asyncio.Lock] = {}
+
+
+def knowledge_lock(path: str) -> asyncio.Lock:
+    """The lock guarding read-modify-write of one knowledge file."""
+    key = os.path.abspath(path)
+    # No await between the check and the insert, so this stays atomic under
+    # asyncio without a second lock around the dict.
+    if key not in _knowledge_locks:
+        _knowledge_locks[key] = asyncio.Lock()
+    return _knowledge_locks[key]
+
 # Mastery levels in progression order
 MASTERY_LEVELS = ["introduced", "practiced", "mastered"]
+
+
+def _mastery_rank(level: str | None) -> int:
+    """Position of a mastery level, tolerant of values not in MASTERY_LEVELS.
+
+    A bare MASTERY_LEVELS.index() raises ValueError on anything else, and this
+    is called on the mastery already stored on disk — a hand-edited file, or
+    one written before a level was renamed, is enough to make it throw. The
+    raise happened while comparing old against new, i.e. after the concept was
+    already mutated in memory but before the save, so it lost the write it was
+    in the middle of AND took down every sibling call in the same batch.
+    Unknown values sort lowest, so an odd level reads as a promotion rather
+    than silently looking like a demotion.
+    """
+    try:
+        return MASTERY_LEVELS.index(level)
+    except ValueError:
+        return -1
+
+
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write JSON so a concurrent reader never sees a half-written file.
+
+    open(path, "w") truncates on open and only then writes, which leaves a
+    window where the file on disk is empty or partial. These stores are
+    read-modify-written by async tool handlers that interleave on one event
+    loop, so a reader landing in that window got a JSONDecodeError. Writing to
+    a temp file in the SAME directory (so it is on the same filesystem) and
+    then os.replace makes the swap atomic: a reader sees either the old file
+    or the new one, never a torn one.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+            # The rename is atomic, but only orders against data already
+            # handed to the OS; flush so the bytes exist before the swap.
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave a .tmp-*.json behind for the next reader to trip over.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 # The curriculum itself lives in backend/curriculum/*.yaml, one file per track,
 # and is loaded by backend.curriculum. It used to be ~285 lines of dict literals
@@ -321,8 +390,7 @@ class KnowledgeStore:
             return json.load(f)
 
     def save_knowledge(self, data: dict):
-        with open(self.knowledge_path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        _atomic_write_json(self.knowledge_path, data)
 
     def load_quiz_history(self) -> dict:
         if not os.path.isfile(self.quiz_path):
@@ -331,8 +399,7 @@ class KnowledgeStore:
             return json.load(f)
 
     def save_quiz_history(self, data: dict):
-        with open(self.quiz_path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        _atomic_write_json(self.quiz_path, data)
 
     def upsert_concept(
         self,
@@ -369,7 +436,7 @@ class KnowledgeStore:
             if related is not None:
                 existing["related"] = related
             concept = existing
-            action = "promoted" if MASTERY_LEVELS.index(mastery) > MASTERY_LEVELS.index(old_mastery) else "reviewed"
+            action = "promoted" if _mastery_rank(mastery) > _mastery_rank(old_mastery) else "reviewed"
         else:
             # New concept
             concept = {

@@ -45,6 +45,7 @@ import sys
 from datetime import datetime, timezone
 
 import chromadb
+from chromadb.config import Settings as ChromaSettings
 
 from backend.config import settings
 from backend.memory import _normalize_email
@@ -133,7 +134,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    client = chromadb.PersistentClient(path=settings.CHROMA_DIR)
+    # Telemetry off, as everywhere we build a client — see episodic.py.
+    client = chromadb.PersistentClient(
+        path=settings.CHROMA_DIR,
+        settings=ChromaSettings(anonymized_telemetry=False),
+    )
 
     # ---- Plan ----------------------------------------------------------
     work = []

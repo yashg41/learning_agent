@@ -14,6 +14,25 @@ logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
 
+class _DropJobPolling(logging.Filter):
+    """Hide the demo-job poll from the access log.
+
+    The demo pane polls this endpoint every 2s for as long as a build runs, so
+    an eleven-minute build wrote ~330 identical 200 OK lines and buried the two
+    errors that explained why it failed. The polling itself is correct — it is
+    what moves the chip from "building…" to ready — so this quietens the log,
+    not the frontend. Only successful polls are dropped: a failing one still
+    prints, because that is a real signal.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not ("/api/demo-jobs/" in message and " 200 " in message)
+
+
+logging.getLogger("uvicorn.access").addFilter(_DropJobPolling())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     users_dir = os.path.join(settings.DATA_DIR, "users")
@@ -69,7 +88,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Book job sweep failed: {e}")
 
     logger.info("Ready!")
-    yield
+
+    # The MCP endpoint's session manager has to be running for /mcp-tools to
+    # serve anything, and it must start and stop with the app — hence inside
+    # the lifespan rather than at import. Guarded so a failure here degrades to
+    # "HTTP tools unavailable" (the agent falls back to the SDK transport)
+    # rather than taking the whole API down with it.
+    if settings.MCP_TRANSPORT == "http":
+        from backend.mcp_http import mcp as _mcp_tools
+
+        async with _mcp_tools.session_manager.run():
+            logger.info(f"MCP tools over HTTP at {settings.API_PORT}/mcp-tools/mcp")
+            yield
+    else:
+        yield
     logger.info("Shutting down.")
 
 
@@ -85,6 +117,15 @@ app.add_middleware(
 # Import and include routes
 from backend.api.routes import router  # noqa: E402
 app.include_router(router)
+
+# The learning tools, reachable over loopback HTTP instead of the SDK's stdin
+# pipe. See backend/mcp_http.py for why: an sdk-transport MCP server rides the
+# prompt pipe, which the SDK closes 60s into a turn, and every tool call after
+# that fails with "Stream closed".
+if settings.MCP_TRANSPORT == "http":
+    from backend.mcp_http import mcp as _mcp_tools  # noqa: E402
+
+    app.mount("/mcp-tools", _mcp_tools.streamable_http_app())
 
 # Serve frontend static files
 frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")

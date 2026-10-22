@@ -463,8 +463,12 @@ function renderSelectionAsk() {
 async function toggleDemo(force) {
     const pane = demoPaneEl();
     if (!pane) return;
+    // The header button on a background tab switches to it rather than closing.
+    if (force === undefined && rightPaneInBackground("demo")) {
+        claimRightPane("demo");
+        return;
+    }
     demoOpen = force !== undefined ? force : !demoOpen;
-    pane.style.display = demoOpen ? "flex" : "none";
 
     const btn = document.getElementById("demo-btn");
     if (btn) btn.classList.toggle("is-on", demoOpen);
@@ -474,21 +478,13 @@ async function toggleDemo(force) {
         // burning CPU in a pane nobody is looking at.
         const frame = demoFrameEl();
         if (frame) frame.remove();
-        if (typeof syncPaneSplit === "function") syncPaneSplit();
+        releaseRightPane("demo");
         saveDemoUi();
         return;
     }
 
-    // The three right-hand panes compete for the same column.
-    if (typeof notesOpen !== "undefined" && notesOpen
-        && typeof toggleNotes === "function") {
-        await toggleNotes(false);
-    }
-    if (typeof notebookOpen !== "undefined" && notebookOpen
-        && typeof toggleNotebook === "function") {
-        toggleNotebook();
-    }
-    if (typeof syncPaneSplit === "function") syncPaneSplit();
+    // Its tab comes to the front; other open panes stay open behind theirs.
+    claimRightPane("demo");
 
     if (!demoIndex.length) await loadDemoIndex();
 
@@ -720,7 +716,12 @@ function renderJobChip(chip, job) {
 
     if (job.state === "ready") {
         chip.classList.add("is-ready");
-        if (status) status.textContent = "";
+        // A ready job usually has nothing to add, but two outcomes are worth a
+        // word: the builder looked and found nothing to change, or the demo was
+        // recovered after the tool connection dropped. Both used to be reported
+        // as a red failure saying "no change was made", which blamed the
+        // learner for a correct outcome.
+        if (status) status.textContent = job.note || "";
         if (summary && job.title) summary.textContent = job.title;
         if (openBtn && job.demo_id) {
             openBtn.style.display = "";

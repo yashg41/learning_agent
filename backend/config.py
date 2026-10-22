@@ -14,10 +14,10 @@ _APP_PORTS = {"pymentor": 8001, "sanskrit": 8003}
 
 class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
-    # Sonnet 5. The tutor's job is explanation and diagnosis — noticing what a
+    # Sonnet 5.5. The tutor's job is explanation and diagnosis — noticing what a
     # learner actually got wrong and why — which is exactly where a stronger
     # model earns its cost. Override with MODEL_NAME in .env.
-    MODEL_NAME: str = "claude-sonnet-5"
+    MODEL_NAME: str = "claude-sonnet-5-5"
 
     # Which tutor this process is. Set by run.py from its command-line
     # argument, before backend.config is first imported.
@@ -62,6 +62,23 @@ class Settings(BaseSettings):
     API_HOST: str = "127.0.0.1"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+
+    # How the CLI reaches the learning tools.
+    #
+    # "http"  — a loopback MCP endpoint this app mounts at /mcp-tools.
+    # "sdk"   — the in-process server the SDK reaches back down its stdin pipe.
+    #
+    # http is the default because sdk transport has a hard 60-second ceiling:
+    # the SDK holds stdin open only until the turn's first result, capped at
+    # CLAUDE_CODE_STREAM_CLOSE_TIMEOUT, then closes it — after which every tool
+    # call fails with "Stream closed". Measured on this project's logs: max age
+    # of a successful call 59.3s, min age of a failure 60.2s, across 560 calls
+    # and 29 tools with zero overlap. An http server never enters the SDK's
+    # sdk_mcp_servers dict, so that branch is skipped entirely.
+    #
+    # Kept switchable so a problem with the HTTP path is one setting away from
+    # the old behaviour, not a code change.
+    MCP_TRANSPORT: str = "http"
 
     @model_validator(mode="after")
     def _derive_app_paths(self):

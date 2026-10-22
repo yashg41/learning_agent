@@ -421,9 +421,12 @@ def _copy_chroma_rows(src_path: str, dst_path: str, legacy_email: str,
     document — slow, and a source of drift if the bundled model ever changes.
     """
     import chromadb
+    from chromadb.config import Settings as ChromaSettings
 
-    src = chromadb.PersistentClient(path=src_path)
-    dst = chromadb.PersistentClient(path=dst_path)
+    # Telemetry off, as everywhere we build a client — see episodic.py.
+    quiet = ChromaSettings(anonymized_telemetry=False)
+    src = chromadb.PersistentClient(path=src_path, settings=quiet)
+    dst = chromadb.PersistentClient(path=dst_path, settings=quiet)
     moved = {}
 
     for name in COLLECTIONS:
@@ -460,12 +463,16 @@ def _copy_chroma_rows(src_path: str, dst_path: str, legacy_email: str,
 
 def _chroma_counts(path: str) -> dict:
     import chromadb
+    from chromadb.config import Settings as ChromaSettings
 
     out = {}
     if not os.path.isdir(path):
         return out
     try:
-        client = chromadb.PersistentClient(path=path)
+        client = chromadb.PersistentClient(
+            path=path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
     except Exception:
         return out
     for name in COLLECTIONS:

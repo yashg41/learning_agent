@@ -90,7 +90,8 @@ def test_builder_only_writers_stay_off_the_tutor_allowlist():
         bare = {_bare(n) for n in tutor_tool_names(app)}
         for writer in (
             "save_demo", "update_demo", "get_demo_html",
-            "derivation_open", "derivation_write", "derivation_verify",
+            "derivation_write", "derivation_verify", "get_derivation_json",
+            "derivation_update",
             "derivation_read", "derivation_plot",
         ):
             assert writer not in bare, f"{app} tutor can call {writer} directly"

@@ -41,7 +41,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from backend.episodic import EpisodicMemory
 from backend.feedback import ASPECTS as FEEDBACK_ASPECTS, load_feedback
-from backend.knowledge import CURRICULUM_GRAPH, KnowledgeStore
+from backend.knowledge import CURRICULUM_GRAPH, KnowledgeStore, knowledge_lock
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,7 @@ def create_learning_tools(
     session_ctx: dict | None = None,
     build_ctx: dict | None = None,
     app: str = DEFAULT_APP,
+    _return_tools: bool = False,
 ):
     """Create in-process MCP tools for the learning agent.
 
@@ -150,7 +151,33 @@ def create_learning_tools(
     Returns:
         McpSdkServerConfig for use in ClaudeAgentOptions.mcp_servers
     """
+    # Imported here, not at module scope: agent imports tools.
+    from backend.agent import check_payload_size
+
     knowledge = KnowledgeStore(user_data_dir, app=app)
+
+    # Filled in at the bottom of this factory, once create_sdk_mcp_server has
+    # produced the instance whose id identifies it. A one-element list, not a
+    # plain name, because the handlers below are closures defined BEFORE the
+    # server exists — they capture this cell and read it at call time.
+    #
+    # This is the missing half of the diagnostic in lessons.md §1d: the id was
+    # logged at build time only, so a failed call could never be placed. With
+    # an entry line naming the same id, the log distinguishes three cases that
+    # all present as "Stream closed":
+    #   no entry line          -> the call never arrived; the pipe was shut
+    #   entry, no completion   -> it arrived and our handler died
+    #   entry, id != build id  -> it reached a STALE server
+    # Only the first is a transport fault, and until now nothing could tell it
+    # from the others except inferring from a suspiciously short duration.
+    mcp_instance_id = [0]
+
+    def _entered(tool_name: str):
+        """Record that a tool call actually reached this process."""
+        logger.info(
+            "Tool entered [%s]: %s instance=%x",
+            app, tool_name, mcp_instance_id[0],
+        )
 
     # =====================================================================
     # TIER 2: Episodic Memory Tools (ChromaDB)
@@ -230,6 +257,7 @@ def create_learning_tools(
         },
     )
     async def save_conversation_summary_tool(args):
+        _entered("save_conversation_summary")
         try:
             email = _email_from_dir(user_data_dir)
             episode_id = episodic.save_episode(
@@ -372,29 +400,90 @@ def create_learning_tools(
 
     @tool(
         "get_learning_progress",
-        "Get the learner's complete Python learning progress: all concepts covered, "
-        "mastery levels, learning path, quiz stats, and suggested next topics. "
-        "Use this for a detailed view beyond what's in the system prompt.",
+        "The learner's progress: how many concepts at each mastery level, quiz "
+        "stats, and what to study next. Returns concept NAMES grouped by "
+        "mastery, not the full record of each — pass a category or a concept_id "
+        "to see the detail (notes, prerequisites, review history) for just that "
+        "part.",
         {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Full detail for one category only, e.g. "
+                        "'data_structures'."
+                    ),
+                },
+                "concept_id": {
+                    "type": "string",
+                    "description": "Optional. Full detail for one concept.",
+                },
+            },
             "required": [],
         },
     )
     async def get_learning_progress_tool(args):
+        """Summarise by default; expand only what was asked for.
+
+        This used to return data["concepts"] verbatim — every field of every
+        concept. Against a real learner's file that is 54KB in one tool result,
+        most of it `notes` prose, on a tool the tutor can call at any moment
+        with no arguments. Everything a tool returns also stays in the
+        transcript and is re-sent on every later turn, so the cost repeated for
+        the rest of the session.
+
+        The summary answers what the tutor actually asks — where is this learner
+        strong, what is shaky, what next — and the two optional arguments fetch
+        the detail behind any single answer.
+        """
         try:
             data = knowledge.load_knowledge()
             quiz_history = knowledge.load_quiz_history()
             suggestions = knowledge.get_next_topic_suggestions(5)
+            concepts = data.get("concepts", {})
 
             result = {
                 "profile": data.get("profile", {}),
-                "concepts": data.get("concepts", {}),
-                "total_concepts": len(data.get("concepts", {})),
+                "total_concepts": len(concepts),
                 "learning_path_length": len(data.get("learning_path", [])),
                 "quiz_stats": quiz_history.get("stats", {}),
                 "suggested_next_topics": suggestions,
             }
+
+            concept_id = (args.get("concept_id") or "").strip()
+            category = (args.get("category") or "").strip()
+
+            if concept_id:
+                one = concepts.get(concept_id)
+                result["concept"] = one or f"no concept {concept_id!r}"
+            elif category:
+                result["concepts"] = {
+                    cid: c
+                    for cid, c in concepts.items()
+                    if c.get("category") == category
+                }
+                if not result["concepts"]:
+                    result["note"] = (
+                        f"No concepts in {category!r}. Categories in use: "
+                        + ", ".join(sorted(
+                            {c.get("category", "") for c in concepts.values()} - {""}
+                        ))
+                    )
+            else:
+                # Names grouped by mastery: enough to see the shape of what the
+                # learner knows, without the notes that make up most of the bytes.
+                by_mastery: dict[str, list[str]] = {}
+                for cid, c in concepts.items():
+                    by_mastery.setdefault(c.get("mastery", "unknown"), []).append(cid)
+                result["by_mastery"] = {
+                    level: sorted(ids) for level, ids in sorted(by_mastery.items())
+                }
+                result["how_to_see_detail"] = (
+                    "Pass category= or concept_id= for the full record, "
+                    "including notes and prerequisites."
+                )
+
             return _text_result(json.dumps(result, default=str))
         except Exception as e:
             logger.error(f"get_learning_progress error: {e}", exc_info=True)
@@ -461,16 +550,30 @@ def create_learning_tools(
         },
     )
     async def update_concept_tool(args):
+        # Before the try: this must record arrival even if everything below
+        # throws. This is the tool that keeps failing with "Stream closed", so
+        # it is the one whose absence from the log is the evidence.
+        _entered("update_concept")
         try:
-            concept = knowledge.upsert_concept(
-                concept_id=args["concept_id"],
-                name=args["name"],
-                category=args["category"],
-                mastery=args["mastery"],
-                prerequisites=args.get("prerequisites"),
-                related=args.get("related"),
-                notes=args.get("notes", ""),
-            )
+            # upsert_concept is a synchronous read-modify-write of one JSON
+            # file. The model routinely emits several update_concept calls in a
+            # single parallel batch — sometimes twice for the SAME concept —
+            # and those handlers interleave on one event loop, so without this
+            # lock they read the same state and overwrite each other. Observed
+            # as a batch of six where two calls reported "Stream closed" and
+            # the other four "Sibling tool call errored", losing every concept
+            # in the batch. The lock is keyed on the file, not this store,
+            # because a KnowledgeStore is constructed per request.
+            async with knowledge_lock(knowledge.knowledge_path):
+                concept = knowledge.upsert_concept(
+                    concept_id=args["concept_id"],
+                    name=args["name"],
+                    category=args["category"],
+                    mastery=args["mastery"],
+                    prerequisites=args.get("prerequisites"),
+                    related=args.get("related"),
+                    notes=args.get("notes", ""),
+                )
             return _text_result(json.dumps({
                 "status": "updated",
                 "concept": concept,
@@ -586,11 +689,29 @@ def create_learning_tools(
                         "quantum, sysdesign."
                     ),
                 },
+                "status": {
+                    "type": "string",
+                    "enum": ["available", "blocked", "known", "all"],
+                    "description": (
+                        "Which concepts to list. Defaults to 'available' — "
+                        "what the learner can start now, which is what most "
+                        "questions are really asking. 'all' returns the whole "
+                        "track and is large."
+                    ),
+                },
             },
             "required": ["track"],
         },
     )
     async def get_domain_map_tool(args):
+        """The map, filtered to what was asked for.
+
+        A whole track is ~50 concepts with their prerequisite lists — 15KB in
+        one result, which then rides in the transcript for the rest of the
+        session. The counts (total / available / blocked / known) are always
+        included, so the shape of the track survives the filter; only the
+        per-concept rows are narrowed.
+        """
         try:
             track = str(args.get("track", "")).strip().lower()
             if track not in knowledge.tracks:
@@ -598,9 +719,18 @@ def create_learning_tools(
                     f"Unknown track '{track}'. Valid tracks: "
                     f"{', '.join(sorted(knowledge.tracks))}."
                 )
-            return _text_result(json.dumps(
-                knowledge.get_domain_map(track), default=str
-            ))
+
+            data = knowledge.get_domain_map(track)
+            status = (args.get("status") or "available").strip().lower()
+
+            if status != "all":
+                rows = [c for c in data.get("concepts", []) if c.get("status") == status]
+                data["concepts"] = rows
+                data["showing"] = status
+                data["how_to_see_more"] = (
+                    "Pass status='blocked', 'known' or 'all' for the rest."
+                )
+            return _text_result(json.dumps(data, default=str))
         except Exception as e:
             logger.error(f"get_domain_map error: {e}", exc_info=True)
             return _error_result(f"Error building domain map: {e}")
@@ -694,6 +824,7 @@ def create_learning_tools(
         },
     )
     async def record_quiz_result_tool(args):
+        _entered("record_quiz_result")
         try:
             retest_concept = args.get("retest_concept") or None
             result = knowledge.record_quiz(args, retest_concept=retest_concept)
@@ -750,6 +881,7 @@ def create_learning_tools(
         },
     )
     async def update_learner_profile_tool(args):
+        _entered("update_learner_profile")
         try:
             data = knowledge.load_knowledge()
             profile = data.get("profile", {})
@@ -953,6 +1085,7 @@ def create_learning_tools(
         output at MAX_OUTPUT_BYTES; we cap tighter, keeping the head and tail
         because a traceback's useful line is at the end.
         """
+        _entered("run_code")
         from backend.sandbox import run_code, VenvError
 
         try:
@@ -1185,11 +1318,20 @@ def create_learning_tools(
                     "type": "string",
                     "description": "Short name for the demo, e.g. 'Consistent hashing ring'",
                 },
+                "html_path": {
+                    "type": "string",
+                    "description": (
+                        "PREFERRED. Path to the finished document in your "
+                        "scratch directory. The server reads it from disk, so "
+                        "the demo never goes through a tool call."
+                    ),
+                },
                 "html": {
                     "type": "string",
                     "description": (
-                        "Complete self-contained HTML document. Inline all CSS "
-                        "and JS. No CDN links, external fonts, or remote images."
+                        "Inline document — only for a small demo. Draft to a "
+                        "file and pass html_path instead. Self-contained: "
+                        "inline all CSS and JS, no CDN links or remote images."
                     ),
                 },
                 "concept_id": {
@@ -1201,7 +1343,7 @@ def create_learning_tools(
                     "description": "One line telling the learner what to try first",
                 },
             },
-            "required": ["title", "html"],
+            "required": ["title"],
         },
     )
     async def save_demo_tool(args):
@@ -1213,6 +1355,12 @@ def create_learning_tools(
         The frontend fetches the HTML separately and renders it inside a
         sandboxed iframe — it is never injected into the chat DOM.
         """
+        # Refuse a payload big enough to take the channel down. See
+        # agent.check_payload_size for why this is here and not in a hook.
+        _too_big = check_payload_size("mcp__learning-tools__save_demo", args)
+        if _too_big:
+            return _error_result(_too_big)
+
         from backend.demos import save_demo as store_demo
 
         # Only the builder may write a demo. allowed_tools is advisory under
@@ -1235,14 +1383,17 @@ def create_learning_tools(
                 email=email,
                 title=args.get("title", ""),
                 html=args.get("html", ""),
+                html_path=args.get("html_path", ""),
                 concept_id=args.get("concept_id", ""),
                 summary=args.get("summary", ""),
                 # Stamped by the job runner, which knows both ids. This is what
                 # makes the demo refinable later.
                 builder_session_id=build.get("builder_session_id", ""),
                 chat_session_id=build.get("chat_session_id", ""),
+                # How the job runner finds this demo afterwards. build_ctx
+                # cannot carry the id back: over HTTP it is a request copy.
+                job_id=build.get("job_id", ""),
             )
-            build["demo_id"] = meta["id"]
             from backend.demos import missing_element_ids
 
             payload = {
@@ -1257,7 +1408,14 @@ def create_learning_tools(
             # rejection: an id can legitimately be created at runtime, so
             # refusing a working demo would be worse than flagging a suspect
             # one. If it is a real mismatch, fix it and call save_demo again.
-            missing = missing_element_ids(args.get("html", ""))
+            #
+            # Read back what was stored rather than the html argument, which is
+            # empty on the html_path route — checking the argument would make
+            # this warning silently stop firing for every path-based save.
+            from backend.demos import get_demo
+
+            stored = get_demo(email, meta["id"])
+            missing = missing_element_ids(stored["html"] if stored else "")
             if missing:
                 payload["warning"] = (
                     "getElementById looks up "
@@ -1276,38 +1434,449 @@ def create_learning_tools(
             return _error_result(f"Error saving demo: {e}")
 
     @tool(
-        "get_demo_html",
-        "Read the current HTML of a demo you are about to change. Call this "
-        "before update_demo so you edit the existing demo rather than "
-        "rewriting it from memory.",
+        "demo_open",
+        "Start a demo that is too big to write in one go, by saving its SHELL: "
+        "the doctype, all the shared CSS, all the shared JS, and the marker "
+        "<!--{{PARTS}}--> where the panels will be inserted. Use this instead "
+        "of save_demo when the demo needs more than about four panels — one "
+        "reply cannot hold a large document, and going over discards the whole "
+        "reply and saves nothing. Returns the demo_id the parts attach to. "
+        "The shell defines the contract every part must follow: decide the "
+        "class names, the data model and the panel order HERE, then state them "
+        "in each part's spec. Builder only.",
         {
             "type": "object",
             "properties": {
-                "demo_id": {"type": "string", "description": "The demo to read"},
+                "title": {
+                    "type": "string",
+                    "description": "Short name, e.g. 'Database shapes'",
+                },
+                "shell_html": {
+                    "type": "string",
+                    "description": (
+                        "The document WITHOUT the panels: doctype, <html>, "
+                        "<head> with every shared style, <body> with any fixed "
+                        "chrome, the literal marker <!--{{PARTS}}--> on its own "
+                        "line, and <script> with every shared function. It must "
+                        "contain the marker exactly once. Inline everything — "
+                        "the sandbox blocks all network access."
+                    ),
+                },
+                "concept_id": {
+                    "type": "string",
+                    "description": "Concept this demonstrates, e.g. 'databases'",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One line telling the learner what to try first",
+                },
+                "parts": {
+                    "type": "array",
+                    "description": (
+                        "OPTIONAL. Declare the panels here and they are built "
+                        "FOR you, several at once, and finalized automatically "
+                        "— you write only the shell and stop. Prefer this for "
+                        "anything past a few panels: it is much faster than "
+                        "writing them yourself one call at a time. Each entry "
+                        "needs 'name' (slug) and 'spec' (exactly what this "
+                        "panel must show, which shared class names to use, and "
+                        "the data to render — the panel's author sees your "
+                        "spec and the shell, nothing else). Order here is the "
+                        "order on screen. Omit this to write the panels "
+                        "yourself with demo_write_part."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "spec": {"type": "string"},
+                        },
+                        "required": ["name", "spec"],
+                    },
+                },
+            },
+            "required": ["title", "shell_html"],
+        },
+    )
+    async def demo_open_tool(args):
+        """Mint the demo id and store its shell. Nothing renders yet.
+
+        The demo stays invisible to the learner until demo_finalize runs, so a
+        build that dies half way leaves no empty frame in their pane.
+        """
+        # Refuse a payload big enough to take the channel down. See
+        # agent.check_payload_size for why this is here and not in a hook.
+        _too_big = check_payload_size("mcp__learning-tools__demo_open", args)
+        if _too_big:
+            return _error_result(_too_big)
+
+        from backend.demos import open_demo
+
+        if build_ctx is None:
+            return _error_result(
+                "demo_open is not available here. If you are the tutor, call "
+                "request_demo instead."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            build = build_ctx or {}
+            # Declared panels are built by the job runner, concurrently, once
+            # this agent's turn ends — see _run_build. Stored on the demo's
+            # meta rather than acted on here because a tool cannot spawn the
+            # agents that would write them, and the runner reads them from
+            # disk. The shell they must match is already on disk as well.
+            declared = [
+                {"name": str(p.get("name") or ""), "spec": str(p.get("spec") or "")}
+                for p in (args.get("parts") or [])
+                if isinstance(p, dict) and p.get("name") and p.get("spec")
+            ]
+            meta = open_demo(
+                email=email,
+                title=args.get("title", ""),
+                shell_html=args.get("shell_html", ""),
+                concept_id=args.get("concept_id", ""),
+                summary=args.get("summary", ""),
+                chat_session_id=build.get("chat_session_id", ""),
+                job_id=build.get("job_id", ""),
+                declared_parts=declared,
+            )
+            if declared:
+                return _text_result(json.dumps({
+                    "demo_id": meta["id"],
+                    "status": "open",
+                    "parts_declared": len(declared),
+                    "next": (
+                        f"Stop now. The {len(declared)} panels you declared are "
+                        f"being written in parallel and the demo will be "
+                        f"finalized for you. Do NOT write them yourself and do "
+                        f"NOT call demo_finalize."
+                    ),
+                }))
+
+            return _text_result(json.dumps({
+                "demo_id": meta["id"],
+                "status": "open",
+                "next": (
+                    "Now write the panels with demo_write_part — index 1, 2, 3 "
+                    "… in the order they should appear. Give every part the "
+                    "same class names the shell's CSS defines. Then call "
+                    "demo_finalize once."
+                ),
+            }))
+        except ValueError as e:
+            return _error_result(f"Shell rejected: {e}")
+        except Exception as e:
+            logger.error(f"demo_open error: {e}", exc_info=True)
+            return _error_result(f"Error opening demo: {e}")
+
+    @tool(
+        "demo_write_part",
+        "Write ONE panel of a demo opened with demo_open. Send only this "
+        "panel's markup — not the doctype, not <html>, not the shared CSS or "
+        "JS, all of which already live in the shell. Parts are inserted in "
+        "index order, so index decides where this panel appears. Keeping each "
+        "call to a single panel is the whole point: it is what stops a large "
+        "demo from exceeding one reply's output limit. Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {"type": "string", "description": "From demo_open"},
+                "index": {
+                    "type": "integer",
+                    "description": "1-based position of this panel in the demo",
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Short slug for this panel, e.g. 'relational' or "
+                        "'keyvalue'. Used for the filename only."
+                    ),
+                },
+                "html": {
+                    "type": "string",
+                    "description": (
+                        "This panel's markup only — a fragment, not a "
+                        "document. Use the class names the shell defines. Any "
+                        "JS specific to this panel goes in its own inline "
+                        "<script> here."
+                    ),
+                },
+            },
+            "required": ["demo_id", "index", "name", "html"],
+        },
+    )
+    async def demo_write_part_tool(args):
+        """Store one panel.
+
+        Each part is its own file, so several of these running at once never
+        contend: there is no shared document to read-modify-write.
+        """
+        # Refuse a payload big enough to take the channel down. See
+        # agent.check_payload_size for why this is here and not in a hook.
+        _too_big = check_payload_size("mcp__learning-tools__demo_write_part", args)
+        if _too_big:
+            return _error_result(_too_big)
+
+        from backend.demos import save_demo_part
+
+        if build_ctx is None:
+            return _error_result(
+                "demo_write_part is not available here. If you are the tutor, "
+                "call request_demo instead."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            filename = save_demo_part(
+                email=email,
+                demo_id=args.get("demo_id", ""),
+                index=args.get("index", 0),
+                name=args.get("name", ""),
+                html=args.get("html", ""),
+            )
+            # Counted on disk: a counter on build_ctx would reset on every
+            # request over the HTTP transport.
+            from backend.demos import list_demo_parts
+
+            return _text_result(json.dumps({
+                "stored": filename,
+                "parts_written": len(list_demo_parts(email, args.get("demo_id", ""))),
+                "next": (
+                    "Write the next panel, or call demo_finalize when every "
+                    "panel is in."
+                ),
+            }))
+        except ValueError as e:
+            return _error_result(f"Part rejected: {e}")
+        except Exception as e:
+            logger.error(f"demo_write_part error: {e}", exc_info=True)
+            return _error_result(f"Error writing part: {e}")
+
+    @tool(
+        "demo_finalize",
+        "Assemble the shell and every part into the finished demo and show it "
+        "to the learner. Call this ONCE, after the last demo_write_part. This "
+        "is where the whole document is checked, so an error here is about the "
+        "assembled result — most often a function an onclick names but no part "
+        "defines. Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {"type": "string", "description": "From demo_open"},
+            },
+            "required": ["demo_id"],
+        },
+    )
+    async def demo_finalize_tool(args):
+        """Validate the assembled document and publish it."""
+        from backend.demos import finalize_demo, missing_element_ids, get_demo
+
+        if build_ctx is None:
+            return _error_result(
+                "demo_finalize is not available here. If you are the tutor, "
+                "call request_demo instead."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            build = build_ctx or {}
+            demo_id = args.get("demo_id", "")
+            meta = finalize_demo(
+                email=email,
+                demo_id=demo_id,
+                builder_session_id=build.get("builder_session_id", ""),
+                job_id=build.get("job_id", ""),
+            )
+            if meta is None:
+                return _error_result(f"No demo with id {demo_id!r}")
+
+            payload = {
+                "demo_id": meta["id"],
+                "parts": meta.get("part_count"),
+                "bytes": meta.get("bytes"),
+                "status": "saved",
+                "note": "The demo is now open in the learner's Demo pane. "
+                        "Tell them briefly what to try.",
+            }
+
+            # Same warning save_demo gives, but it can only be computed now:
+            # a handler defined in one part and called from another is only
+            # visible once the parts are joined.
+            demo = get_demo(email, meta["id"])
+            missing = missing_element_ids(demo["html"]) if demo else set()
+            if missing:
+                payload["warning"] = (
+                    "getElementById looks up "
+                    + ", ".join(sorted(missing))
+                    + " but no element has that id. If these are not created "
+                      "at runtime the demo will throw on first click."
+                )
+            return _text_result(json.dumps(payload))
+        except ValueError as e:
+            return _error_result(f"Demo rejected: {e}")
+        except Exception as e:
+            logger.error(f"demo_finalize error: {e}", exc_info=True)
+            return _error_result(f"Error finalizing demo: {e}")
+
+    @tool(
+        "demo_verify",
+        "Check a saved demo for the faults that make one throw on first click: "
+        "an onclick naming a function nothing defines, a getElementById for an "
+        "id no element has, an external URL the sandbox will block. Call this "
+        "after saving and BEFORE telling the tutor you are done — the frame is "
+        "sandboxed, so a broken demo looks exactly like a working one until the "
+        "learner clicks. Fix whatever it reports and call it again. Builder "
+        "only.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {
+                    "type": "string",
+                    "description": "The demo to check.",
+                },
+            },
+            "required": ["demo_id"],
+        },
+    )
+    async def demo_verify_tool(args):
+        """Report what is wrong with an assembled demo, as work to be done.
+
+        Reads from disk rather than taking the HTML as an argument: the demo is
+        already stored, and passing it back through a tool call would put the
+        whole document in the transcript a second time.
+
+        The checks themselves already existed — they were just advisory. The
+        same faults were reported as a `warning` field tacked onto a successful
+        save, which the model could and did ignore. Here they are the entire
+        result, with an instruction attached.
+        """
+        from backend.demos import (
+            get_demo,
+            missing_element_ids,
+            _missing_handlers,
+            set_demo_verified,
+            validate_demo_html,
+        )
+
+        if build_ctx is None:
+            return _error_result(
+                "demo_verify is not available here. If you are the tutor, the "
+                "builder checks its own work."
+            )
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            demo_id = (args.get("demo_id") or "").strip()
+            demo = get_demo(email, demo_id)
+            if demo is None:
+                return _error_result(f"No demo with id {demo_id!r}")
+
+            html = demo["html"]
+            broken = []
+
+            # The hard rules — these already block a save, so a failure here
+            # means the demo on disk predates them or was assembled from parts.
+            try:
+                validate_demo_html(html)
+            except ValueError as e:
+                broken.append(str(e))
+
+            handlers = _missing_handlers(html)
+            if handlers:
+                broken.append(
+                    "These inline handlers call functions nothing defines at "
+                    "top level: " + ", ".join(sorted(handlers)) + ". A function "
+                    "inside DOMContentLoaded or a type=module script is "
+                    "invisible to an onclick."
+                )
+
+            ids = missing_element_ids(html)
+            if ids:
+                broken.append(
+                    "getElementById looks up ids no element has: "
+                    + ", ".join(sorted(ids))
+                    + ". If these are built at runtime this is fine; otherwise "
+                    "the demo throws on first click."
+                )
+
+            payload = {"demo_id": demo_id, "broken": broken}
+            if broken:
+                payload["action"] = (
+                    "Fix these and call demo_verify again. Do not report the "
+                    "demo as finished while anything is listed here."
+                )
+            else:
+                payload["note"] = (
+                    "Nothing found. Static checks cannot see ids built by "
+                    "concatenation or a runtime throw, so give the logic one "
+                    "read before you stop."
+                )
+            # Recorded on the meta so the job runner can tell a checked build
+            # from an unchecked one; see _run_build.
+            set_demo_verified(email, demo_id, not broken)
+            return _text_result(json.dumps(payload))
+        except Exception as e:
+            logger.error(f"demo_verify error: {e}", exc_info=True)
+            return _error_result(f"Error verifying demo: {e}")
+
+    @tool(
+        "get_demo_html",
+        "Check out a demo you are about to change. Copies it into your scratch "
+        "directory and returns the PATH — not the document. Read and patch that "
+        "file with your own file tools (Read, Grep, Edit), then publish it with "
+        "update_demo(demo_id, html_path=...). Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "demo_id": {"type": "string", "description": "The demo to check out"},
             },
             "required": ["demo_id"],
         },
     )
     async def get_demo_html_tool(args):
-        """Return a demo's HTML. Builder-only — never in the tutor's allowlist.
+        """Copy a demo into scratch and return where it landed.
 
-        The tutor must not call this: a demo can be up to MAX_DEMO_BYTES, and
-        pulling that into the chat transcript would re-send it to the model on
-        every subsequent turn.
+        Returns a path, not the HTML. A demo runs 15-30KB, and everything a
+        tool returns stays in the session transcript and is re-sent on every
+        later turn — the same reason this was always kept away from the tutor.
+        The builder is a resumed, multi-turn session too, so it paid that cost
+        as well: one edit used to carry five copies of the document, between
+        the original save, this read, a Write, a Read back, and the update.
+
+        Handing back a path costs ~80 bytes and lets the builder patch the file
+        with Edit, which never touches this channel.
         """
-        from backend.demos import get_demo
+        from backend.demos import copy_demo_to_scratch
 
-        # Builder-only: a demo can be up to MAX_DEMO_BYTES, and pulling that
-        # into the tutor's transcript would re-send it on every later turn.
         if build_ctx is None:
             return _error_result("get_demo_html is only available to the demo builder.")
 
         try:
             email = _email_from_dir(user_data_dir)
-            demo = get_demo(email, args.get("demo_id", ""))
-            if demo is None:
-                return _error_result(f"No demo with id {args.get('demo_id')!r}")
-            return _text_result(demo["html"])
+            demo_id = args.get("demo_id", "")
+            dest = build_ctx.get("scratch_dir")
+            if not dest:
+                # No scratch this run (mkdir failed upstream). Say so plainly
+                # rather than falling back to returning the document, which is
+                # the behaviour this replaced.
+                return _error_result(
+                    "No scratch directory for this build, so the demo cannot "
+                    "be checked out. Rebuild it instead of editing."
+                )
+
+            path = copy_demo_to_scratch(email, demo_id, dest)
+            return _text_result(json.dumps({
+                "path": path,
+                "next": (
+                    "Read or Grep this file to find what to change, patch it "
+                    "with Edit, then call update_demo(demo_id, html_path) with "
+                    "this same path. Do not paste the document into a tool "
+                    "call."
+                ),
+            }))
+        except ValueError as e:
+            return _error_result(str(e))
         except Exception as e:
             logger.error(f"get_demo_html error: {e}", exc_info=True)
             return _error_result(f"Error reading demo: {e}")
@@ -1321,11 +1890,19 @@ def create_learning_tools(
             "type": "object",
             "properties": {
                 "demo_id": {"type": "string", "description": "The demo to update"},
+                "html_path": {
+                    "type": "string",
+                    "description": (
+                        "PREFERRED. Path to the patched file — the one "
+                        "get_demo_html checked out. The server reads it from "
+                        "disk, so the document never goes through a tool call."
+                    ),
+                },
                 "html": {
                     "type": "string",
                     "description": (
-                        "Complete replacement HTML document, self-contained. "
-                        "Keep the parts that already worked."
+                        "Inline replacement document. Avoid for anything "
+                        "sizeable: use html_path instead."
                     ),
                 },
                 "title": {"type": "string", "description": "Optional new title"},
@@ -1334,11 +1911,17 @@ def create_learning_tools(
                     "description": "One line on what changed and what to try",
                 },
             },
-            "required": ["demo_id", "html"],
+            "required": ["demo_id"],
         },
     )
     async def update_demo_tool(args):
         """Edit a demo in place so refinement does not churn the demo list."""
+        # Refuse a payload big enough to take the channel down. See
+        # agent.check_payload_size for why this is here and not in a hook.
+        _too_big = check_payload_size("mcp__learning-tools__update_demo", args)
+        if _too_big:
+            return _error_result(_too_big)
+
         from backend.demos import update_demo as store_update
 
         if build_ctx is None:
@@ -1354,13 +1937,14 @@ def create_learning_tools(
                 email=email,
                 demo_id=args.get("demo_id", ""),
                 html=args.get("html", ""),
+                html_path=args.get("html_path", ""),
                 title=args.get("title", ""),
                 summary=args.get("summary", ""),
                 builder_session_id=build.get("builder_session_id", ""),
+                job_id=build.get("job_id", ""),
             )
             if meta is None:
                 return _error_result(f"No demo with id {args.get('demo_id')!r}")
-            build["demo_id"] = meta["id"]
             return _text_result(json.dumps({
                 "demo_id": meta["id"],
                 "version": meta["version"],
@@ -1395,22 +1979,23 @@ def create_learning_tools(
         },
     )
     async def get_demo_source_tool(args):
-        """Slice a demo's source around a query. Tutor-only.
+        """Slice a demo's source around a query. Both agents.
 
-        The builder has get_demo_html for the whole document; the tutor must
-        never pull that in, because everything in a tool result stays in the
-        SDK transcript and is re-sent on every later turn of the session. A
-        17KB demo would cost ~4200 tokens per turn for the rest of the
-        conversation. The char cap below is the real protection — it is
-        enforced here and no prompt can talk its way past it.
+        Everything a tool returns stays in the SDK transcript and is re-sent on
+        every later turn, so a 17KB demo would cost ~4200 tokens per turn for
+        the rest of the session. The char cap below is the real protection — it
+        is enforced here and no prompt can talk its way past it.
+
+        The builder gets this too, and used not to: the guard was
+        `session_ctx is None`, which is set on builder runs for an unrelated
+        reason (stopping a recursive request_demo), so it locked out the one
+        agent that edits demos and pointed it at the whole-document reader
+        instead. Finding the three lines to change is exactly what this is for.
         """
-        from backend.demos import _read_json, _html_path, _meta_path, _ID_ATTR, _FN_DECL
+        from backend.demos import _read_json, _meta_path, _ID_ATTR, _FN_DECL, get_demo
 
-        if session_ctx is None:
-            return _error_result(
-                "get_demo_source is not available here. If you are the demo "
-                "builder, call get_demo_html for the full document."
-            )
+        if session_ctx is None and build_ctx is None:
+            return _error_result("get_demo_source is not available here.")
 
         demo_id = (args.get("demo_id") or "").strip()
         query = (args.get("query") or "").strip()
@@ -1424,11 +2009,12 @@ def create_learning_tools(
             email = _email_from_dir(user_data_dir)
             if _read_json(_meta_path(email, demo_id)) is None:
                 return _error_result(f"No demo with id {demo_id!r}")
-            path = _html_path(email, demo_id)
-            if not os.path.isfile(path):
+            # What the learner sees. The flat file is absent or stale for a
+            # multi-panel demo, whose page is assembled from its parts.
+            demo = get_demo(email, demo_id)
+            if demo is None:
                 return _error_result(f"No source on disk for {demo_id!r}")
-            with open(path, encoding="utf-8") as f:
-                html = f.read()
+            html = demo["html"]
 
             lines = html.splitlines()
             needle = query.lower()
@@ -1589,12 +2175,92 @@ def create_learning_tools(
                 "note": (
                     "Building in the background. Say ONE sentence about what "
                     "it will show, then carry on teaching — do not wait for "
-                    "it and do not write any HTML."
+                    "it and do not write any HTML. If the learner asks whether "
+                    "it is done, call get_demo_status with this job_id: "
+                    "search_demos cannot tell a failed build from a slow one."
                 ),
             }))
         except Exception as e:
             logger.error(f"request_demo error: {e}", exc_info=True)
             return _error_result(f"Error requesting demo: {e}")
+
+    @tool(
+        "get_demo_status",
+        "Check whether a demo requested with request_demo has finished. Pass "
+        "the job_id request_demo returned. Use this — NOT search_demos — to "
+        "answer 'is it done yet?': search_demos lists demos that already "
+        "exist, so a build that FAILED looks exactly like one still running, "
+        "and reporting 'still building' for a dead build leaves the learner "
+        "waiting for something that is never coming.",
+        {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id request_demo returned.",
+                },
+            },
+            "required": ["job_id"],
+        },
+    )
+    async def get_demo_status_tool(args):
+        """Report one build's state, and say what to do about it.
+
+        This exists because the tutor had no way to see a failed build. It
+        polled search_demos, saw an empty list, and told the learner "still
+        building" — three times, for a job that had already failed. An empty
+        list genuinely cannot distinguish the two states; only the job record
+        can, which is what this reads.
+        """
+        from backend.demojobs import get_job, BUILDING, QUEUED, READY, FAILED, CANCELLED
+
+        try:
+            email = _email_from_dir(user_data_dir)
+            job_id = (args.get("job_id") or "").strip()
+            if not job_id:
+                return _error_result("job_id is required")
+
+            # Scoped by email inside get_job, so one learner cannot read
+            # another's build (including the prompt text they typed).
+            record = get_job(email, job_id)
+            if record is None:
+                return _error_result(
+                    f"No demo build found with job_id '{job_id}'. It may belong "
+                    f"to a different learner, or the id may be wrong — check "
+                    f"what request_demo returned."
+                )
+
+            state = record.get("state", "")
+            payload = {"job_id": job_id, "state": state}
+
+            if state in (QUEUED, BUILDING):
+                payload["note"] = (
+                    "Still building. Do NOT wait or poll in a loop — carry on "
+                    "teaching and check again on a later turn."
+                )
+            elif state == READY:
+                payload["demo_id"] = record.get("demo_id")
+                payload["note"] = (
+                    "Ready. Tell the learner it has landed and what to try "
+                    "first."
+                )
+            elif state == FAILED:
+                # The error is the whole point of this branch: without it the
+                # tutor can see "failed" but not say anything useful about it.
+                payload["error"] = record.get("error") or "unknown error"
+                payload["note"] = (
+                    "This build FAILED — it is not coming. Tell the learner "
+                    "plainly rather than saying it is still building, and ask "
+                    "whether to retry. If the error mentions an output limit, "
+                    "request a SMALLER demo: one concept, not ten panels."
+                )
+            elif state == CANCELLED:
+                payload["note"] = "This build was cancelled."
+
+            return _text_result(json.dumps(payload, default=str))
+        except Exception as e:
+            logger.error(f"get_demo_status error: {e}", exc_info=True)
+            return _error_result(f"Error checking demo status: {e}")
 
     # =====================================================================
     # Derivations
@@ -1647,7 +2313,8 @@ def create_learning_tools(
         if session_ctx is None:
             return _error_result(
                 "request_derivation is not available here. If you are the "
-                "derivation builder, call derivation_open and derivation_write."
+                "derivation builder, call derivation_write on the doc_id your "
+                "instructions name."
             )
 
         try:
@@ -1674,59 +2341,33 @@ def create_learning_tools(
             return _error_result(f"Error requesting derivation: {e}")
 
     @tool(
-        "derivation_open",
-        "Create the derivation document, before writing any blocks to it. "
-        "Builder only. Returns the doc_id the other derivation tools need.",
-        {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Short name for the derivation"},
-                "concept_id": {"type": "string", "description": "Concept this belongs to"},
-            },
-            "required": ["title"],
-        },
-    )
-    async def derivation_open_tool(args):
-        from backend.derivations import create_doc
-
-        if build_ctx is None:
-            return _error_result(
-                "derivation_open is not available here. Call "
-                "request_derivation(title, concept_id, request) instead."
-            )
-        try:
-            email = _email_from_dir(user_data_dir)
-            build = build_ctx or {}
-            doc = create_doc(
-                email=email,
-                title=args.get("title", "") or build.get("title", ""),
-                concept_id=args.get("concept_id", "") or build.get("concept_id", ""),
-                session_id=build.get("chat_session_id", ""),
-            )
-            build["doc_id"] = doc["id"]
-            return _text_result(json.dumps({
-                "doc_id": doc["id"],
-                "status": "open",
-                "note": "Now call derivation_write in waves — intuition first.",
-            }))
-        except Exception as e:
-            logger.error(f"derivation_open error: {e}", exc_info=True)
-            return _error_result(f"Error opening derivation: {e}")
-
-    @tool(
         "derivation_write",
         "Append blocks to a derivation. Blocks ADD to what is already there, "
         "so call this several times as you work — intuition first, then the "
         "steps, then any table or matrix — and the learner watches it fill in. "
-        "Builder only.",
+        "Write each wave as a JSON array to a file in your scratch directory "
+        "and pass blocks_path. Builder only.",
         {
             "type": "object",
             "properties": {
-                "doc_id": {"type": "string", "description": "From derivation_open"},
+                "doc_id": {
+                    "type": "string",
+                    "description": "The doc_id your instructions name",
+                },
+                "blocks_path": {
+                    "type": "string",
+                    "description": (
+                        "PREFERRED. Path to a JSON file in your scratch "
+                        "directory holding an array of blocks. The server "
+                        "reads it from disk, so the wave never goes through "
+                        "a tool call."
+                    ),
+                },
                 "blocks": {
                     "type": "array",
                     "description": (
-                        "Blocks to append. Each has a 'kind': "
+                        "Inline blocks — only for a small wave; use "
+                        "blocks_path otherwise. Each has a 'kind': "
                         "'text' {content}, 'latex' {content}, "
                         "'derivation' {title, steps:[{expr, reason}]}, "
                         "'matrix' {label, rows, ops}, "
@@ -1738,11 +2379,17 @@ def create_learning_tools(
                     "items": {"type": "object"},
                 },
             },
-            "required": ["doc_id", "blocks"],
+            "required": ["doc_id"],
         },
     )
     async def derivation_write_tool(args):
-        from backend.derivations import append_blocks
+        # Refuse a payload big enough to take the channel down. See
+        # agent.check_payload_size for why this is here and not in a hook.
+        _too_big = check_payload_size("mcp__learning-tools__derivation_write", args)
+        if _too_big:
+            return _error_result(_too_big)
+
+        from backend.derivations import append_blocks, from_builder, read_builder_blocks
 
         if build_ctx is None:
             return _error_result(
@@ -1751,15 +2398,22 @@ def create_learning_tools(
             )
         try:
             email = _email_from_dir(user_data_dir)
-            doc = append_blocks(email, args.get("doc_id", ""), args.get("blocks") or [])
+            blocks_path = (args.get("blocks_path") or "").strip()
+            blocks = (
+                read_builder_blocks(blocks_path) if blocks_path
+                else args.get("blocks") or []
+            )
+            if not blocks:
+                return _error_result(
+                    "No blocks to write. Put the wave in a JSON file in your "
+                    "scratch directory and pass blocks_path."
+                )
+            # Nothing is reported back through build_ctx: over the HTTP
+            # transport it is a per-request copy. The job runner reads the doc
+            # itself once the builder exits — see mathjobs._run_build.
+            doc = append_blocks(email, args.get("doc_id", ""), from_builder(blocks))
             if doc is None:
                 return _error_result(f"No such derivation: {args.get('doc_id')}")
-
-            build = build_ctx or {}
-            build["doc_id"] = doc["id"]
-            # The job runner treats "opened but never written" as a failure, so
-            # this flag is what separates a real build from an empty one.
-            build["wrote_blocks"] = True
 
             unverified = [
                 b["id"] for b in doc["blocks"]
@@ -1775,6 +2429,12 @@ def create_learning_tools(
             if unverified:
                 payload["next"] = (
                     "Call derivation_verify on: " + ", ".join(unverified)
+                )
+            from backend.derivations import bare_math_warnings
+            bare = bare_math_warnings(doc["blocks"])
+            if bare:
+                payload["fix_formatting"] = (
+                    "Maths outside $$…$$ renders as raw text in the pane. Wrap each symbol or formula in these places in $$…$$ (e.g. $$w_1^2$$, $$\\|w\\|^2$$) and update the block: " + " | ".join(bare)
                 )
             return _text_result(json.dumps(payload))
         except ValueError as e:
@@ -1829,10 +2489,15 @@ def create_learning_tools(
                 {"step": i + 1, "expr": s["expr"][:120], "why": s["check"][:160]}
                 for i, s in enumerate(checked) if s["verified"] is False
             ]
-            unchecked = sum(
-                1 for i, s in enumerate(checked)
+            # Each unchecked step with its own reason. A blanket "usually
+            # unbraced functions" note used to go here; it was wrong for
+            # equations, definitions and matrix notation alike, and a builder
+            # spent four rewrites of a correct derivation chasing braces.
+            unchecked = [
+                {"step": i + 1, "why": s["check"][:120]}
+                for i, s in enumerate(checked)
                 if s["verified"] is None and i > 0
-            )
+            ]
             payload = {
                 "verified": sum(1 for s in checked if s["verified"] is True),
                 "wrong": wrong,
@@ -1840,13 +2505,15 @@ def create_learning_tools(
             }
             if wrong:
                 payload["action"] = (
-                    "These steps do not follow. Rewrite them and call "
+                    "These steps do not follow. Fix them with "
+                    "get_derivation_json + Edit + derivation_update, then call "
                     "derivation_verify again."
                 )
             elif unchecked:
                 payload["note"] = (
-                    "Unchecked steps are usually unbraced functions — write "
-                    "\\log{(x)} rather than \\log(x) — or prose inside the expr."
+                    "Unchecked is not wrong. Rewrite a step only when its why "
+                    "says ambiguous notation — brace function arguments, "
+                    "\\log{(x)} not \\log(x). Leave the rest."
                 )
             return _text_result(json.dumps(payload))
         except Exception as e:
@@ -1880,6 +2547,108 @@ def create_learning_tools(
         except Exception as e:
             logger.error(f"derivation_read error: {e}", exc_info=True)
             return _error_result(f"Error reading derivation: {e}")
+
+    @tool(
+        "get_derivation_json",
+        "Check out a derivation you are about to correct. Copies its blocks "
+        "into your scratch directory as JSON and returns the PATH — not the "
+        "blocks. Find what to change with Grep/Read, patch it with Edit, then "
+        "publish with derivation_update(doc_id, blocks_path=...). Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string", "description": "The derivation to check out"},
+            },
+            "required": ["doc_id"],
+        },
+    )
+    async def get_derivation_json_tool(args):
+        """Copy a derivation into scratch and return where it landed.
+
+        The derivation twin of get_demo_html. Appending was the only write a
+        builder had, so a wrong block could only be followed by a corrected
+        copy — a live build left the same derivation on the page four times.
+        """
+        from backend.derivations import copy_doc_to_scratch
+
+        if build_ctx is None:
+            return _error_result("get_derivation_json is not available here.")
+        try:
+            email = _email_from_dir(user_data_dir)
+            dest = build_ctx.get("scratch_dir")
+            if not dest:
+                return _error_result(
+                    "No scratch directory for this build, so the derivation "
+                    "cannot be checked out."
+                )
+            path = copy_doc_to_scratch(email, args.get("doc_id", ""), dest)
+            return _text_result(json.dumps({
+                "path": path,
+                "next": (
+                    "Grep or Read this file to find the block, patch it with "
+                    "Edit, then call derivation_update(doc_id, blocks_path) "
+                    "with this same path. Delete a block by removing it from "
+                    "the array. Keep each block's \"id\"."
+                ),
+            }))
+        except ValueError as e:
+            return _error_result(str(e))
+        except Exception as e:
+            logger.error(f"get_derivation_json error: {e}", exc_info=True)
+            return _error_result(f"Error checking out derivation: {e}")
+
+    @tool(
+        "derivation_update",
+        "Replace a derivation's blocks with the file you checked out and "
+        "edited. The file is the WHOLE document, in order: a block you removed "
+        "is deleted, a block you changed is replaced where it stands. Changed "
+        "derivation blocks lose their verification — call derivation_verify "
+        "on the ids this returns. Builder only.",
+        {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "blocks_path": {
+                    "type": "string",
+                    "description": "The file get_derivation_json returned, after your edits",
+                },
+            },
+            "required": ["doc_id", "blocks_path"],
+        },
+    )
+    async def derivation_update_tool(args):
+        from backend.derivations import read_builder_blocks, replace_blocks
+
+        if build_ctx is None:
+            return _error_result("derivation_update is not available here.")
+        try:
+            email = _email_from_dir(user_data_dir)
+            blocks = read_builder_blocks(args.get("blocks_path", ""))
+            if not blocks:
+                return _error_result(
+                    "The file holds no blocks. A derivation cannot be emptied; "
+                    "remove only the blocks that should go."
+                )
+            doc, needs_verify = replace_blocks(email, args.get("doc_id", ""), blocks)
+            payload = {
+                "doc_id": doc["id"],
+                "blocks": len(doc["blocks"]),
+                "status": "updated",
+            }
+            if needs_verify:
+                payload["next"] = "Call derivation_verify on: " + ", ".join(needs_verify)
+            from backend.derivations import bare_math_warnings
+            bare = bare_math_warnings(doc["blocks"])
+            if bare:
+                payload["fix_formatting"] = (
+                    "Maths outside $$…$$ renders as raw text in the pane. Wrap each symbol or formula in these places in $$…$$ (e.g. $$w_1^2$$, $$\\|w\\|^2$$) and update the block: " + " | ".join(bare)
+                )
+            return _text_result(json.dumps(payload))
+        except ValueError as e:
+            return _error_result(f"Derivation rejected: {e}")
+        except Exception as e:
+            logger.error(f"derivation_update error: {e}", exc_info=True)
+            return _error_result(f"Error updating derivation: {e}")
 
     @tool(
         "derivation_plot",
@@ -1931,7 +2700,6 @@ def create_learning_tools(
                 )
             doc = add_plot(email, args.get("doc_id", ""), source,
                            caption=args.get("caption", ""))
-            build_ctx["wrote_blocks"] = True
             return _text_result(json.dumps({
                 "doc_id": doc["id"],
                 "blocks": len(doc["blocks"]),
@@ -2445,9 +3213,14 @@ def create_learning_tools(
         ],
         "demos": [
             request_demo_tool,      # tutor
+            get_demo_status_tool,   # tutor
             search_demos_tool,      # tutor
             get_demo_source_tool,   # tutor
             save_demo_tool,         # builder only
+            demo_open_tool,         # builder only — split path
+            demo_write_part_tool,   # builder only — split path
+            demo_finalize_tool,     # builder only — split path
+            demo_verify_tool,       # builder only — self-check
             update_demo_tool,       # builder only
             get_demo_html_tool,     # builder only
         ],
@@ -2469,10 +3242,11 @@ def create_learning_tools(
         ],
         "derivations": [
             request_derivation_tool,  # tutor
-            derivation_open_tool,     # builder only
             derivation_write_tool,    # builder only
             derivation_verify_tool,   # builder only
             derivation_read_tool,     # builder only
+            get_derivation_json_tool, # builder only
+            derivation_update_tool,   # builder only
             derivation_plot_tool,     # builder only
         ],
     }
@@ -2491,10 +3265,57 @@ def create_learning_tools(
         app, len(enabled), list(selected),
     )
 
-    return create_sdk_mcp_server(
+    # The HTTP transport registers each tool itself and never needs the SDK
+    # server object; returning early also avoids logging a build it will not use.
+    if _return_tools:
+        return enabled
+
+    server = create_sdk_mcp_server(
         name="learning-tools",
         version="1.0.0",
         tools=enabled,
+    )
+    # Identity of the server this run will use. The CLI is handed only
+    # {"type": "sdk", "name": ...} — the instance is stripped — and must call
+    # back over the control protocol to reach it. When those callbacks fail the
+    # tool result says only "Stream closed", which cannot distinguish "the
+    # server was never built" from "it was built but never reached". Logging
+    # the instance id here, against the same id at call time, tells them apart.
+    # Hand the id to the handlers' closure cell so an entry line can name the
+    # same server this line names. Comparing the two is what tells "never
+    # reached" from "reached a stale one".
+    mcp_instance_id[0] = id(server.get("instance"))
+    logger.info(
+        "MCP server built [%s]: %d tools, instance=%x, role=%s",
+        app, len(enabled), mcp_instance_id[0],
+        "builder" if build_ctx is not None else "tutor",
+    )
+    return server
+
+
+def build_tool_list(
+    user_data_dir: str,
+    episodic: EpisodicMemory,
+    session_ctx: dict | None = None,
+    build_ctx: dict | None = None,
+    app: str = DEFAULT_APP,
+) -> list:
+    """The same tools create_learning_tools assembles, as a plain list.
+
+    For the HTTP transport (backend/mcp_http.py), which registers each tool
+    itself. create_sdk_mcp_server returns only {type, name, instance} and hides
+    the tools inside the Server object; rather than reach into its internals —
+    or bolt an extra key onto a TypedDict the SDK serialises toward the CLI —
+    ask the factory for the list. Each SdkMcpTool already carries the name,
+    description, input_schema and handler a transport needs.
+
+    Shares create_learning_tools rather than duplicating the family filtering
+    and the builder gate: those decide which tools exist for an app and whether
+    build_ctx unlocks the builder-only ones, and two copies would drift.
+    """
+    return create_learning_tools(
+        user_data_dir, episodic, session_ctx, build_ctx, app=app,
+        _return_tools=True,
     )
 
 

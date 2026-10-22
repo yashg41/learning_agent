@@ -52,6 +52,13 @@
     gap: var(--space-4);
 }
 
+/* Blocks are a stack, never squeezed to fit. The body scrolls; its children
+   must not. A child that is itself a scroll container (.dv-latex sets
+   overflow-x) has an automatic min-height of 0, so with the default
+   flex-shrink:1 a long derivation shrank every latex block to a sliver with
+   its own scrollbar — the SVM Lagrangian showed only the tops of its glyphs. */
+.derivation-body > * { flex-shrink: 0; }
+
 .dv-empty {
     color: var(--text-muted);
     font-size: var(--text-sm);
@@ -247,6 +254,9 @@
     font-weight: 650;
 }
 .dv-table td { color: var(--text-dim); }
+/* Headers are small caps for prose, but uppercasing typeset maths turns y_i
+   into Y_I — a different symbol, not a style. */
+.dv-table th .katex { text-transform: none; letter-spacing: normal; }
 
 .dv-caption {
     margin-top: var(--space-2);

@@ -16,6 +16,13 @@ from backend.memory import _safe_email, save_summary, get_summary, get_session_d
 
 logger = logging.getLogger(__name__)
 
+# Ceiling on how much prior conversation a restore replays in one prompt.
+# ~150k chars is roughly 40k tokens, which leaves ample room for the system
+# prompt, the tools and the turn itself. Unbounded, this same code path is
+# what fails when rescuing a session that outgrew the context window — the
+# rescue would hit the very limit it exists to escape.
+MAX_REPLAY_CHARS = 150_000
+
 
 def _get_claude_project_dir() -> str:
     """Get the .claude project directory path for this app.
@@ -196,12 +203,40 @@ async def replay_from_memory(email: str, session_id: str, system_prompt: str | N
             elif turn_type == "result":
                 transcript_parts.append(f"Agent: {content}")
 
+        # Keep the most recent turns, not the first ones. This restore also
+        # runs as the rescue for a session that grew PAST the context window,
+        # so replaying all of it unbounded would fail for exactly the reason it
+        # was called — and the recent end of a conversation is what the next
+        # turn actually needs. Older material is not lost: it is in episodic
+        # memory and in the knowledge graph, both of which the system prompt
+        # already carries.
         transcript = "\n\n".join(transcript_parts)
+        truncated = False
+        if len(transcript) > MAX_REPLAY_CHARS:
+            kept = []
+            total = 0
+            for part in reversed(transcript_parts):
+                total += len(part) + 2
+                if total > MAX_REPLAY_CHARS:
+                    break
+                kept.append(part)
+            transcript = "\n\n".join(reversed(kept))
+            truncated = True
+            logger.info(
+                f"Replay transcript trimmed to the last {len(kept)} turn(s) "
+                f"({len(transcript):,} chars) to fit the context window"
+            )
 
         context_prompt = (
             "This session is being restored from a saved conversation transcript. "
-            "Below is the previous conversation:\n\n"
-            f"{transcript}\n\n"
+            + (
+                "It was long, so this is the most recent part of it — earlier "
+                "material is in your memory tools and the learner's progress "
+                "record if you need it.\n\n"
+                if truncated else
+                "Below is the previous conversation:\n\n"
+            )
+            + f"{transcript}\n\n"
             "The conversation continues from here. Please acknowledge briefly that you have the context."
         )
 

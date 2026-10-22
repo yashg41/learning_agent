@@ -124,39 +124,102 @@ answer teaches nothing that a sentence could not.
 ## Size
 
 Aim for 150-400 lines. One concept per demo. If it is growing past that, the
-demo is trying to teach too much — cut it down to the single step that was
-confusing.
+demo is usually trying to teach too much — cut it down to the single step that
+was confusing.
 
-## Check before saving
+The exception is a request that genuinely needs many panels ("show all ten
+database types side by side"), where the comparison *is* the lesson. Do not
+shrink that to three panels, and do not try to write it in one go: one reply
+caps at about 32000 output tokens, and going over discards the whole reply
+rather than truncating it, saving nothing.
 
-Read your own HTML once and confirm each of these. A demo that throws on the
-first click looks identical to one that works until the learner clicks — the
-frame is sandboxed, so nothing surfaces on the page.
+Build it in pieces instead:
 
-1. **Every id used in JS exists in the markup, spelled identically.** Search
-   for each `getElementById("...")` and each id you build by concatenation,
-   and find the matching `id="..."`. This is the failure that actually happens.
-2. **Every function named in an `onclick` is defined** at top level — not
-   inside `DOMContentLoaded`, not inside another function, and not in a
-   `<script type="module">` (module scope is not global, so inline handlers
-   cannot see it).
+```
+demo_open(title, shell_html, parts=[{name, spec}, ...])
+    shell_html = doctype + shared <style> + <!--{{PARTS}}--> + shared <script>
+    -> the panels are written in parallel and finalized for you
+```
+
+The shell carries every shared style and helper — roughly two thirds of a
+demo's bytes — so each panel only costs its own markup, and the panel count
+stops mattering. Each `spec` is the whole brief for that panel: its author sees
+the spec and the shell, nothing else.
+
+To write the panels yourself instead, omit `parts`, call `demo_write_part` once
+per panel in display order, then `demo_finalize` once.
+
+**Naming across panels.** Everything is concatenated into one document, so
+prefix each panel's ids and functions with its slug (`relational_render`, not
+`render`). Shared helpers belong in the shell.
+
+## Before you stop
+
+A demo that throws on the first click looks identical to one that works until
+the learner clicks — the frame is sandboxed, so nothing surfaces on the page.
+Checking is part of the job.
+
+**Call `demo_verify(demo_id)` after saving.** It reports the faults a function
+can decide: an `onclick` naming a function nothing defines, a `getElementById`
+for an id no element has, an external URL the sandbox will block. Fix what it
+lists and call it again. Do not report the demo as finished while anything is
+outstanding.
+
+Three things `demo_verify` cannot see. Read for these yourself:
+
+1. **Ids built by concatenation.** `getElementById('btn-' + key)` against markup
+   written `id="btn-s1"` cannot be checked statically — `key` only exists at
+   runtime. Derive both from one source rather than writing the id twice.
+2. **Scope.** A function inside `DOMContentLoaded`, inside another function, or
+   in a `<script type="module">` is invisible to an inline `onclick`, and the
+   check does not model scope. Define handlers at top level.
 3. **Initial state renders without a click.** Call your `render()` once at the
    end of the script so the demo is not blank on open.
-4. **No external URLs** in `src`/`href`. (`xmlns="http://www.w3.org/2000/svg"`
-   is fine — it is a namespace, not a fetch.)
+
+You also have a scratch directory and `run_code`. For anything a script could
+settle faster than reading — parsing the markup, listing every id, diffing them
+against the lookups — write the check and run it.
 
 ## Saving
 
 For a NEW demo, call `save_demo` with:
 
 - `title` — short, e.g. "Consistent hashing ring"
-- `html` — the complete document
+- `html_path` — the file you drafted in scratch (preferred)
 - `concept_id` — e.g. `consistent_hashing`, matching the concept being tracked
 - `summary` — one line telling them what to try first
 
-For a CHANGE to an existing demo, call `get_demo_html(demo_id)` first, then
-`update_demo(demo_id, html, ...)` with the full replacement. Keep everything
-that already worked — apply the requested change, do not start over.
+**Never paste a document into a tool call.** Write it to your scratch directory
+and pass the path. The server reads the file off disk, so the demo never goes
+through the tool channel — which is what a 20KB argument was doing when it took
+the connection down mid-build and lost the work.
+
+### Changing an existing demo
+
+Patch it. Do not rewrite it.
+
+```
+get_demo_html(demo_id)          -> copies it to scratch, returns the PATH
+get_demo_source(demo_id, query) -> the lines mentioning a name, if you need
+                                   to find the spot without reading it all
+Edit  old_string -> new_string   on that file, as many times as needed
+update_demo(demo_id, html_path=<that path>)
+```
+
+Adding a reset button changes perhaps 40 lines. `Edit` sends those lines;
+rewriting the file sends all 400. Use `Grep` and `Read` with an offset on the
+draft rather than reading it whole.
+
+**Every tool call has a size limit of roughly 8KB per argument**, and an
+oversized one is refused with an explanation rather than sent. Reading a large
+file whole is refused too — pass `offset` and `limit`. This is not a style
+preference: a large payload has repeatedly killed the tool connection
+mid-build, after which every later call fails and the work is lost. Small,
+targeted calls are how a big demo gets built at all.
+
+`Edit` needs `old_string` to match exactly once, so include a little
+surrounding context when a line is not unique.
+
 `update_demo` keeps the demo's id and its place in the learner's list, so never
 use `save_demo` for an edit; that would leave a duplicate behind.
 

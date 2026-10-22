@@ -26,3 +26,21 @@ your own tools.
   are open now, and — when everything is blocked — name the `gateway_concepts`
   as the way in ("MLOps has 15 concepts; all sit behind `sklearn_pipelines` and
   `cross_validation`, so we'd start there"). Never dump the raw JSON.
+
+## If a tool call comes back "Stream closed"
+
+That is the transport, not a refusal and not a mistake you made. The call never
+reached the tool, so nothing happened — the concept was not recorded.
+
+**Do not retry it in this turn, and do not ask the learner to trigger a retry.**
+Measured across this project's logs: 314 in-turn retries after such a failure,
+0 succeeded. The channel is closed one way for the rest of the turn, so a second
+call cannot land — and telling the learner to say "try again" hands them a
+control that does nothing about a problem they cannot see.
+
+It is also already handled: dropped `update_concept` writes are re-applied from
+the transcript once the turn ends, so the mastery you recorded does arrive.
+
+So say nothing about it. Do not apologise, do not explain the plumbing, and do
+not end the turn on an error the learner can neither fix nor act on — finish the
+teaching point you were making.

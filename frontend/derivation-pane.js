@@ -278,7 +278,10 @@ function typesetDeriv(root) {
                 delimiters: [{ left: "$$", right: "$$", display: true }],
             });
         });
-        root.querySelectorAll(".dv-text, .dv-reason, .dv-caption").forEach(el => {
+        // Table cells are inline math too: a builder writes "$$a_1$$" in a cell
+        // exactly as it would in a sentence, and without this they showed the
+        // raw $$…$$ source.
+        root.querySelectorAll(".dv-text, .dv-reason, .dv-caption, .dv-table th, .dv-table td, .dv-matrix-table td").forEach(el => {
             renderMathInElement(el, {
                 ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
                 throwOnError: false,
@@ -440,32 +443,24 @@ function applyDerivJobToChip(job) {
 async function toggleDerivation(force) {
     const pane = derivPaneEl();
     if (!pane) return;
+    // The header button on a background tab switches to it rather than closing.
+    if (force === undefined && rightPaneInBackground("derivation")) {
+        claimRightPane("derivation");
+        return;
+    }
     derivOpen = force !== undefined ? force : !derivOpen;
-    pane.style.display = derivOpen ? "flex" : "none";
 
     const btn = document.getElementById("derivation-btn");
     if (btn) btn.classList.toggle("is-on", derivOpen);
 
     if (!derivOpen) {
-        if (typeof syncPaneSplit === "function") syncPaneSplit();
+        releaseRightPane("derivation");
         saveDerivUi();
         return;
     }
 
-    // The right-hand panes compete for the same column.
-    if (typeof notesOpen !== "undefined" && notesOpen
-        && typeof toggleNotes === "function") {
-        await toggleNotes(false);
-    }
-    if (typeof demoOpen !== "undefined" && demoOpen
-        && typeof toggleDemo === "function") {
-        await toggleDemo(false);
-    }
-    if (typeof notebookOpen !== "undefined" && notebookOpen
-        && typeof toggleNotebook === "function") {
-        toggleNotebook();
-    }
-    if (typeof syncPaneSplit === "function") syncPaneSplit();
+    // Its tab comes to the front; other open panes stay open behind theirs.
+    claimRightPane("derivation");
 
     if (!derivIndex.length) await loadDerivIndex();
     if (!activeDerivId) {

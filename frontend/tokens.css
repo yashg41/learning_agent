@@ -96,7 +96,13 @@
     --leading-normal: 1.5;
     --leading-prose: 1.65;
 
-    /* Past ~70 characters the eye loses its place on the return sweep. */
+    /* Reading measure, for the user's own bubbles only.
+       The assistant thread does NOT use this: prose, code, tables and diagrams
+       there all share one column owned by the container, so their edges line
+       up. A second width token used to live here for figures; it produced two
+       different right edges in the same turn (a code block ending 500px past
+       the paragraph under it) and, because it contained a percentage, resolved
+       against a different parent in each rule it appeared in. One edge now. */
     --measure: 68ch;
 
     /* ---------- Spacing (4px base) -------------------------------------- */

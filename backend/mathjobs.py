@@ -268,9 +268,17 @@ def start_derivation_job(
 
 
 async def _run_build(record: dict) -> None:
-    """Run one derivation build to completion, recording what happened."""
+    """Run one derivation build to completion, recording what happened.
+
+    The outcome is read off disk, never off build_ctx. The tools run behind
+    the HTTP MCP transport, where build_ctx arrives as a per-request copy
+    rebuilt from a header, so anything a tool writes into it is gone when the
+    request ends. That is how a 31-block derivation was reported as "finished
+    without writing a derivation". The runner therefore owns the doc — it
+    creates it, names it to the builder, and afterwards looks at what landed.
+    """
     from backend.agent import run_derivation_builder
-    from backend.derivations import get_doc, save_meta
+    from backend.derivations import create_doc, get_doc, save_meta
 
     job_id = record["job_id"]
     email = record["email"]
@@ -285,35 +293,59 @@ async def _run_build(record: dict) -> None:
 
     base_doc_id = record.get("base_doc_id")
     resume_builder = None
+    before: list | None = None
     if base_doc_id:
         existing = get_doc(email, base_doc_id)
         if existing:
             # Resume the session that wrote this derivation: it still holds the
             # conversation and the blocks, so a revision is incremental.
             resume_builder = existing.get("builder_session_id") or None
+            # What "changed nothing" is measured against once it exits.
+            before = existing.get("blocks") or []
         else:
             logger.warning(
                 f"Derivation job {job_id}: base doc {base_doc_id} is gone; building fresh"
             )
             base_doc_id = None
 
-    prompt = _build_prompt(record, base_doc_id)
+    if base_doc_id:
+        doc_id = base_doc_id
+    else:
+        doc = create_doc(
+            email=email,
+            title=record.get("title") or "",
+            concept_id=record.get("concept_id") or "",
+            session_id=record.get("chat_session_id") or None,
+        )
+        doc_id = doc["id"]
+        update_job(job_id, doc_id=doc_id)
 
+    prompt = _build_prompt(record, doc_id, revising=bool(base_doc_id))
+
+    # Inbound only. agent.py still writes its own in-process flags here
+    # (builder_session_id, transport_failed, output_overflow) — those land on
+    # this live dict and are safe to read. No tool writes to it.
     build_ctx: dict = {
         "chat_session_id": record.get("chat_session_id") or "",
         "builder_session_id": "",
-        "doc_id": base_doc_id,
-        "title": record.get("title") or "",
-        "concept_id": record.get("concept_id") or "",
+        "doc_id": doc_id,
+        "job_id": job_id,
     }
 
-    builder_session_id = await run_derivation_builder(
-        email=email,
-        request=prompt,
-        chat_session_id=record.get("chat_session_id"),
-        resume_builder_session=resume_builder,
-        build_ctx=build_ctx,
-    )
+    try:
+        builder_session_id = await run_derivation_builder(
+            email=email,
+            request=prompt,
+            chat_session_id=record.get("chat_session_id"),
+            resume_builder_session=resume_builder,
+            build_ctx=build_ctx,
+        )
+    except BaseException:
+        # A new doc the builder never wrote to is a blank entry in the
+        # learner's list. Take it with the failure; a doc with blocks stays.
+        if not base_doc_id:
+            _drop_if_empty(email, doc_id)
+        raise
 
     # Mirror the builder's transcript before any early return: a revision
     # resumes this same session, so without the copy a migrated data/ directory
@@ -327,30 +359,38 @@ async def _run_build(record: dict) -> None:
             logger.warning(f"Could not archive builder session: {e}")
 
     if is_cancelled(job_id):
+        if not base_doc_id:
+            _drop_if_empty(email, doc_id)
         update_job(job_id, state=CANCELLED, error="cancelled")
         return
 
-    doc_id = build_ctx.get("doc_id")
-    wrote = bool(build_ctx.get("wrote_blocks"))
+    after = (get_doc(email, doc_id) or {}).get("blocks") or []
 
-    if base_doc_id and not wrote:
-        # On a revision the builder may legitimately decline — "hi" is not a
-        # change request. Reporting ready would claim an edit nobody made.
+    if base_doc_id:
+        if after == before:
+            # On a revision the builder may legitimately decline — "hi" is not
+            # a change request. Reporting ready would claim an edit nobody made.
+            update_job(
+                job_id,
+                state=FAILED,
+                doc_id=base_doc_id,
+                builder_session_id=builder_session_id,
+                error=_no_write_reason(
+                    build_ctx,
+                    "no change was made — say what to change about the derivation",
+                ),
+            )
+            return
+    elif not after:
+        _drop_if_empty(email, doc_id)
         update_job(
             job_id,
             state=FAILED,
-            doc_id=base_doc_id,
+            doc_id=None,
             builder_session_id=builder_session_id,
-            error="no change was made — say what to change about the derivation",
-        )
-        return
-
-    if not doc_id or not wrote:
-        update_job(
-            job_id,
-            state=FAILED,
-            error="the builder finished without writing a derivation",
-            builder_session_id=builder_session_id,
+            error=_no_write_reason(
+                build_ctx, "the builder finished without writing a derivation"
+            ),
         )
         return
 
@@ -367,32 +407,74 @@ async def _run_build(record: dict) -> None:
         builder_session_id=builder_session_id,
         error=None,
     )
-    logger.info(f"Derivation job {job_id} ready: {doc_id}")
+    logger.info(f"Derivation job {job_id} ready: {doc_id} ({len(after)} blocks)")
 
 
-def _build_prompt(record: dict, base_doc_id: str | None) -> str:
-    """The instruction handed to the builder agent."""
+def _drop_if_empty(email: str, doc_id: str) -> None:
+    """Delete a runner-created doc that never received a block."""
+    from backend.derivations import delete_doc, get_doc
+
+    try:
+        doc = get_doc(email, doc_id)
+        if doc is not None and not doc.get("blocks"):
+            delete_doc(email, doc_id)
+    except Exception as e:
+        logger.warning(f"Could not remove empty derivation {doc_id}: {e}")
+
+
+def _no_write_reason(build_ctx: dict, default: str) -> str:
+    """Why nothing landed, when agent.py recorded a cause in-process."""
+    if build_ctx.get("output_overflow"):
+        return (
+            "a wave was too large to write in one reply — the builder must "
+            "write smaller waves"
+        )
+    if build_ctx.get("transport_failed"):
+        return (
+            "the tool connection dropped before the derivation could be "
+            "saved — ask again and it will retry"
+        )
+    return default
+
+
+def _build_prompt(record: dict, doc_id: str, revising: bool = False) -> str:
+    """The instruction handed to the builder agent.
+
+    Names the doc_id outright, for a new build as well as a revision: the
+    runner created the doc, so the builder writes into it rather than opening
+    one of its own. The scratch directory is appended by run_derivation_builder.
+    """
     title = record.get("title") or "Derivation"
     request = record.get("request") or ""
     concept_id = record.get("concept_id") or ""
 
-    if base_doc_id:
+    how = (
+        "Write each wave as a JSON array of blocks to a new file in your "
+        f'scratch directory, then call derivation_write(doc_id="{doc_id}", '
+        "blocks_path=<that file>)."
+    )
+
+    if revising:
         return (
-            f"Revise the existing derivation {base_doc_id}.\n\n"
+            f"Revise the existing derivation {doc_id}.\n\n"
             f"Requested change: {request}\n\n"
-            "Read it with derivation_read first, then append or correct only "
-            "what the change calls for. Keep everything that was already right."
+            "Check it out with get_derivation_json, correct blocks in that file "
+            "with Edit and publish it with derivation_update; append new "
+            "material as a wave. Change only what the request calls for and "
+            "keep everything that was already right.\n\n"
+            + how
         )
 
-    lines = [f"Build a derivation titled: {title}", ""]
+    lines = [f"Build a derivation titled: {title}", f"doc_id: {doc_id}", ""]
     if request:
         lines.append(f"What to derive: {request}")
     if concept_id:
         lines.append(f"Concept id: {concept_id}")
     lines += [
         "",
-        "Call derivation_open once, then derivation_write in waves so the "
+        "The document already exists and is empty. Fill it in waves so the "
         "learner sees it fill in: the intuition first, then the steps, then "
         "any table or matrix. Verify every step with derivation_verify.",
+        how,
     ]
     return "\n".join(lines).strip()

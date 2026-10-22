@@ -470,25 +470,20 @@ async function notesOnSessionChange(newSessionId) {
 async function toggleNotes(force) {
     const pane = notesPaneEl();
     if (!pane) return;
+    // The header button on a background tab switches to it rather than closing.
+    if (force === undefined && rightPaneInBackground("notes")) {
+        claimRightPane("notes");
+        return;
+    }
     notesOpen = force !== undefined ? force : !notesOpen;
-    pane.style.display = notesOpen ? "flex" : "none";
-    syncPaneSplit();   // show/hide the divider and re-apply the stored split
 
     const btn = document.getElementById("notes-btn");
     if (btn) btn.classList.toggle("is-on", notesOpen);
 
-    if (!notesOpen) { await flushSave(); saveNotesUi(); return; }
+    if (!notesOpen) { releaseRightPane("notes"); await flushSave(); saveNotesUi(); return; }
 
-    // The right-hand panes all want the same half of the centre column;
-    // several at flex:1 leaves none of them usable.
-    if (typeof notebookOpen !== "undefined" && notebookOpen
-        && typeof toggleNotebook === "function") {
-        toggleNotebook();
-    }
-    if (typeof demoOpen !== "undefined" && demoOpen
-        && typeof toggleDemo === "function") {
-        await toggleDemo(false);
-    }
+    // Its tab comes to the front; other open panes stay open behind theirs.
+    claimRightPane("notes");
 
     const email = getEmail();
     if (!email) { renderCanvas(); saveNotesUi(); return; }
@@ -2256,13 +2251,12 @@ function paneSplitKey() {
 }
 
 function openRightPane() {
-    const notes = document.getElementById("notes-pane");
-    if (notes && notes.style.display !== "none") return notes;
-    const demo = document.getElementById("demo-pane");
-    if (demo && demo.style.display !== "none") return demo;
-    const nb = document.getElementById("notebook-pane");
-    if (nb && nb.style.display !== "none") return nb;
-    return null;
+    // The panes sit in one tabbed stack (see renderRightTabs in app.js); the
+    // divider splits chat against the stack, whichever tab is showing. This
+    // used to list the panes one by one and had missed the derivation pane,
+    // so with only a derivation open the divider vanished.
+    const stack = document.getElementById("right-stack");
+    return stack && stack.style.display !== "none" ? stack : null;
 }
 
 /**

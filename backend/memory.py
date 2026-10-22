@@ -566,7 +566,10 @@ class MemoryStore:
 
     def record_event(self, event: dict):
         event_type = event.get("type")
-        if event_type in ("session_init", "done"):
+        # "compacting" is a live progress signal, not part of the conversation:
+        # persisting it would replay a stale "condensing…" notice every time the
+        # session is reloaded, long after the compaction finished.
+        if event_type in ("session_init", "done", "compacting"):
             return
         self._append_turn(dict(event))
 

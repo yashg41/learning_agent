@@ -104,7 +104,10 @@ def test_braces_in_a_prompt_would_not_break_assembly(tmp_path, monkeypatch):
 def test_demo_builder_is_separate_from_the_tutor_prompt():
     builder = demo_builder_prompt()
     tutor = build_system_prompt("K", "R", "D")
-    assert "You build ONE interactive HTML demo" in builder
+    # Matched on the job rather than an exact sentence: the wording changed
+    # when the builder became a multi-turn session, and pinning the phrasing
+    # made an intended edit look like a regression.
+    assert "interactive HTML demo" in builder
     # The builder must not inherit the tutor's protocols.
     assert "Quiz Behavior" not in builder
     assert "Concept Tracking" not in builder
@@ -114,7 +117,9 @@ def test_demo_builder_is_separate_from_the_tutor_prompt():
 def test_unnumbered_files_are_not_pulled_into_the_tutor_prompt():
     """demo_builder.md lives in the same directory but is a different agent."""
     prompt = build_system_prompt("K", "R", "D")
-    assert "You build ONE interactive HTML demo" not in prompt
+    # Compared against the file's actual first line, so this cannot quietly
+    # start passing because the sentence it looked for was reworded.
+    assert demo_builder_prompt().splitlines()[0] not in prompt
 
 
 def test_code_execution_prompt_points_at_the_skill():
@@ -226,7 +231,10 @@ def test_builder_prompts_default_to_the_shared_copy():
     """'Build one demo, emit no prose' is subject-neutral, so it is shared."""
     assert (PROMPTS_DIR / "_common" / "demo_builder.md").is_file()
     assert (PROMPTS_DIR / "_common" / "derivation_builder.md").is_file()
-    assert "You build ONE interactive HTML demo" in demo_builder_prompt()
+    # Every app with demos resolves to the same file, which is the property
+    # this test is about — not any particular sentence in it.
+    assert demo_builder_prompt("pymentor") == demo_builder_prompt("sanskrit")
+    assert "interactive HTML demo" in demo_builder_prompt()
 
 
 def test_reading_section_sits_between_correctness_and_web_lookup():

@@ -115,6 +115,33 @@ def _read_json(path: str) -> dict | None:
         return None
 
 
+# One wave of blocks as the builder drafts it. Well above a real wave (the PCA
+# derivation was ~20KB for all 31 blocks) while bounding a runaway file.
+MAX_BLOCKS_FILE_BYTES = 400_000
+
+
+def read_builder_blocks(path: str) -> list:
+    """Load a wave of blocks the builder wrote to its scratch directory.
+
+    Same route as a demo's html_path, and for the same reason: the blocks never
+    travel as a tool argument, so a large wave cannot take the transport down.
+    Shape only here — validate_blocks, via append_blocks, still owns content.
+    """
+    from backend.demos import read_scratch_file
+
+    raw = read_scratch_file(path, MAX_BLOCKS_FILE_BYTES, "blocks_path")
+    try:
+        blocks = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"blocks_path is not valid JSON: {e}") from e
+    if not isinstance(blocks, list):
+        raise ValueError(
+            "blocks_path must hold a JSON array of blocks, "
+            f"got {type(blocks).__name__}"
+        )
+    return blocks
+
+
 # --- Validation ---
 
 
@@ -301,6 +328,113 @@ def append_blocks(email: str, doc_id: str, blocks: list) -> dict | None:
     return doc
 
 
+def from_builder(blocks: list) -> list:
+    """Drop what a builder must not decide: block ids and verification stamps.
+
+    A builder rewriting a wave copied an existing block's "id" into the new
+    one, and the store kept it — the doc ended up with the same id three
+    times, so derivation_verify could only ever reach the first. And a step
+    arriving with "verified": true would show the learner a green tick sympy
+    never gave. Both are the server's to assign.
+    """
+    out = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            out.append(b)                      # validate_blocks rejects it
+            continue
+        clean = {k: v for k, v in b.items() if k != "id"}
+        if isinstance(clean.get("steps"), list):
+            clean["steps"] = [
+                {k: v for k, v in s.items() if k not in ("verified", "check")}
+                if isinstance(s, dict) else s
+                for s in clean["steps"]
+            ]
+        out.append(clean)
+    return out
+
+
+def copy_doc_to_scratch(email: str, doc_id: str, dest_dir: str) -> str:
+    """Write a doc's blocks where the builder can edit them. Returns the path.
+
+    The derivation counterpart of demos.copy_demo_to_scratch, for the same
+    reason: the builder finds the block with Grep/Read, patches it with Edit,
+    and publishes with derivation_update — the document never travels through
+    a tool call. Without this the only way to correct a block was to append a
+    corrected copy below the wrong one; a live build appended the same
+    derivation four times.
+
+    One key per line (indent=2), so Grep lands on the line to change and Edit
+    can match it exactly.
+    """
+    doc = get_doc(email, doc_id)
+    if doc is None:
+        raise ValueError(f"No such derivation: {doc_id!r}")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, f"{_safe_doc_id(doc_id)}.json")
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(doc.get("blocks") or [], f, indent=2, ensure_ascii=False)
+    return dest
+
+
+def replace_blocks(email: str, doc_id: str, blocks: list) -> tuple[dict, list]:
+    """Replace a doc's whole block list with an edited copy.
+
+    Returns (doc, block ids whose steps need derivation_verify).
+
+    The file comes from a builder, so the server decides three things itself:
+      - ids: a block keeps its id only if that id exists in the doc and is
+        not already taken earlier in this list. Anything else gets a new one.
+      - verification: a derivation block keeps the STORED stamps only when its
+        steps are unchanged. Edited steps go back to unchecked; stamps in the
+        file are never trusted.
+      - plots: only a plot already in the doc may appear, since add_plot is
+        what puts the image file in place.
+    """
+    doc = get_doc(email, doc_id)
+    if doc is None:
+        raise ValueError(f"No such derivation: {doc_id!r}")
+    if not isinstance(blocks, list):
+        raise ValueError("blocks must be a list")
+
+    stored = {b.get("id"): b for b in (doc.get("blocks") or [])}
+    stored_plots = {b.get("src") for b in stored.values() if b.get("kind") == "plot"}
+
+    wanted_ids = [b.get("id") if isinstance(b, dict) else None for b in blocks]
+    clean = validate_blocks(from_builder(blocks))
+
+    used: set = set()
+    needs_verify = []
+    for b, wanted in zip(clean, wanted_ids):
+        if wanted in stored and wanted not in used:
+            b["id"] = wanted
+        used.add(b["id"])
+
+        if b["kind"] == "plot" and b.get("src") not in stored_plots:
+            raise ValueError(
+                f"plot {b.get('src')!r} is not in this derivation — add plots "
+                f"with derivation_plot"
+            )
+
+        if b["kind"] == "derivation":
+            old = stored.get(b["id"])
+            old_exprs = [s.get("expr") for s in (old or {}).get("steps") or []]
+            new_exprs = [s.get("expr") for s in b["steps"]]
+            if old is not None and old.get("kind") == "derivation" and old_exprs == new_exprs:
+                b["steps"] = [
+                    {**s, "verified": o.get("verified"), "check": o.get("check", "")}
+                    for s, o in zip(b["steps"], old["steps"])
+                ]
+            else:
+                needs_verify.append(b["id"])
+
+    doc["blocks"] = clean
+    doc["updated_at"] = _now()
+    _write_json(_doc_path(email, doc_id), doc)
+    _touch_index(email, doc)
+    return doc, needs_verify
+
+
 def update_block(email: str, doc_id: str, block_id: str, **fields) -> dict | None:
     """Replace fields on one block, found by id.
 
@@ -461,3 +595,66 @@ def derivation_digest(email: str, doc_id: str,
         lines.append(f"\nThe learner highlighted: \"{selection['text'][:400]}\"")
 
     return "\n".join(lines)
+
+
+# ── bare-maths lint ───────────────────────────────────────────────────────
+#
+# The pane typesets only $$…$$. A builder that writes "(1/2)||w||^2" or
+# "x_11 = 2" in a step's reason ships it as raw text — seen on a live SVM
+# derivation where every reason read like source code. The skill says to wrap
+# symbols; this catches the misses while the builder can still fix them,
+# instead of after the learner has the page.
+#
+# Heuristic and deliberately loud rather than clever: it is a warning returned
+# to the builder, never a rejection, so a false positive costs one glance.
+_MATH_SEGMENT = re.compile(r"\$\$.*?\$\$|`[^`]*`", re.S)
+_BARE_MATH = re.compile(
+    r"[A-Za-z]_(?:\{|[A-Za-z0-9])"        # w_1, x_{11}, a_i
+    r"|[A-Za-z0-9)}\]]\^"                  # w^2, (…)^2
+    r"|\|\|"                               # ||w||
+    r"|\\(?:frac|sum|cdot|alpha|beta|gamma|lambda|sigma|mu|theta|partial|nabla|ge|le|geq|leq)\b"
+)
+
+
+def _bare_math_hits(text: str) -> list[str]:
+    if not isinstance(text, str) or not text:
+        return []
+    outside = _MATH_SEGMENT.sub(" ", text)
+    hits = []
+    for m in _BARE_MATH.finditer(outside):
+        a, b = max(0, m.start() - 12), min(len(outside), m.end() + 12)
+        hits.append(" ".join(outside[a:b].split()))
+    return hits
+
+
+def bare_math_warnings(blocks: list, limit: int = 12) -> list[str]:
+    """Places where maths sits outside $$…$$ and will render as raw text.
+
+    Checks prose-bearing fields only: text content, step reasons, captions and
+    table cells. Step exprs and latex blocks are typeset whole and never need
+    delimiters, so they are skipped.
+    """
+    out = []
+
+    def add(where, text):
+        for hit in _bare_math_hits(text)[:2]:
+            out.append(f"{where}: …{hit}…")
+
+    for b in blocks or []:
+        bid, kind = b.get("id", "?"), b.get("kind")
+        if kind == "text":
+            add(f"{bid} text", b.get("content"))
+        elif kind == "derivation":
+            for n, s in enumerate(b.get("steps") or [], 1):
+                add(f"{bid} step {n} reason", s.get("reason"))
+        if kind in ("table", "matrix"):
+            for h in b.get("headers") or []:
+                add(f"{bid} header", h)
+            for r in b.get("rows") or []:
+                for c in r if isinstance(r, list) else []:
+                    add(f"{bid} cell", c)
+        if b.get("caption"):
+            add(f"{bid} caption", b.get("caption"))
+        if len(out) >= limit:
+            break
+    return out[:limit]

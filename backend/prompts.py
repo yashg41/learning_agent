@@ -153,6 +153,18 @@ def demo_builder_prompt(app: str = DEFAULT_APP) -> str:
     return _read(_builder_prompt("demo_builder.md", app))
 
 
+def demo_part_builder_prompt(app: str = DEFAULT_APP) -> str:
+    """System prompt for an agent writing ONE panel of a split demo.
+
+    Separate from demo_builder.md because the job is genuinely different: this
+    agent does not design the demo, choose its structure, or decide when it is
+    finished. It receives a contract — class names, data, what this panel must
+    show — and fills in one slot. Handing it the orchestrator's prompt would
+    invite it to open demos of its own and reason about the whole document.
+    """
+    return _read(_builder_prompt("demo_part_builder.md", app))
+
+
 def derivation_builder_prompt(app: str = DEFAULT_APP) -> str:
     """The derivation builder's entire system prompt.
 
