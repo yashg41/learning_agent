@@ -37,7 +37,6 @@ CURRICULUM_DIR = Path(__file__).parent
 # filesystem happens to sort. A file not named here is not loaded.
 TRACK_ORDER = (
     "python", "ml", "dl", "llm", "ops", "quantum", "sysdesign",
-    "sanskrit",
 )
 
 # Which tracks belong to which tutor.
@@ -49,7 +48,6 @@ TRACK_ORDER = (
 # the point, and here was the bug. A tutor must only ever see its own tracks.
 APP_TRACKS = {
     "pymentor": ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign"),
-    "sanskrit": ("sanskrit",),
 }
 
 DEFAULT_APP = "pymentor"
