@@ -1,0 +1,100 @@
+track: dl
+name: deep learning
+hue: 205
+categories:
+- id: dl_basics
+  label: DL · Basics
+  priority: 0
+  concepts:
+  - id: pytorch_tensors
+    name: PyTorch Tensors
+    prereqs:
+    - numpy_basics
+  - id: autograd
+    name: Autograd & Gradients
+    prereqs:
+    - pytorch_tensors
+  - id: nn_module
+    name: nn.Module
+    prereqs:
+    - pytorch_tensors
+    - classes_basic
+  - id: optimizers
+    name: Optimizers (SGD, Adam)
+    prereqs:
+    - autograd
+  - id: loss_functions
+    name: Loss Functions
+    prereqs:
+    - autograd
+  - id: training_loop
+    name: Training Loop
+    prereqs:
+    - nn_module
+    - optimizers
+    - loss_functions
+  - id: pytorch_dataloaders
+    name: DataLoaders & Datasets
+    prereqs:
+    - nn_module
+    - pandas_series_df
+  - id: device_management
+    name: GPU / Device Management
+    prereqs:
+    - pytorch_tensors
+  - id: regularization_dl
+    name: Dropout & Batch Normalization
+    prereqs:
+    - training_loop
+  - id: lr_scheduling
+    name: Learning Rate Scheduling
+    prereqs:
+    - optimizers
+  - id: overfitting_dl
+    name: Overfitting & Early Stopping
+    prereqs:
+    - training_loop
+    - regularization_dl
+- id: dl_architectures
+  label: DL · Architectures
+  priority: 1
+  concepts:
+  - id: cnns
+    name: Convolutional Neural Networks
+    prereqs:
+    - training_loop
+  - id: rnns
+    name: Recurrent Neural Networks
+    prereqs:
+    - training_loop
+  - id: transformers_intro
+    name: Transformers (Intro)
+    prereqs:
+    - rnns
+  - id: transfer_learning
+    name: Transfer Learning
+    prereqs:
+    - cnns
+  - id: attention_mechanism
+    name: Attention & Self-Attention
+    prereqs:
+    - rnns
+  - id: vision_transformers
+    name: Vision Transformers (ViT)
+    prereqs:
+    - transformers_intro
+    - cnns
+  - id: autoencoders
+    name: Autoencoders
+    prereqs:
+    - nn_module
+    - training_loop
+  - id: gans
+    name: GANs
+    prereqs:
+    - autoencoders
+  - id: diffusion_models
+    name: Diffusion Models
+    prereqs:
+    - autoencoders
+    - cnns

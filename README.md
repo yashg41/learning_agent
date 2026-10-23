@@ -2,6 +2,8 @@
 
 A long-term tutoring agent that remembers everything across sessions. Teaches Python and the topics that build on it: classical ML, deep learning, LLMs, MLOps, and **quantum computing with Qiskit**. Comes with an in-browser code runner so learners can execute Python (and Qiskit circuits) without leaving the chat. Built with Claude Agent SDK, ChromaDB, and FastAPI.
 
+> **This file has drifted.** It still describes one tutor, 9 MCP tools and 35 concepts; there are now two tutors, 42 tool definitions and 282 concepts, and the sections below on tools, curriculum and project structure are out of date. Trust the code and its inline comments over this document. Accurate as of today: [How the Sanskrit tutor works](docs/sanskrit-tutor.md), and **[Lessons from the roadblocks](docs/lessons.md)** — the edge cases, false premises and misleading errors this project actually hit, written cause-first. Read the latter before changing anything to do with tool payloads, concurrent writes, or the `app` switch.
+
 ## Architecture
 
 The agent uses three memory tiers that work together:
@@ -17,9 +19,12 @@ The agent uses three memory tiers that work together:
 ```bash
 cd learning_app
 
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Create and activate the virtual environment.
+# Named .venv — setup.sh creates and reuses that name, and having a second
+# env at venv/ meant the server and the tests could run different
+# interpreters without anyone noticing.
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -45,12 +50,24 @@ Open **http://localhost:8001** in your browser.
 
 Click `>_ Run Code` in the chat header to split the chat pane and reveal a notebook-style code runner.
 
-- Code runs in a **per-user virtualenv** at `data/users/<email>/venv/`. The first run for a new user takes ~30-60s while pip installs `qiskit`, `qiskit-aer`, `numpy`, and `matplotlib`. Subsequent cells run immediately.
-- Each cell runs as a fresh Python process — variables do **not** persist between cells.
-- 15-second wall-clock timeout per cell; stdout/stderr capped at ~50KB.
+**It is not a terminal and not Jupyter.** Each cell is written to its own run directory and executed as a fresh `python -u cell.py`, so:
+
+- Each cell runs as a fresh process — variables do **not** persist between cells.
+- Shell syntax doesn't work, but `%pip install <pkg>` and `!pip install <pkg>` do: those lines are stripped out and run against the venv's own pip before the cell body. (Stripped lines become blank lines, so traceback line numbers still match your source.)
+- There is no bare-expression echo. Use `print()`.
+
+Other behaviour:
+
+- Code runs in a **per-user virtualenv** at `data/users/<email>/venv/`. The first run for a new user takes ~30-60s while pip installs `qiskit`, `qiskit-aer`, `numpy`, and `matplotlib`; that progress streams into the cell rather than blocking silently. Subsequent cells run immediately.
+- **Output streams live** as it is produced. **Run** becomes **Stop** while a cell is running; Stop kills the whole process group, so anything the cell spawned dies with it.
+- A `ModuleNotFoundError` offers a one-click **Install** button. Import names are mapped to their real PyPI distribution — `sklearn` installs `scikit-learn`, `cv2` installs `opencv-python`, and so on. Asking for a deprecated placeholder package installs the real one and says why.
+- **matplotlib plots appear inline.** `plt.show()` is a no-op under the `Agg` backend, so a shim on `PYTHONPATH` saves each figure instead and the runner serves it back.
+- Per-cell timeout is selectable in the header (15s / 60s / 5m); stdout/stderr capped at ~50KB.
+- The editor supports Tab/Shift-Tab to indent a selection, auto-indent after `:`, and auto-grow. It is a plain `<textarea>` — no bundler, no CDN.
 - "Send to chat" copies a cell's code (and output, if any) into the chat input wrapped in fenced code blocks. The agent only sees code/output that you explicitly send.
-- "Reset venv" wipes and recreates the venv if a package install gets corrupted.
+- "Reset venv" wipes and recreates the venv if a package install gets corrupted. A venv is only trusted once a `.pymentor_ready` marker is written, so an interrupted install rebuilds rather than leaving a half-empty environment that looks fine.
 - Cells are persisted in `localStorage` per email — they survive page reloads.
+- Run directories under `data/users/<email>/scratch/` are swept after an hour, so plots on an old cell eventually 404.
 
 **Security:** code runs as a subprocess on the server with no jail or container. Do not expose this to untrusted users.
 

@@ -1,0 +1,291 @@
+track: sysdesign
+name: system design
+hue: 25
+categories:
+- id: sd_foundations
+  label: System Design · Foundations
+  priority: 0
+  concepts:
+  - id: client_server
+    name: Client-Server Model
+    prereqs:
+    - functions_basic
+  - id: dns
+    name: DNS & Domain Resolution
+    prereqs:
+    - client_server
+  - id: http_https
+    name: HTTP & HTTPS
+    prereqs:
+    - client_server
+  - id: tcp_udp
+    name: TCP vs UDP
+    prereqs:
+    - client_server
+  - id: latency_numbers
+    name: Latency Numbers & Back-of-Envelope Estimation
+    prereqs:
+    - client_server
+  - id: rest_api_design
+    name: REST API Design
+    prereqs:
+    - http_https
+    - json_csv
+  - id: rpc_grpc_graphql
+    name: RPC, gRPC & GraphQL
+    prereqs:
+    - rest_api_design
+  - id: websockets_sse
+    name: WebSockets, SSE & Long Polling
+    prereqs:
+    - http_https
+    - async_await
+- id: sd_principles
+  label: System Design · Principles
+  priority: 1
+  concepts:
+  - id: scalability
+    name: Scalability (Vertical vs Horizontal)
+    prereqs:
+    - client_server
+    - latency_numbers
+  - id: availability_reliability
+    name: Availability & Reliability
+    prereqs:
+    - scalability
+  - id: latency_throughput
+    name: Latency vs Throughput
+    prereqs:
+    - latency_numbers
+  - id: consistency_models
+    name: Consistency Models (Strong vs Eventual)
+    prereqs:
+    - availability_reliability
+  - id: cap_theorem
+    name: CAP Theorem
+    prereqs:
+    - consistency_models
+  - id: pacelc_theorem
+    name: PACELC Theorem
+    prereqs:
+    - cap_theorem
+    - latency_throughput
+  - id: single_point_of_failure
+    name: Single Points of Failure & Redundancy
+    prereqs:
+    - availability_reliability
+- id: sd_components
+  label: System Design · Building Blocks
+  priority: 2
+  concepts:
+  - id: load_balancing
+    name: Load Balancing
+    prereqs:
+    - scalability
+    - single_point_of_failure
+  - id: reverse_proxy
+    name: Reverse Proxies & API Gateways
+    prereqs:
+    - load_balancing
+    - rest_api_design
+  - id: stateless_services
+    name: Stateless Services & Session Management
+    prereqs:
+    - load_balancing
+  - id: caching_strategies
+    name: Caching Strategies (Cache-Aside, Write-Through)
+    prereqs:
+    - scalability
+    - dictionaries
+  - id: cache_eviction
+    name: Cache Eviction Policies (LRU, LFU, TTL)
+    prereqs:
+    - caching_strategies
+    - collections_module
+  - id: cdn
+    name: Content Delivery Networks
+    prereqs:
+    - caching_strategies
+    - dns
+  - id: message_queues
+    name: Message Queues (Kafka, RabbitMQ, SQS)
+    prereqs:
+    - stateless_services
+    - async_await
+  - id: pub_sub
+    name: Publish/Subscribe & Event-Driven Architecture
+    prereqs:
+    - message_queues
+  - id: rate_limiting
+    name: Rate Limiting (Token & Leaky Bucket)
+    prereqs:
+    - reverse_proxy
+    - caching_strategies
+  - id: search_engines
+    name: Search Engines & Inverted Indexes (Elasticsearch)
+    prereqs:
+    - caching_strategies
+    - regex
+  - id: object_storage
+    name: Blob & Object Storage (S3)
+    prereqs:
+    - stateless_services
+    - file_writing
+- id: sd_data
+  label: System Design · Data Layer
+  priority: 3
+  concepts:
+  - id: sql_vs_nosql
+    name: SQL vs NoSQL
+    prereqs:
+    - scalability
+    - json_csv
+  - id: data_modeling
+    name: Schema Design & Normalization
+    prereqs:
+    - sql_vs_nosql
+  - id: indexing
+    name: Database Indexing (B-Tree, LSM-Tree)
+    prereqs:
+    - data_modeling
+  - id: acid_transactions
+    name: ACID Transactions & Isolation Levels
+    prereqs:
+    - data_modeling
+  - id: replication
+    name: Replication (Leader-Follower, Multi-Leader)
+    prereqs:
+    - sql_vs_nosql
+    - consistency_models
+  - id: sharding_partitioning
+    name: Sharding & Partitioning
+    prereqs:
+    - replication
+    - indexing
+  - id: consistent_hashing
+    name: Consistent Hashing
+    prereqs:
+    - sharding_partitioning
+  - id: quorum_reads_writes
+    name: Quorum Reads & Writes
+    prereqs:
+    - replication
+    - cap_theorem
+  - id: bloom_filters
+    name: Bloom Filters & Probabilistic Structures
+    prereqs:
+    - sets
+    - indexing
+- id: sd_distributed
+  label: System Design · Distributed
+  priority: 4
+  concepts:
+  - id: leader_election
+    name: Leader Election
+    prereqs:
+    - replication
+    - single_point_of_failure
+  - id: consensus_raft_paxos
+    name: Consensus (Raft & Paxos)
+    prereqs:
+    - leader_election
+    - quorum_reads_writes
+  - id: distributed_transactions
+    name: Distributed Transactions & Two-Phase Commit
+    prereqs:
+    - acid_transactions
+    - consensus_raft_paxos
+  - id: saga_pattern
+    name: Saga Pattern
+    prereqs:
+    - distributed_transactions
+    - pub_sub
+  - id: idempotency
+    name: Idempotency & Exactly-Once Delivery
+    prereqs:
+    - message_queues
+    - distributed_transactions
+  - id: cqrs_event_sourcing
+    name: CQRS & Event Sourcing
+    prereqs:
+    - pub_sub
+    - acid_transactions
+  - id: unique_id_generation
+    name: Distributed Unique ID Generation (Snowflake)
+    prereqs:
+    - sharding_partitioning
+    - datetime_module
+  - id: failure_detection
+    name: Failure Detection, Heartbeats & Gossip
+    prereqs:
+    - leader_election
+  - id: resilience_patterns
+    name: Circuit Breakers, Retries & Backpressure
+    prereqs:
+    - failure_detection
+    - error_handling
+- id: sd_architecture
+  label: System Design · Architecture
+  priority: 5
+  concepts:
+  - id: monolith_vs_microservices
+    name: Monolith vs Microservices
+    prereqs:
+    - stateless_services
+    - rest_api_design
+  - id: service_discovery
+    name: Service Discovery & Service Mesh
+    prereqs:
+    - monolith_vs_microservices
+    - dns
+  - id: observability
+    name: Observability (Logging, Metrics, Tracing)
+    prereqs:
+    - monolith_vs_microservices
+    - debugging
+  - id: security_authn_authz
+    name: Authentication & Authorization (OAuth, JWT)
+    prereqs:
+    - rest_api_design
+    - reverse_proxy
+  - id: multi_region
+    name: Multi-Region & Geo-Distributed Architecture
+    prereqs:
+    - replication
+    - cdn
+  - id: capacity_planning
+    name: Capacity Planning & Cost-Aware Design
+    prereqs:
+    - latency_numbers
+    - observability
+  - id: design_interview_framework
+    name: System Design Interview Framework
+    prereqs:
+    - capacity_planning
+    - sharding_partitioning
+    - caching_strategies
+  - id: case_url_shortener
+    name: 'Case Study: URL Shortener'
+    prereqs:
+    - design_interview_framework
+    - unique_id_generation
+  - id: case_news_feed
+    name: 'Case Study: Social News Feed'
+    prereqs:
+    - design_interview_framework
+    - cache_eviction
+  - id: case_chat_system
+    name: 'Case Study: Real-Time Chat'
+    prereqs:
+    - design_interview_framework
+    - websockets_sse
+  - id: ml_system_design
+    name: ML System Design (Serving at Scale)
+    prereqs:
+    - design_interview_framework
+    - inference_serving
+  - id: llm_inference_scaling
+    name: LLM Serving & Inference Scaling
+    prereqs:
+    - ml_system_design
+    - rag_architecture

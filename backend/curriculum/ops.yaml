@@ -1,0 +1,79 @@
+track: ops
+name: MLOps
+hue: 145
+categories:
+- id: ops_serving
+  label: MLOps · Serving
+  priority: 0
+  concepts:
+  - id: model_serialization
+    name: Model Serialization (pickle, joblib, ONNX)
+    prereqs:
+    - sklearn_pipelines
+  - id: inference_serving
+    name: Inference Serving (FastAPI)
+    prereqs:
+    - model_serialization
+    - functions_basic
+  - id: batch_vs_streaming
+    name: Batch vs Streaming Inference
+    prereqs:
+    - inference_serving
+  - id: containerization
+    name: Containerization for ML
+    prereqs:
+    - inference_serving
+  - id: ab_testing_ml
+    name: A/B Testing & Shadow Deployment
+    prereqs:
+    - monitoring_drift
+    - batch_vs_streaming
+  - id: model_optimization_serving
+    name: Serving Optimization (batching, caching)
+    prereqs:
+    - inference_serving
+- id: ops_monitoring
+  label: MLOps · Monitoring
+  priority: 1
+  concepts:
+  - id: experiment_tracking
+    name: Experiment Tracking
+    prereqs:
+    - cross_validation
+  - id: model_registry
+    name: Model Registry
+    prereqs:
+    - experiment_tracking
+    - model_serialization
+  - id: monitoring_drift
+    name: Monitoring & Drift Detection
+    prereqs:
+    - inference_serving
+  - id: cicd_for_ml
+    name: CI/CD for ML
+    prereqs:
+    - containerization
+    - unit_testing
+  - id: feature_stores
+    name: Feature Stores
+    prereqs:
+    - feature_engineering
+    - pandas_groupby_merge
+  - id: data_versioning
+    name: Data & Dataset Versioning
+    prereqs:
+    - experiment_tracking
+  - id: pipeline_orchestration
+    name: Pipeline Orchestration (Airflow, Prefect)
+    prereqs:
+    - cicd_for_ml
+  - id: model_governance
+    name: Model Governance & Reproducibility
+    prereqs:
+    - model_registry
+    - data_versioning
+  - id: llmops
+    name: 'LLMOps: Evaluating & Monitoring LLM Apps'
+    prereqs:
+    - monitoring_drift
+    - llm_evaluation

@@ -18,6 +18,12 @@ body {
     color: var(--text-dim);
     height: 100vh;
     overflow: hidden;
+    /* Backstop for the whole app: a horizontal two-finger drag that reaches
+       the end of any inner scroller chains outward, and the browser reads it
+       as swipe-to-go-back — navigating away and losing unsaved work. Stopping
+       it here covers every scroller, including ones added later that forget
+       to set it themselves. */
+    overscroll-behavior-x: contain;
     -webkit-font-smoothing: antialiased;
 }
 
@@ -314,13 +320,53 @@ code, pre, kbd, samp,
     border-color: var(--accent);
 }
 
-/* With both rails hidden the thread would stretch the full window and
-   strand the text on the left, so cap and centre it. */
+/* A code block that came from a real verified run rather than the model's
+   retyping. The left edge is the tell: this exact source executed cleanly. */
+.is-verified {
+    border-left: 2px solid var(--accent);
+}
+
+/* Placeholder we could not resolve — never archived, or the id was malformed.
+   Muted and italic so it reads as an absence, not as code to copy. */
+.is-verified-missing {
+    border-left: 2px solid var(--border-strong);
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+/* "Run in code runner", sat in the corner of a tutor-written Python block.
+   Absolute so it overlays the code rather than reflowing it, and revealed on
+   hover so a wall of snippets is not also a wall of buttons. It also shows
+   while focused, so tabbing to it does not leave an invisible target. */
+.has-run-btn {
+    position: relative;
+}
+
+.code-run-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+}
+
+.has-run-btn:hover .code-run-btn,
+.code-run-btn:focus {
+    opacity: 1;
+}
+
+/* With both rails hidden the whole window IS the chat, so the column fills it
+   and takes a wider gutter rather than stopping at a fixed cap. A max-width
+   here used to strand a broad empty band down the right on a large screen —
+   the window was all chat, yet the content refused to use it.
+
+   Gutter, not cap: padding scales with the viewport and leaves no dead space,
+   and because header, thread and composer all take the SAME padding, their
+   edges stay aligned in this mode exactly as they are outside it. */
+.container.focused .chat-header,
 .container.focused .chat-messages,
 .container.focused .chat-input-area {
-    max-width: 900px;
-    width: 100%;
-    margin-inline: auto;
+    padding-inline: clamp(20px, 4vw, 64px);
 }
 
 /* Notebook pane */
@@ -421,6 +467,7 @@ code, pre, kbd, samp,
     color: var(--text-dim);
     white-space: pre-wrap;
     overflow-x: auto;
+    overscroll-behavior-x: contain;   /* don't swipe-navigate the app away */
     max-height: 280px;
     overflow-y: auto;
 }
@@ -432,6 +479,48 @@ code, pre, kbd, samp,
 
 .cell-output.empty {
     display: none;
+}
+
+/* stderr inside an otherwise-fine run: qiskit and matplotlib emit warnings
+   there routinely, so mark the lines rather than the whole block. */
+.stream-err {
+    color: var(--error);
+}
+
+.cell-image {
+    max-width: 100%;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: #fff;   /* Agg renders transparent; white keeps axes legible */
+    align-self: flex-start;
+}
+
+.install-suggestion {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.header-btn.is-stop {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+.cell-timeout {
+    background: var(--bg-primary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 3px 6px;
 }
 
 .cell-status {
@@ -508,9 +597,10 @@ code, pre, kbd, samp,
 }
 
 .message {
-    /* Capped by characters, not percent: past ~70ch the eye loses its place
-       on the return sweep, and that limit shouldn't move with window width. */
-    max-width: var(--measure);
+    /* No width cap here. The thread's single column lives on .chat-messages so
+       every kind of content lines up with every other; capping the message too
+       would be a second, competing edge. .message.user takes its own bubble
+       width below — that is bubble shape, not the text column. */
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-lg);
     font-size: var(--text-base);
@@ -519,7 +609,11 @@ code, pre, kbd, samp,
     position: relative;
 }
 
+/* The user's own turns stay a bubble: one running the full column would read
+   as a wall rather than something said. A fraction, not --measure, because
+   this is the bubble's shape and must not become a second text-column edge. */
 .message.user {
+    max-width: min(80%, var(--measure));
     align-self: flex-end;
     background: var(--accent);
     color: var(--accent-contrast);
@@ -539,6 +633,18 @@ code, pre, kbd, samp,
     font-size: var(--text-md);
     line-height: var(--leading-prose);
     white-space: normal;
+}
+
+/* One column, one edge.
+   An earlier attempt gave figures their own wider cap while prose kept 68ch.
+   That produced two right edges in the same turn — a code block ran 500px past
+   the paragraph beneath it — because two different caps were competing.
+
+   The assistant turn now simply fills its container, and .chat-messages owns
+   the single width. Everything inside — prose, code, tables, diagrams —
+   therefore shares one edge for free, and they stretch and shrink together. */
+.message.assistant {
+    width: 100%;
 }
 
 /* Thinking indicator — shown in the message flow while waiting for the
@@ -584,6 +690,13 @@ code, pre, kbd, samp,
 
 .thinking-label {
     color: var(--text-muted);
+}
+
+/* Compaction is a minutes-long wait, well past what the elapsed timer alone
+   can vouch for — at 201s it was reported as a crash. The accent colour marks
+   it as a deliberate state the app knows it is in, not a stall. */
+.thinking-indicator.is-compacting .thinking-label {
+    color: var(--accent);
 }
 
 /* Elapsed seconds — the signal that separates "working" from "hung". */
@@ -657,6 +770,7 @@ code, pre, kbd, samp,
     padding: var(--space-3);
     margin: var(--space-3) 0;
     overflow-x: auto;
+    overscroll-behavior-x: contain;   /* don't swipe-navigate the app away */
 }
 
 .message.assistant pre code {
@@ -757,6 +871,28 @@ code, pre, kbd, samp,
     display: block;
 }
 
+/* A tool call that came back with is_error. Without this a failed call is
+   indistinguishable from a successful one — the state that let three
+   save_demo failures render as openable demo chips. */
+.tool-card.is-failed {
+    border-color: var(--error);
+}
+
+.tool-card.is-failed .tool-name,
+.tool-card.is-failed .tool-icon {
+    color: var(--error);
+}
+
+.tool-card .tool-error {
+    color: var(--error);
+    font-size: 10px;
+    margin-left: auto;
+    padding-left: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Chat input */
 .chat-input-area {
     padding: 12px 20px;
@@ -789,7 +925,11 @@ code, pre, kbd, samp,
     border-color: var(--accent);
 }
 
-.chat-input-area button {
+/* The Send button and friends in the input ROW. Deliberately not
+   `.chat-input-area button`: that also caught the small remove buttons on
+   staged attachments above it, painting them as full-size accent pills that
+   covered the thing they belong to. */
+.chat-input-area .chat-input-row > button {
     background: var(--accent);
     color: var(--bg-primary);
     border: none;
@@ -802,11 +942,11 @@ code, pre, kbd, samp,
     transition: background 0.15s;
 }
 
-.chat-input-area button:hover {
+.chat-input-area .chat-input-row > button:hover {
     background: var(--accent-hover);
 }
 
-.chat-input-area button:disabled {
+.chat-input-area .chat-input-row > button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
@@ -974,7 +1114,10 @@ code, pre, kbd, samp,
     margin-bottom: 16px;
 }
 
-.concept-group h3 {
+/* Was an <h3>; now a button so it can be focused and toggled from the
+   keyboard. Reset the button chrome so it still reads as a heading. */
+.concept-group .group-toggle {
+    font-family: inherit;
     font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
@@ -983,16 +1126,40 @@ code, pre, kbd, samp,
     display: flex;
     align-items: center;
     gap: 6px;
+    width: 100%;
+    padding: 2px 0;
+    background: none;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
 }
 
-.concept-group h3 .count {
+.concept-group .group-toggle .count {
     font-weight: 400;
     color: var(--text-muted);
 }
 
-.concept-group.mastered h3 { color: var(--mastery-mastered); }
-.concept-group.practiced h3 { color: var(--mastery-practiced); }
-.concept-group.introduced h3 { color: var(--mastery-introduced); }
+.concept-group .group-caret {
+    font-size: 9px;
+    width: 9px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.concept-group .group-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+.concept-group.mastered .group-toggle { color: var(--mastery-mastered); }
+.concept-group.practiced .group-toggle { color: var(--mastery-practiced); }
+.concept-group.introduced .group-toggle { color: var(--mastery-introduced); }
+
+/* The heading and its count stay visible when collapsed — a closed group
+   should still tell you how much is inside. */
+.concept-group.is-collapsed .concept-group-body { display: none; }
+.concept-group.is-collapsed .group-toggle { margin-bottom: 0; }
 
 .concept-item {
     display: flex;
@@ -1473,7 +1640,10 @@ code, pre, kbd, samp,
     border-color: var(--accent);
 }
 
-.side-chat-input-area button {
+/* Scoped to the input row for the same reason as .chat-input-area above:
+   an unscoped descendant selector also repainted the small remove buttons on
+   staged attachments. */
+.side-chat-input-area .chat-input-row > button {
     padding: 8px 14px;
     font-family: inherit;
     font-size: 12px;
@@ -1879,3 +2049,463 @@ code, pre, kbd, samp,
     margin-left: var(--space-3);
     border-left: 1px dashed var(--border-strong);
 }
+
+/* =====================================================================
+   Rich rendering in tutor prose — math, diagrams, highlighted code
+
+   All three are driven by enrichMessage() in app.js. The token colours
+   below are derived from the existing accent/semantic variables rather
+   than lifted from a stock highlight.js theme: a stock theme ships its
+   own background and hardcoded hues, which fight the pre/code rules
+   above and only cover one theme. Deriving means both themes follow the
+   palette for free.
+   ===================================================================== */
+
+/* --- Syntax highlighting ------------------------------------------- */
+/* hljs sets .hljs on the <code>; the surrounding pre styling already
+   provides the surface, so the class must not repaint it. */
+.message.assistant pre code.hljs {
+    background: none;
+    padding: 0;
+    color: var(--text-dim);
+}
+
+.message.assistant .hljs-keyword,
+.message.assistant .hljs-selector-tag,
+.message.assistant .hljs-literal,
+.message.assistant .hljs-section { color: var(--accent-hover); }
+
+.message.assistant .hljs-string,
+.message.assistant .hljs-attr,
+.message.assistant .hljs-attribute,
+.message.assistant .hljs-addition { color: var(--success); }
+
+.message.assistant .hljs-number,
+.message.assistant .hljs-symbol,
+.message.assistant .hljs-bullet,
+.message.assistant .hljs-meta { color: var(--warning); }
+
+.message.assistant .hljs-title,
+.message.assistant .hljs-name,
+.message.assistant .hljs-built_in,
+.message.assistant .hljs-class .hljs-title { color: var(--text-bright); }
+
+.message.assistant .hljs-comment,
+.message.assistant .hljs-quote { color: var(--text-muted); font-style: italic; }
+
+.message.assistant .hljs-deletion,
+.message.assistant .hljs-variable,
+.message.assistant .hljs-template-variable { color: var(--error); }
+
+.message.assistant .hljs-emphasis { font-style: italic; }
+.message.assistant .hljs-strong { font-weight: 650; }
+
+/* --- Math ----------------------------------------------------------- */
+/* KaTeX sizes relative to its container; 1em keeps inline math on the
+   prose baseline instead of towering over it. */
+.message.assistant .katex { font-size: 1em; }
+
+/* A long derivation must scroll on its own rather than widening the
+   message column — same containment the pre rule uses. */
+.message.assistant .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    padding: var(--space-1) 0;
+    margin: var(--space-3) 0;
+}
+
+/* --- Mermaid diagrams ------------------------------------------------ */
+.message.assistant .mermaid-figure {
+    margin: var(--space-3) 0;
+    padding: var(--space-3);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    text-align: center;
+}
+
+/* Must agree with flowchart.useMaxWidth in initMermaid — the flag decides which
+   attributes mermaid writes, and this rule has to match them:
+       useMaxWidth true  -> width="100%" + style="max-width:Wpx", NO height attr
+       useMaxWidth false -> width="W" and height="H" as explicit attributes
+   We use false, so mermaid supplies both dimensions. A max-width here shrank
+   the painted width while height="H" kept reserving the unscaled height, and
+   the difference — H − (H × rendered/W) — painted as a dead band under every
+   diagram. Let the attributes govern; .mermaid-figure's overflow-x does the
+   scrolling for anything genuinely wider than the column. */
+.message.assistant .mermaid-figure svg {
+    max-width: none;
+    height: auto;
+}
+
+/* Flowchart labels are HTML in a <foreignObject>. Mermaid sizes that element
+   by measuring the inner div:
+       bbox = div.getBoundingClientRect()
+       fo.attr("width", bbox.width); fo.attr("height", bbox.height)
+   and a foreignObject clips to exactly those dimensions. So the measured box
+   IS the clip box, and anything that makes a glyph paint outside it is cut.
+
+   .message.assistant sets line-height: var(--leading-prose) (1.65), which the
+   div inherits. Mermaid's own font-size is 14px, so the div measures 23.1px
+   while the span's inline box is centred inside it — leaving the descenders
+   of "Fuzzy", "Caching" and "Data versioning" sitting on the boundary, and a
+   two-line label cut through its second row.
+
+   The fix is to make the measurement agree with the painting rather than to
+   fight it: a line-height of exactly 1 on the div means the measured height
+   is the glyph box, and the explicit padding below then adds real room for
+   descenders INSIDE the measured area, so it is part of the clip box instead
+   of overflowing it. Padding, not a larger line-height, because mermaid
+   centres the shape on the measured box — extra leading would re-centre the
+   text rather than give it headroom. */
+.message.assistant .mermaid-figure foreignObject > div,
+.diagram-zoom-canvas foreignObject > div {
+    line-height: 1.2;
+    padding: 2px 1px;
+    /* Mermaid sets both of these inline; restating them keeps the app's own
+       prose rules (white-space: normal on .message.assistant) from changing
+       how the label is measured. */
+    display: inline-block;
+    white-space: nowrap;
+}
+
+/* The span carries the text. It must not introduce a second, different line
+   box inside the div that was measured. */
+.message.assistant .mermaid-figure foreignObject .nodeLabel,
+.message.assistant .mermaid-figure foreignObject .edgeLabel,
+.diagram-zoom-canvas foreignObject .nodeLabel,
+.diagram-zoom-canvas foreignObject .edgeLabel {
+    line-height: inherit;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* A label mermaid split across lines (it turns \n into <br/>) needs the div
+   to grow to both rows. nowrap above governs wrapping, not explicit breaks,
+   so the height follows from the two line boxes. */
+.message.assistant .mermaid-figure foreignObject > div br,
+.diagram-zoom-canvas foreignObject > div br {
+    line-height: inherit;
+}
+
+/* Invalid diagram source falls back to showing the source; it is already
+   inside the figure's surface, so strip the nested pre chrome. */
+.message.assistant .mermaid-figure.mermaid-failed pre {
+    background: none;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    text-align: left;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+}
+
+/* Expand control, revealed on hover like the code-run button. position:
+   relative on the figure is what anchors it; the figure scrolls its diagram
+   horizontally, so the button is pinned to the card rather than the SVG and
+   stays reachable however far the diagram is scrolled. */
+.message.assistant .mermaid-figure { position: relative; }
+
+.diagram-expand-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 2px 7px;
+    font-size: var(--text-base);
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.message.assistant .mermaid-figure:hover .diagram-expand-btn,
+.diagram-expand-btn:focus {
+    opacity: 1;
+}
+
+.diagram-expand-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+/* --- Diagram zoom window --------------------------------------------- */
+.diagram-zoom {
+    position: fixed;
+    inset: 0;
+    display: none;          /* JS sets flex to open; the Esc handler reads this */
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+    /* Above the side-chat window (100), which is otherwise the ceiling. */
+    z-index: 200;
+}
+
+.diagram-zoom-window {
+    display: flex;
+    flex-direction: column;
+    width: min(92vw, 1400px);
+    height: min(88vh, 900px);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+}
+
+.diagram-zoom-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.diagram-zoom-actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* The viewport. overflow: hidden because panning moves the canvas by
+   transform — a scrollbar here would fight the drag. */
+.diagram-zoom-stage {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    cursor: grab;
+    touch-action: none;     /* let pointermove pan instead of scrolling */
+}
+
+.diagram-zoom-stage.is-panning { cursor: grabbing; }
+
+/* Transformed as one unit. The origin is top-left so the zoom maths in
+   setZoomScale can treat translate and scale as a plain affine pair. */
+.diagram-zoom-canvas {
+    transform-origin: 0 0;
+    /* No padding, and not inline-block: the fit-and-centre maths in
+       drawInteractiveFlowchart positions this element from the stage's size
+       and the SVG's own width/height, so any extra box around the SVG would
+       offset the result. Breathing room comes from the viewBox padding
+       instead, which is inside the coordinate space the maths uses. */
+    display: block;
+    width: max-content;
+}
+
+/* Nothing is clipped or scaled down here — that is the whole point of the
+   window, so the figure's max-width rules must not follow the SVG in. */
+.diagram-zoom-canvas svg {
+    max-width: none;
+    height: auto;
+}
+
+/* --- Interactive flowchart (frontend/flowchart.js) -------------------
+   Drawn from a live model rather than mermaid's baked SVG, so the colours
+   come from tokens directly instead of being threaded through mermaid's
+   themeVariables. Text is real <text>, which cannot clip the way a
+   <foreignObject> does. */
+/* The SVG paints no background of its own, so the stage's colour shows
+   through and there is no visible "sheet edge" partway across the popup —
+   the surface reads as the whole window. Its width/height attributes still
+   govern the layout box (and the fit maths), so this only removes the
+   visual boundary, it does not resize anything. */
+.diagram-zoom-canvas .fc-svg {
+    display: block;
+    background: none;
+    overflow: visible;
+}
+
+.fc-shape {
+    fill: var(--bg-tertiary);
+    stroke: var(--border-strong);
+    stroke-width: 1;
+}
+
+.fc-node { cursor: move; }
+.fc-node:hover .fc-shape { stroke: var(--accent); stroke-width: 2; }
+
+.fc-label {
+    fill: var(--text-bright);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    /* Pointer events belong to the shape, so a drag started on the text does
+       not get swallowed by the text node itself. */
+    pointer-events: none;
+    user-select: none;
+}
+
+.fc-edge {
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    fill: none;
+}
+
+.fc-edge-dotted { stroke-dasharray: 4 3; }
+
+.fc-arrow-head { fill: var(--text-muted); }
+
+.fc-edge-label {
+    fill: var(--text-dim);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    pointer-events: none;
+    user-select: none;
+}
+
+/* Subgraph frames sit behind everything; the fill is barely-there so a node
+   inside one still reads against the page rather than on a slab. */
+.fc-group {
+    fill: var(--bg-secondary);
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    opacity: 0.55;
+}
+
+.fc-group-title {
+    fill: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    pointer-events: none;
+    user-select: none;
+}
+
+
+/* Clicking a node asks the tutor about that step. Only the hit area gets
+   the affordance — the arrows and labels between nodes are not clickable. */
+.message.assistant .mermaid-node-clickable { cursor: pointer; }
+
+.message.assistant .mermaid-node-clickable:hover rect,
+.message.assistant .mermaid-node-clickable:hover circle,
+.message.assistant .mermaid-node-clickable:hover polygon,
+.message.assistant .mermaid-node-clickable:hover path {
+    stroke: var(--accent);
+    stroke-width: 2px;
+}
+
+/* ── Right-hand panes as tabs ─────────────────────────────────────────────
+   Notebook, notes, demo and derivation live in one column; the tab strip on
+   top switches between the ones that are open. The panes keep their own
+   flex:1 and fill the height under the strip. */
+.right-stack {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 20rem;       /* PANE_MIN in notes.js, so the divider clamp agrees */
+    min-height: 0;
+    border-left: 1px solid var(--border-strong);
+    background: var(--bg-primary);
+}
+.right-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+}
+.right-body > .notebook-pane,
+.right-body > .notes-pane,
+.right-body > .demo-pane,
+.right-body > .derivation-pane {
+    min-height: 0;
+    border-left: none;      /* the stack draws the one border */
+}
+/* Two panes share the width: drop their single-pane minimums so the split
+   divider, not a CSS floor, decides the sizes. */
+.right-body.is-split > .notebook-pane,
+.right-body.is-split > .notes-pane,
+.right-body.is-split > .demo-pane,
+.right-body.is-split > .derivation-pane {
+    min-width: 0;
+    overflow: hidden;
+}
+.right-body.is-split > .is-focused-pane { box-shadow: inset 0 0.15rem 0 var(--accent); }
+.right-split-divider {
+    order: 1;
+    flex: 0 0 auto;
+    width: 5px;
+    cursor: col-resize;
+    background: var(--border-strong);
+    position: relative;
+}
+.right-split-divider.is-column { width: auto; height: 5px; cursor: row-resize; }
+.right-split-divider::after { content: ""; position: absolute; inset: -4px; }
+.right-split-divider:hover,
+.right-split-divider.is-dragging { background: var(--accent); }
+.right-tabs {
+    display: flex;
+    align-items: stretch;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-2) 0;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    overflow-x: auto;
+    flex: 0 0 auto;
+}
+.right-tab {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0.35em 0.4em 0.35em 0.85em;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    margin-bottom: -1px;    /* the active tab sits over the strip's border */
+}
+.right-tab:hover { color: var(--text-dim); background: var(--bg-tertiary); }
+.right-tab.is-active {
+    color: var(--text-bright);
+    background: var(--bg-primary);
+    border-color: var(--border-strong);
+}
+.right-tab-close {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1.15em;
+    line-height: 1;
+    padding: 0 0.3em;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    opacity: 0.6;
+}
+.right-tab-close:hover { opacity: 1; background: var(--bg-overlay); }
+
+.right-tab.is-shown:not(.is-active) { color: var(--text-dim); border-color: var(--border-subtle); }
+.right-tab-tools {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding-bottom: var(--space-1);
+}
+.right-tab-tool {
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.2em 0.6em;
+    font: inherit;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.right-tab-tool:hover:not(:disabled) { color: var(--text-bright); border-color: var(--accent); }
+.right-tab-tool.is-on { color: var(--accent); border-color: var(--accent); }
+.right-tab-tool:disabled { opacity: 0.4; cursor: default; }
