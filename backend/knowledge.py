@@ -4,294 +4,108 @@ Tracks Python concepts, mastery levels, prerequisites, and quiz history.
 Stored as JSON files in data/users/<email>/.
 """
 
+import asyncio
 import os
 import json
 import logging
+import tempfile
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+# One lock per knowledge file, keyed on its path rather than held on the store.
+# A KnowledgeStore is constructed per request in tools.py, agent.py and several
+# routes, so a per-instance lock would guard nothing — two handlers touching the
+# same user hold two different instances of the same file. Single uvicorn
+# process, so an asyncio.Lock is sufficient; this only orders coroutines on one
+# event loop, which is exactly where the interleaving happens. Mirrors
+# sandbox._lock_for, which solves the same hazard for venvs.
+_knowledge_locks: dict[str, asyncio.Lock] = {}
+
+
+def knowledge_lock(path: str) -> asyncio.Lock:
+    """The lock guarding read-modify-write of one knowledge file."""
+    key = os.path.abspath(path)
+    # No await between the check and the insert, so this stays atomic under
+    # asyncio without a second lock around the dict.
+    if key not in _knowledge_locks:
+        _knowledge_locks[key] = asyncio.Lock()
+    return _knowledge_locks[key]
+
 # Mastery levels in progression order
 MASTERY_LEVELS = ["introduced", "practiced", "mastered"]
 
-# Canonical curriculum with prerequisite chains.
-# Authored as per-domain sub-graphs that merge into a single CURRICULUM_GRAPH
-# below. Cross-domain prereqs are allowed (e.g. NumPy depends on Python lists).
 
-CURRICULUM_PYTHON = {
-    # --- Fundamentals (7) ---
-    "variables": {"name": "Variables", "prereqs": [], "category": "fundamentals", "track": "python"},
-    "data_types": {"name": "Data Types", "prereqs": ["variables"], "category": "fundamentals", "track": "python"},
-    "operators": {"name": "Operators", "prereqs": ["variables", "data_types"], "category": "fundamentals", "track": "python"},
-    "string_methods": {"name": "String Methods", "prereqs": ["variables", "data_types"], "category": "fundamentals", "track": "python"},
-    "string_formatting": {"name": "String Formatting", "prereqs": ["variables", "data_types"], "category": "fundamentals", "track": "python"},
-    "input_output": {"name": "Input/Output", "prereqs": ["variables"], "category": "fundamentals", "track": "python"},
-    "comments_docstrings": {"name": "Comments & Docstrings", "prereqs": ["variables"], "category": "fundamentals", "track": "python"},
-    # --- Control Flow (5) ---
-    "if_else": {"name": "If/Else Conditionals", "prereqs": ["operators"], "category": "control_flow", "track": "python"},
-    "for_loops": {"name": "For Loops", "prereqs": ["if_else"], "category": "control_flow", "track": "python"},
-    "while_loops": {"name": "While Loops", "prereqs": ["if_else"], "category": "control_flow", "track": "python"},
-    "match_statement": {"name": "Match Statement", "prereqs": ["if_else"], "category": "control_flow", "track": "python"},
-    "recursion": {"name": "Recursion", "prereqs": ["functions_basic", "if_else"], "category": "control_flow", "track": "python"},
-    # --- Data Structures (8) ---
-    "lists": {"name": "Lists", "prereqs": ["variables", "for_loops"], "category": "data_structures", "track": "python"},
-    "tuples": {"name": "Tuples", "prereqs": ["lists"], "category": "data_structures", "track": "python"},
-    "dictionaries": {"name": "Dictionaries", "prereqs": ["lists"], "category": "data_structures", "track": "python"},
-    "sets": {"name": "Sets", "prereqs": ["lists"], "category": "data_structures", "track": "python"},
-    "list_comprehensions": {"name": "List Comprehensions", "prereqs": ["lists", "for_loops"], "category": "data_structures", "track": "python"},
-    "dict_comprehensions": {"name": "Dict & Set Comprehensions", "prereqs": ["dictionaries", "list_comprehensions"], "category": "data_structures", "track": "python"},
-    "named_tuples": {"name": "Named Tuples", "prereqs": ["tuples", "modules_imports"], "category": "data_structures", "track": "python"},
-    "enums": {"name": "Enums", "prereqs": ["classes_basic"], "category": "data_structures", "track": "python"},
-    # --- Functions (7) ---
-    "functions_basic": {"name": "Functions (Basic)", "prereqs": ["variables", "if_else"], "category": "functions", "track": "python"},
-    "functions_args": {"name": "Function Arguments", "prereqs": ["functions_basic"], "category": "functions", "track": "python"},
-    "scope": {"name": "Variable Scope", "prereqs": ["functions_basic"], "category": "functions", "track": "python"},
-    "lambda_functions": {"name": "Lambda Functions", "prereqs": ["functions_basic"], "category": "functions", "track": "python"},
-    "closures": {"name": "Closures", "prereqs": ["scope", "functions_args"], "category": "functions", "track": "python"},
-    "decorators": {"name": "Decorators", "prereqs": ["closures"], "category": "functions", "track": "python"},
-    "functools": {"name": "Functools & Itertools", "prereqs": ["lambda_functions", "decorators"], "category": "functions", "track": "python"},
-    # --- OOP (7) ---
-    "classes_basic": {"name": "Classes (Basic)", "prereqs": ["functions_basic", "dictionaries"], "category": "oop", "track": "python"},
-    "inheritance": {"name": "Inheritance", "prereqs": ["classes_basic"], "category": "oop", "track": "python"},
-    "dunder_methods": {"name": "Dunder Methods", "prereqs": ["classes_basic"], "category": "oop", "track": "python"},
-    "properties": {"name": "Properties & Descriptors", "prereqs": ["classes_basic", "decorators"], "category": "oop", "track": "python"},
-    "abstract_classes": {"name": "Abstract Classes", "prereqs": ["inheritance"], "category": "oop", "track": "python"},
-    "dataclasses": {"name": "Dataclasses", "prereqs": ["classes_basic", "type_hints"], "category": "oop", "track": "python"},
-    "protocols": {"name": "Protocols & ABCs", "prereqs": ["abstract_classes", "type_hints"], "category": "oop", "track": "python"},
-    # --- Error Handling (2) ---
-    "error_handling": {"name": "Error Handling", "prereqs": ["functions_basic"], "category": "error_handling", "track": "python"},
-    "custom_exceptions": {"name": "Custom Exceptions", "prereqs": ["error_handling", "classes_basic"], "category": "error_handling", "track": "python"},
-    # --- File I/O (4) ---
-    "file_reading": {"name": "File Reading", "prereqs": ["error_handling"], "category": "file_io", "track": "python"},
-    "file_writing": {"name": "File Writing", "prereqs": ["file_reading"], "category": "file_io", "track": "python"},
-    "context_managers": {"name": "Context Managers", "prereqs": ["file_reading", "classes_basic"], "category": "file_io", "track": "python"},
-    "json_csv": {"name": "JSON & CSV Handling", "prereqs": ["dictionaries", "file_reading"], "category": "file_io", "track": "python"},
-    # --- Modules & Packaging (3) ---
-    "modules_imports": {"name": "Modules & Imports", "prereqs": ["functions_basic"], "category": "modules", "track": "python"},
-    "packages": {"name": "Packages", "prereqs": ["modules_imports"], "category": "modules", "track": "python"},
-    "virtual_environments": {"name": "Virtual Environments", "prereqs": ["packages"], "category": "modules", "track": "python"},
-    # --- Testing & Debugging (3) ---
-    "unit_testing": {"name": "Unit Testing (pytest)", "prereqs": ["functions_basic", "error_handling"], "category": "testing", "track": "python"},
-    "debugging": {"name": "Debugging & Logging", "prereqs": ["error_handling", "modules_imports"], "category": "testing", "track": "python"},
-    "mocking": {"name": "Mocking & Test Fixtures", "prereqs": ["unit_testing", "classes_basic"], "category": "testing", "track": "python"},
-    # --- Data Processing (3) ---
-    "regex": {"name": "Regular Expressions", "prereqs": ["string_methods", "modules_imports"], "category": "data_processing", "track": "python"},
-    "collections_module": {"name": "Collections Module", "prereqs": ["dictionaries", "modules_imports"], "category": "data_processing", "track": "python"},
-    "datetime_module": {"name": "Date & Time", "prereqs": ["modules_imports", "string_formatting"], "category": "data_processing", "track": "python"},
-    # --- Advanced (6) ---
-    "generators": {"name": "Generators", "prereqs": ["for_loops", "functions_args"], "category": "advanced", "track": "python"},
-    "iterators": {"name": "Iterators", "prereqs": ["classes_basic", "for_loops"], "category": "advanced", "track": "python"},
-    "async_await": {"name": "Async/Await", "prereqs": ["generators", "error_handling"], "category": "advanced", "track": "python"},
-    "type_hints": {"name": "Type Hints", "prereqs": ["functions_args", "classes_basic"], "category": "advanced", "track": "python"},
-    "metaclasses": {"name": "Metaclasses", "prereqs": ["dunder_methods", "inheritance"], "category": "advanced", "track": "python"},
-    "concurrency": {"name": "Threading & Multiprocessing", "prereqs": ["functions_basic", "error_handling", "modules_imports"], "category": "advanced", "track": "python"},
-}
+def _mastery_rank(level: str | None) -> int:
+    """Position of a mastery level, tolerant of values not in MASTERY_LEVELS.
 
-CURRICULUM_ML = {
-    # --- Numerical & tabular foundations (ml_core) ---
-    "numpy_basics": {"name": "NumPy Basics", "prereqs": ["lists", "functions_basic"], "category": "ml_core", "track": "ml"},
-    "numpy_broadcasting": {"name": "NumPy Broadcasting & Vectorization", "prereqs": ["numpy_basics"], "category": "ml_core", "track": "ml"},
-    "pandas_series_df": {"name": "Pandas Series & DataFrames", "prereqs": ["numpy_basics", "dictionaries"], "category": "ml_core", "track": "ml"},
-    "pandas_groupby_merge": {"name": "Pandas GroupBy & Merge", "prereqs": ["pandas_series_df"], "category": "ml_core", "track": "ml"},
-    "matplotlib_basics": {"name": "Matplotlib Plotting", "prereqs": ["numpy_basics"], "category": "ml_core", "track": "ml"},
-    "data_cleaning": {"name": "Data Cleaning & Missing Values", "prereqs": ["pandas_series_df"], "category": "ml_core", "track": "ml"},
-    "feature_engineering": {"name": "Feature Engineering", "prereqs": ["pandas_groupby_merge", "data_cleaning"], "category": "ml_core", "track": "ml"},
-    # --- Supervised learning (ml_supervised) ---
-    "train_test_split": {"name": "Train/Test Split", "prereqs": ["pandas_series_df"], "category": "ml_supervised", "track": "ml"},
-    "linear_regression": {"name": "Linear Regression", "prereqs": ["train_test_split", "numpy_broadcasting"], "category": "ml_supervised", "track": "ml"},
-    "logistic_regression": {"name": "Logistic Regression", "prereqs": ["linear_regression"], "category": "ml_supervised", "track": "ml"},
-    "decision_trees": {"name": "Decision Trees", "prereqs": ["train_test_split"], "category": "ml_supervised", "track": "ml"},
-    "random_forests": {"name": "Random Forests", "prereqs": ["decision_trees"], "category": "ml_supervised", "track": "ml"},
-    # --- Unsupervised (ml_unsupervised) ---
-    "kmeans": {"name": "K-Means Clustering", "prereqs": ["numpy_broadcasting", "matplotlib_basics"], "category": "ml_unsupervised", "track": "ml"},
-    # --- Evaluation & tuning (ml_eval) ---
-    "evaluation_metrics": {"name": "Evaluation Metrics", "prereqs": ["logistic_regression"], "category": "ml_eval", "track": "ml"},
-    "cross_validation": {"name": "Cross-Validation", "prereqs": ["train_test_split", "evaluation_metrics"], "category": "ml_eval", "track": "ml"},
-    "hyperparameter_tuning": {"name": "Hyperparameter Tuning", "prereqs": ["cross_validation"], "category": "ml_eval", "track": "ml"},
-    "sklearn_pipelines": {"name": "scikit-learn Pipelines", "prereqs": ["feature_engineering", "cross_validation"], "category": "ml_eval", "track": "ml"},
-}
+    A bare MASTERY_LEVELS.index() raises ValueError on anything else, and this
+    is called on the mastery already stored on disk — a hand-edited file, or
+    one written before a level was renamed, is enough to make it throw. The
+    raise happened while comparing old against new, i.e. after the concept was
+    already mutated in memory but before the save, so it lost the write it was
+    in the middle of AND took down every sibling call in the same batch.
+    Unknown values sort lowest, so an odd level reads as a promotion rather
+    than silently looking like a demotion.
+    """
+    try:
+        return MASTERY_LEVELS.index(level)
+    except ValueError:
+        return -1
 
-CURRICULUM_DL = {
-    # --- PyTorch foundations (dl_basics) ---
-    "pytorch_tensors": {"name": "PyTorch Tensors", "prereqs": ["numpy_basics"], "category": "dl_basics", "track": "dl"},
-    "autograd": {"name": "Autograd & Gradients", "prereqs": ["pytorch_tensors"], "category": "dl_basics", "track": "dl"},
-    "nn_module": {"name": "nn.Module", "prereqs": ["pytorch_tensors", "classes_basic"], "category": "dl_basics", "track": "dl"},
-    "optimizers": {"name": "Optimizers (SGD, Adam)", "prereqs": ["autograd"], "category": "dl_basics", "track": "dl"},
-    "loss_functions": {"name": "Loss Functions", "prereqs": ["autograd"], "category": "dl_basics", "track": "dl"},
-    "training_loop": {"name": "Training Loop", "prereqs": ["nn_module", "optimizers", "loss_functions"], "category": "dl_basics", "track": "dl"},
-    "pytorch_dataloaders": {"name": "DataLoaders & Datasets", "prereqs": ["nn_module", "pandas_series_df"], "category": "dl_basics", "track": "dl"},
-    "device_management": {"name": "GPU / Device Management", "prereqs": ["pytorch_tensors"], "category": "dl_basics", "track": "dl"},
-    # --- Architectures (dl_architectures) ---
-    "cnns": {"name": "Convolutional Neural Networks", "prereqs": ["training_loop"], "category": "dl_architectures", "track": "dl"},
-    "rnns": {"name": "Recurrent Neural Networks", "prereqs": ["training_loop"], "category": "dl_architectures", "track": "dl"},
-    "transformers_intro": {"name": "Transformers (Intro)", "prereqs": ["rnns"], "category": "dl_architectures", "track": "dl"},
-    "transfer_learning": {"name": "Transfer Learning", "prereqs": ["cnns"], "category": "dl_architectures", "track": "dl"},
-}
 
-CURRICULUM_LLM = {
-    # --- LLM foundations (llm_core) ---
-    "tokenization": {"name": "Tokenization", "prereqs": ["string_methods"], "category": "llm_core", "track": "llm"},
-    "embeddings": {"name": "Embeddings", "prereqs": ["numpy_basics", "tokenization"], "category": "llm_core", "track": "llm"},
-    "prompt_engineering": {"name": "Prompt Engineering", "prereqs": ["tokenization"], "category": "llm_core", "track": "llm"},
-    "llm_evaluation": {"name": "LLM Evaluation", "prereqs": ["prompt_engineering"], "category": "llm_core", "track": "llm"},
-    # --- RAG & agents (llm_rag) ---
-    "chunking": {"name": "Chunking Strategies", "prereqs": ["tokenization"], "category": "llm_rag", "track": "llm"},
-    "vector_databases": {"name": "Vector Databases", "prereqs": ["embeddings"], "category": "llm_rag", "track": "llm"},
-    "retrieval": {"name": "Retrieval (top-k search)", "prereqs": ["vector_databases", "chunking"], "category": "llm_rag", "track": "llm"},
-    "reranking": {"name": "Reranking", "prereqs": ["retrieval"], "category": "llm_rag", "track": "llm"},
-    "rag_architecture": {"name": "RAG Architecture", "prereqs": ["retrieval", "prompt_engineering"], "category": "llm_rag", "track": "llm"},
-    "agents_tool_use": {"name": "Agents & Tool Use", "prereqs": ["prompt_engineering", "functions_basic"], "category": "llm_rag", "track": "llm"},
-}
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write JSON so a concurrent reader never sees a half-written file.
 
-CURRICULUM_MLOPS = {
-    # --- Serving (ops_serving) ---
-    "model_serialization": {"name": "Model Serialization (pickle, joblib, ONNX)", "prereqs": ["sklearn_pipelines"], "category": "ops_serving", "track": "ops"},
-    "inference_serving": {"name": "Inference Serving (FastAPI)", "prereqs": ["model_serialization", "functions_basic"], "category": "ops_serving", "track": "ops"},
-    "batch_vs_streaming": {"name": "Batch vs Streaming Inference", "prereqs": ["inference_serving"], "category": "ops_serving", "track": "ops"},
-    "containerization": {"name": "Containerization for ML", "prereqs": ["inference_serving"], "category": "ops_serving", "track": "ops"},
-    # --- Lifecycle & monitoring (ops_monitoring) ---
-    "experiment_tracking": {"name": "Experiment Tracking", "prereqs": ["cross_validation"], "category": "ops_monitoring", "track": "ops"},
-    "model_registry": {"name": "Model Registry", "prereqs": ["experiment_tracking", "model_serialization"], "category": "ops_monitoring", "track": "ops"},
-    "monitoring_drift": {"name": "Monitoring & Drift Detection", "prereqs": ["inference_serving"], "category": "ops_monitoring", "track": "ops"},
-    "cicd_for_ml": {"name": "CI/CD for ML", "prereqs": ["containerization", "unit_testing"], "category": "ops_monitoring", "track": "ops"},
-    "feature_stores": {"name": "Feature Stores", "prereqs": ["feature_engineering", "pandas_groupby_merge"], "category": "ops_monitoring", "track": "ops"},
-}
+    open(path, "w") truncates on open and only then writes, which leaves a
+    window where the file on disk is empty or partial. These stores are
+    read-modify-written by async tool handlers that interleave on one event
+    loop, so a reader landing in that window got a JSONDecodeError. Writing to
+    a temp file in the SAME directory (so it is on the same filesystem) and
+    then os.replace makes the swap atomic: a reader sees either the old file
+    or the new one, never a torn one.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+            # The rename is atomic, but only orders against data already
+            # handed to the OS; flush so the bytes exist before the swap.
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave a .tmp-*.json behind for the next reader to trip over.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
-CURRICULUM_QUANTUM = {
-    # --- Foundations (qc_foundations) ---
-    "qubits": {"name": "Qubits & Classical vs Quantum Bits", "prereqs": ["variables", "data_types"], "category": "qc_foundations", "track": "quantum"},
-    "superposition": {"name": "Superposition", "prereqs": ["qubits"], "category": "qc_foundations", "track": "quantum"},
-    "measurement": {"name": "Measurement & Probabilities", "prereqs": ["superposition"], "category": "qc_foundations", "track": "quantum"},
-    "entanglement": {"name": "Entanglement", "prereqs": ["superposition", "measurement"], "category": "qc_foundations", "track": "quantum"},
-    "bloch_sphere": {"name": "Bloch Sphere", "prereqs": ["superposition", "numpy_basics"], "category": "qc_foundations", "track": "quantum"},
-    # --- Qiskit (qc_qiskit) ---
-    "qiskit_setup": {"name": "Qiskit Setup & Install", "prereqs": ["virtual_environments", "modules_imports"], "category": "qc_qiskit", "track": "quantum"},
-    "quantum_circuits": {"name": "Quantum Circuits (Qiskit)", "prereqs": ["qiskit_setup", "classes_basic"], "category": "qc_qiskit", "track": "quantum"},
-    "quantum_gates": {"name": "Quantum Gates (X, H, CNOT, ...)", "prereqs": ["quantum_circuits", "measurement"], "category": "qc_qiskit", "track": "quantum"},
-    "circuit_visualization": {"name": "Circuit Visualization & Statevector", "prereqs": ["quantum_gates", "matplotlib_basics"], "category": "qc_qiskit", "track": "quantum"},
-    # --- Algorithms (qc_algorithms) ---
-    "deutsch_jozsa": {"name": "Deutsch-Jozsa Algorithm", "prereqs": ["quantum_gates", "entanglement"], "category": "qc_algorithms", "track": "quantum"},
-    "grover_search": {"name": "Grover's Search", "prereqs": ["deutsch_jozsa"], "category": "qc_algorithms", "track": "quantum"},
-    "quantum_teleportation": {"name": "Quantum Teleportation", "prereqs": ["entanglement", "quantum_gates"], "category": "qc_algorithms", "track": "quantum"},
-    # --- Advanced (qc_advanced) ---
-    "variational_circuits": {"name": "Variational Quantum Circuits", "prereqs": ["quantum_gates", "numpy_broadcasting"], "category": "qc_advanced", "track": "quantum"},
-    "qaoa_intro": {"name": "QAOA (Intro)", "prereqs": ["variational_circuits"], "category": "qc_advanced", "track": "quantum"},
-}
+# The curriculum itself lives in backend/curriculum/*.yaml, one file per track,
+# and is loaded by backend.curriculum. It used to be ~285 lines of dict literals
+# right here — which meant the subject matter and the graph algorithms that walk
+# it could only be edited in the same file. Everything below this line works the
+# same whatever the subject is; everything about *which* subject is in the YAML.
+#
+# Re-exported under the original names because tools.py, routes.py and the tests
+# import them from this module.
+from backend.curriculum import (  # noqa: E402
+    APP_TRACKS,
+    CURRICULUM_GRAPH,
+    CATEGORY_PRIORITY,
+    CATEGORY_LABELS,
+    TRACK_HUE,
+    TRACK_NAMES,
+    TRACK_ORDER,
+    app_tracks,
+)
 
-CURRICULUM_SYSTEM_DESIGN = {
-    # --- Networking & web fundamentals (sd_foundations) ---
-    # Mostly theory. These have light Python prereqs so the track is reachable
-    # early — a learner can study system design without finishing the OOP chain.
-    "client_server": {"name": "Client-Server Model", "prereqs": ["functions_basic"], "category": "sd_foundations", "track": "sysdesign"},
-    "dns": {"name": "DNS & Domain Resolution", "prereqs": ["client_server"], "category": "sd_foundations", "track": "sysdesign"},
-    "http_https": {"name": "HTTP & HTTPS", "prereqs": ["client_server"], "category": "sd_foundations", "track": "sysdesign"},
-    "tcp_udp": {"name": "TCP vs UDP", "prereqs": ["client_server"], "category": "sd_foundations", "track": "sysdesign"},
-    "latency_numbers": {"name": "Latency Numbers & Back-of-Envelope Estimation", "prereqs": ["client_server"], "category": "sd_foundations", "track": "sysdesign"},
-    "rest_api_design": {"name": "REST API Design", "prereqs": ["http_https", "json_csv"], "category": "sd_foundations", "track": "sysdesign"},
-    "rpc_grpc_graphql": {"name": "RPC, gRPC & GraphQL", "prereqs": ["rest_api_design"], "category": "sd_foundations", "track": "sysdesign"},
-    "websockets_sse": {"name": "WebSockets, SSE & Long Polling", "prereqs": ["http_https", "async_await"], "category": "sd_foundations", "track": "sysdesign"},
-    # --- Core design principles (sd_principles) ---
-    "scalability": {"name": "Scalability (Vertical vs Horizontal)", "prereqs": ["client_server", "latency_numbers"], "category": "sd_principles", "track": "sysdesign"},
-    "availability_reliability": {"name": "Availability & Reliability", "prereqs": ["scalability"], "category": "sd_principles", "track": "sysdesign"},
-    "latency_throughput": {"name": "Latency vs Throughput", "prereqs": ["latency_numbers"], "category": "sd_principles", "track": "sysdesign"},
-    "consistency_models": {"name": "Consistency Models (Strong vs Eventual)", "prereqs": ["availability_reliability"], "category": "sd_principles", "track": "sysdesign"},
-    "cap_theorem": {"name": "CAP Theorem", "prereqs": ["consistency_models"], "category": "sd_principles", "track": "sysdesign"},
-    "pacelc_theorem": {"name": "PACELC Theorem", "prereqs": ["cap_theorem", "latency_throughput"], "category": "sd_principles", "track": "sysdesign"},
-    "single_point_of_failure": {"name": "Single Points of Failure & Redundancy", "prereqs": ["availability_reliability"], "category": "sd_principles", "track": "sysdesign"},
-    # --- Building blocks (sd_components) ---
-    "load_balancing": {"name": "Load Balancing", "prereqs": ["scalability", "single_point_of_failure"], "category": "sd_components", "track": "sysdesign"},
-    "reverse_proxy": {"name": "Reverse Proxies & API Gateways", "prereqs": ["load_balancing", "rest_api_design"], "category": "sd_components", "track": "sysdesign"},
-    "stateless_services": {"name": "Stateless Services & Session Management", "prereqs": ["load_balancing"], "category": "sd_components", "track": "sysdesign"},
-    "caching_strategies": {"name": "Caching Strategies (Cache-Aside, Write-Through)", "prereqs": ["scalability", "dictionaries"], "category": "sd_components", "track": "sysdesign"},
-    "cache_eviction": {"name": "Cache Eviction Policies (LRU, LFU, TTL)", "prereqs": ["caching_strategies", "collections_module"], "category": "sd_components", "track": "sysdesign"},
-    "cdn": {"name": "Content Delivery Networks", "prereqs": ["caching_strategies", "dns"], "category": "sd_components", "track": "sysdesign"},
-    "message_queues": {"name": "Message Queues (Kafka, RabbitMQ, SQS)", "prereqs": ["stateless_services", "async_await"], "category": "sd_components", "track": "sysdesign"},
-    "pub_sub": {"name": "Publish/Subscribe & Event-Driven Architecture", "prereqs": ["message_queues"], "category": "sd_components", "track": "sysdesign"},
-    "rate_limiting": {"name": "Rate Limiting (Token & Leaky Bucket)", "prereqs": ["reverse_proxy", "caching_strategies"], "category": "sd_components", "track": "sysdesign"},
-    "search_engines": {"name": "Search Engines & Inverted Indexes (Elasticsearch)", "prereqs": ["caching_strategies", "regex"], "category": "sd_components", "track": "sysdesign"},
-    "object_storage": {"name": "Blob & Object Storage (S3)", "prereqs": ["stateless_services", "file_writing"], "category": "sd_components", "track": "sysdesign"},
-    # --- Data layer (sd_data) ---
-    "sql_vs_nosql": {"name": "SQL vs NoSQL", "prereqs": ["scalability", "json_csv"], "category": "sd_data", "track": "sysdesign"},
-    "data_modeling": {"name": "Schema Design & Normalization", "prereqs": ["sql_vs_nosql"], "category": "sd_data", "track": "sysdesign"},
-    "indexing": {"name": "Database Indexing (B-Tree, LSM-Tree)", "prereqs": ["data_modeling"], "category": "sd_data", "track": "sysdesign"},
-    "acid_transactions": {"name": "ACID Transactions & Isolation Levels", "prereqs": ["data_modeling"], "category": "sd_data", "track": "sysdesign"},
-    "replication": {"name": "Replication (Leader-Follower, Multi-Leader)", "prereqs": ["sql_vs_nosql", "consistency_models"], "category": "sd_data", "track": "sysdesign"},
-    "sharding_partitioning": {"name": "Sharding & Partitioning", "prereqs": ["replication", "indexing"], "category": "sd_data", "track": "sysdesign"},
-    "consistent_hashing": {"name": "Consistent Hashing", "prereqs": ["sharding_partitioning"], "category": "sd_data", "track": "sysdesign"},
-    "quorum_reads_writes": {"name": "Quorum Reads & Writes", "prereqs": ["replication", "cap_theorem"], "category": "sd_data", "track": "sysdesign"},
-    "bloom_filters": {"name": "Bloom Filters & Probabilistic Structures", "prereqs": ["sets", "indexing"], "category": "sd_data", "track": "sysdesign"},
-    # --- Distributed systems (sd_distributed) ---
-    "leader_election": {"name": "Leader Election", "prereqs": ["replication", "single_point_of_failure"], "category": "sd_distributed", "track": "sysdesign"},
-    "consensus_raft_paxos": {"name": "Consensus (Raft & Paxos)", "prereqs": ["leader_election", "quorum_reads_writes"], "category": "sd_distributed", "track": "sysdesign"},
-    "distributed_transactions": {"name": "Distributed Transactions & Two-Phase Commit", "prereqs": ["acid_transactions", "consensus_raft_paxos"], "category": "sd_distributed", "track": "sysdesign"},
-    "saga_pattern": {"name": "Saga Pattern", "prereqs": ["distributed_transactions", "pub_sub"], "category": "sd_distributed", "track": "sysdesign"},
-    "idempotency": {"name": "Idempotency & Exactly-Once Delivery", "prereqs": ["message_queues", "distributed_transactions"], "category": "sd_distributed", "track": "sysdesign"},
-    "cqrs_event_sourcing": {"name": "CQRS & Event Sourcing", "prereqs": ["pub_sub", "acid_transactions"], "category": "sd_distributed", "track": "sysdesign"},
-    "unique_id_generation": {"name": "Distributed Unique ID Generation (Snowflake)", "prereqs": ["sharding_partitioning", "datetime_module"], "category": "sd_distributed", "track": "sysdesign"},
-    "failure_detection": {"name": "Failure Detection, Heartbeats & Gossip", "prereqs": ["leader_election"], "category": "sd_distributed", "track": "sysdesign"},
-    "resilience_patterns": {"name": "Circuit Breakers, Retries & Backpressure", "prereqs": ["failure_detection", "error_handling"], "category": "sd_distributed", "track": "sysdesign"},
-    # --- Architecture & operations (sd_architecture) ---
-    "monolith_vs_microservices": {"name": "Monolith vs Microservices", "prereqs": ["stateless_services", "rest_api_design"], "category": "sd_architecture", "track": "sysdesign"},
-    "service_discovery": {"name": "Service Discovery & Service Mesh", "prereqs": ["monolith_vs_microservices", "dns"], "category": "sd_architecture", "track": "sysdesign"},
-    "observability": {"name": "Observability (Logging, Metrics, Tracing)", "prereqs": ["monolith_vs_microservices", "debugging"], "category": "sd_architecture", "track": "sysdesign"},
-    "security_authn_authz": {"name": "Authentication & Authorization (OAuth, JWT)", "prereqs": ["rest_api_design", "reverse_proxy"], "category": "sd_architecture", "track": "sysdesign"},
-    "multi_region": {"name": "Multi-Region & Geo-Distributed Architecture", "prereqs": ["replication", "cdn"], "category": "sd_architecture", "track": "sysdesign"},
-    "capacity_planning": {"name": "Capacity Planning & Cost-Aware Design", "prereqs": ["latency_numbers", "observability"], "category": "sd_architecture", "track": "sysdesign"},
-    "design_interview_framework": {"name": "System Design Interview Framework", "prereqs": ["capacity_planning", "sharding_partitioning", "caching_strategies"], "category": "sd_architecture", "track": "sysdesign"},
-    # Capstone case studies — apply the whole track.
-    "case_url_shortener": {"name": "Case Study: URL Shortener", "prereqs": ["design_interview_framework", "unique_id_generation"], "category": "sd_architecture", "track": "sysdesign"},
-    "case_news_feed": {"name": "Case Study: Social News Feed", "prereqs": ["design_interview_framework", "cache_eviction"], "category": "sd_architecture", "track": "sysdesign"},
-    "case_chat_system": {"name": "Case Study: Real-Time Chat", "prereqs": ["design_interview_framework", "websockets_sse"], "category": "sd_architecture", "track": "sysdesign"},
-    # Bridges into the ML/LLM tracks — serving models is a distributed-systems problem.
-    "ml_system_design": {"name": "ML System Design (Serving at Scale)", "prereqs": ["design_interview_framework", "inference_serving"], "category": "sd_architecture", "track": "sysdesign"},
-    "llm_inference_scaling": {"name": "LLM Serving & Inference Scaling", "prereqs": ["ml_system_design", "rag_architecture"], "category": "sd_architecture", "track": "sysdesign"},
-}
-
-CURRICULUM_GRAPH = {
-    **CURRICULUM_PYTHON,
-    **CURRICULUM_ML,
-    **CURRICULUM_DL,
-    **CURRICULUM_LLM,
-    **CURRICULUM_MLOPS,
-    **CURRICULUM_QUANTUM,
-    **CURRICULUM_SYSTEM_DESIGN,
-}
-
-# Integrity check: every prereq must resolve to a known concept.
-# Fails fast at import time if a typo sneaks into a cross-graph reference.
-_missing = {
-    f"{cid} -> {pr}"
-    for cid, info in CURRICULUM_GRAPH.items()
-    for pr in info["prereqs"]
-    if pr not in CURRICULUM_GRAPH
-}
-assert not _missing, f"CURRICULUM_GRAPH has dangling prereqs: {sorted(_missing)}"
-del _missing
-
-# Intra-track ordering priority. Used to sort candidates *within* a single
-# track's bucket in get_next_topic_suggestions. Cross-track ordering is
-# handled by the round-robin interleave, not by this dict. Unknown
-# categories fall through to 99, so user-created categories still work.
-CATEGORY_PRIORITY = {
-    # Python
-    "fundamentals": 0, "control_flow": 1, "data_structures": 2,
-    "functions": 3, "oop": 4, "error_handling": 5,
-    "file_io": 6, "modules": 7, "testing": 8,
-    "data_processing": 9, "advanced": 10,
-    # ML
-    "ml_core": 0, "ml_supervised": 1, "ml_unsupervised": 2, "ml_eval": 3,
-    # DL
-    "dl_basics": 0, "dl_architectures": 1,
-    # LLM
-    "llm_core": 0, "llm_rag": 1,
-    # Ops
-    "ops_serving": 0, "ops_monitoring": 1,
-    # Quantum
-    "qc_foundations": 0, "qc_qiskit": 1, "qc_algorithms": 2, "qc_advanced": 3,
-    # System design
-    "sd_foundations": 0, "sd_principles": 1, "sd_components": 2,
-    "sd_data": 3, "sd_distributed": 4, "sd_architecture": 5,
-}
+# CATEGORY_PRIORITY (imported above) sorts candidates *within* one track's
+# bucket in get_next_topic_suggestions; cross-track ordering is the
+# round-robin interleave, not this. Categories absent from it fall through to
+# 99, so a category the tutor invents still sorts predictably.
 
 # Visual palette for the frontend graph view. Single source of truth —
 # routes.py imports from here so colors stay co-located with the curriculum.
@@ -315,6 +129,7 @@ CATEGORY_COLORS = {
     # ML — oranges/ambers
     "ml_core": "#f5a623",
     "ml_supervised": "#ffb454",
+    "ml_ensembles": "#ffc978",
     "ml_unsupervised": "#e08e2a",
     "ml_eval": "#d97706",
     # DL — cyans/teals
@@ -323,6 +138,7 @@ CATEGORY_COLORS = {
     # LLM — purples/violets
     "llm_core": "#a277ff",
     "llm_rag": "#c678dd",
+    "llm_tuning": "#8b5cf6",
     # Ops — greens
     "ops_serving": "#98c379",
     "ops_monitoring": "#5fb37c",
@@ -354,9 +170,34 @@ TRACK_COLORS = {
     "sysdesign": "#e5484d",
 }
 
-# Round-robin order for cross-track suggestion interleaving. Kept as a single
-# tuple so adding a track only means editing this list (and TRACK_COLORS).
-TRACK_ORDER = ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign")
+# TRACK_NAMES (imported above) is how each track is named in prose. The tutor's
+# identity line is built from it rather than restated in the prompt, so a track
+# added to the curriculum cannot leave the prompt naming a different subject.
+
+
+def taught_domains(app: str = "pymentor") -> str:
+    """The subjects ONE tutor covers, as an English list.
+
+    Derived from the curriculum so the identity prompt and the knowledge graph
+    can never disagree — which is the point, and was also the bug: before this
+    took an `app`, it walked every loaded track, so adding the Sanskrit track
+    made PyMentor introduce itself as teaching "... system design, and
+    Sanskrit". A tutor must only ever name its own tracks.
+
+    PyMentor's phrasing leads with Python and presents the rest as what builds
+    on it, matching how those tracks are actually sequenced. A single-track app
+    just names its subject; stringing "and the topics that build on it" onto
+    one track would read as though something were missing.
+    """
+    tracks = app_tracks(app)
+    names = [TRACK_NAMES.get(t, t) for t in tracks]
+
+    if len(names) == 1:
+        return names[0]
+
+    lead, rest = names[0], names[1:]
+    tail = f"{', '.join(rest[:-1])}, and {rest[-1]}" if len(rest) > 1 else rest[0]
+    return f"{lead} and the topics that build on it: {tail}"
 
 # --- Derived palette (OKLCH) ------------------------------------------------
 # 31 independently-chosen category hues are indistinguishable on screen. Since
@@ -368,18 +209,10 @@ TRACK_ORDER = ("python", "ml", "dl", "llm", "ops", "quantum", "sysdesign")
 # OKLCH is used because its lightness is perceptually uniform — equal steps
 # look equally different, which plain HSL does not give you.
 
-# Hue angle per track, spaced around the wheel so all seven stay mutually
-# distinguishable. Chroma and lightness are set per theme below, not here —
-# a hue that glows on black is thin and washed out on white.
-TRACK_HUE = {
-    "python":    264,
-    "ml":        75,
-    "dl":        205,
-    "llm":       295,
-    "ops":       145,
-    "quantum":   330,
-    "sysdesign": 25,
-}
+# TRACK_HUE (imported above) is one hue angle per track, spaced around the wheel
+# so tracks stay mutually distinguishable. Chroma and lightness are set per
+# theme below, not in the curriculum — a hue that glows on black is thin and
+# washed out on white.
 
 # Per-theme rendering targets.
 #
@@ -444,37 +277,53 @@ def build_oklch_palette(theme: str = "dark") -> dict:
 
     return {"tracks": tracks_css, "categories": categories_css}
 
-# Human-readable legend labels. Naive `cat.replace("_", " ").title()` mangles
-# the abbreviated prefixes ("Ml Core", "Qc Qiskit", "Sd Data"), so spell out
-# the ones that don't survive title-casing. Anything absent falls back to the
-# auto-generated label, so user-created categories still render.
-CATEGORY_LABELS = {
-    "ml_core": "ML · Core",
-    "ml_supervised": "ML · Supervised",
-    "ml_unsupervised": "ML · Unsupervised",
-    "ml_eval": "ML · Evaluation",
-    "dl_basics": "DL · Basics",
-    "dl_architectures": "DL · Architectures",
-    "llm_core": "LLM · Core",
-    "llm_rag": "LLM · RAG & Agents",
-    "ops_serving": "MLOps · Serving",
-    "ops_monitoring": "MLOps · Monitoring",
-    "qc_foundations": "Quantum · Foundations",
-    "qc_qiskit": "Quantum · Qiskit",
-    "qc_algorithms": "Quantum · Algorithms",
-    "qc_advanced": "Quantum · Advanced",
-    "sd_foundations": "System Design · Foundations",
-    "sd_principles": "System Design · Principles",
-    "sd_components": "System Design · Building Blocks",
-    "sd_data": "System Design · Data Layer",
-    "sd_distributed": "System Design · Distributed",
-    "sd_architecture": "System Design · Architecture",
-}
+# CATEGORY_LABELS (imported above) carries the legend labels the curriculum
+# spells out. Naive `cat.replace("_", " ").title()` mangles the abbreviated
+# prefixes ("Ml Core", "Qc Qiskit", "Sd Data"), so a track's YAML names those
+# explicitly. A category with no label falls back to title-casing below, which
+# is what a category the tutor invents gets.
 
 
 def category_label(category: str) -> str:
     """Display name for a category id, falling back to title-casing."""
     return CATEGORY_LABELS.get(category, category.replace("_", " ").title())
+
+
+# Palette for categories the tutor invents. The built-in tracks each own a hue
+# family (see CATEGORY_COLORS); these are deliberately outside those families
+# so a learner-invented category never looks like it belongs to Python or ML.
+CUSTOM_CATEGORY_COLORS = [
+    "#e0af68", "#d4a5c8", "#9ece6a", "#f7768e", "#7dcfff",
+    "#bb9af7", "#e69875", "#73daca", "#c0caf5", "#ff9e64",
+]
+
+
+def _auto_label(category: str) -> str:
+    """Human-readable label for a category id the curriculum never defined.
+
+    Mirrors the "Track · Topic" shape of CATEGORY_LABELS where the id carries a
+    known track prefix, so an invented `ml_ensembles` reads as "ML · Ensembles"
+    beside the built-in ML entries rather than as "Ml Ensembles".
+    """
+    prefixes = {
+        "ml": "ML", "dl": "DL", "llm": "LLM", "ops": "MLOps",
+        "qc": "Quantum", "sd": "System Design",
+    }
+    head, _, tail = category.partition("_")
+    if tail and head in prefixes:
+        return f"{prefixes[head]} · {tail.replace('_', ' ').title()}"
+    return category.replace("_", " ").title()
+
+
+def _auto_color(category: str) -> str:
+    """Stable color for an invented category.
+
+    Hashed rather than assigned in arrival order so the same category keeps its
+    color across learners and across a knowledge file being rebuilt — the graph
+    view would otherwise reshuffle colors whenever concepts were re-added.
+    """
+    idx = sum(ord(c) for c in category) % len(CUSTOM_CATEGORY_COLORS)
+    return CUSTOM_CATEGORY_COLORS[idx]
 
 
 def _default_knowledge() -> dict:
@@ -510,11 +359,29 @@ def _default_quiz_history() -> dict:
 class KnowledgeStore:
     """Read/write access to a user's knowledge.json and quiz_history.json."""
 
-    def __init__(self, user_data_dir: str):
+    def __init__(self, user_data_dir: str, app: str = "pymentor"):
+        """
+        app: which tutor this store serves. Bounds every curriculum walk to
+            that tutor's tracks, so the Python tutor cannot suggest a Sanskrit
+            concept and vice versa. The stored knowledge.json is shared — one
+            learner, one progress file — but what gets *offered* is scoped.
+        """
         self.user_data_dir = user_data_dir
+        self.app = app
+        self.tracks = frozenset(app_tracks(app))
         self.knowledge_path = os.path.join(user_data_dir, "knowledge.json")
         self.quiz_path = os.path.join(user_data_dir, "quiz_history.json")
         os.makedirs(user_data_dir, exist_ok=True)
+
+    def _in_scope(self, concept_id: str) -> bool:
+        """Is this concept one this tutor teaches?
+
+        A concept the tutor invented is not in CURRICULUM_GRAPH at all; those
+        stay in scope, because the tutor that created one is the tutor that
+        should keep seeing it.
+        """
+        info = CURRICULUM_GRAPH.get(concept_id)
+        return info is None or info.get("track") in self.tracks
 
     def load_knowledge(self) -> dict:
         if not os.path.isfile(self.knowledge_path):
@@ -523,8 +390,7 @@ class KnowledgeStore:
             return json.load(f)
 
     def save_knowledge(self, data: dict):
-        with open(self.knowledge_path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        _atomic_write_json(self.knowledge_path, data)
 
     def load_quiz_history(self) -> dict:
         if not os.path.isfile(self.quiz_path):
@@ -533,8 +399,7 @@ class KnowledgeStore:
             return json.load(f)
 
     def save_quiz_history(self, data: dict):
-        with open(self.quiz_path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        _atomic_write_json(self.quiz_path, data)
 
     def upsert_concept(
         self,
@@ -550,6 +415,13 @@ class KnowledgeStore:
         data = self.load_knowledge()
         now = datetime.now(timezone.utc).isoformat()
 
+        # Register a category the curriculum never defined. The tutor teaches
+        # past the fixed curriculum — a session on gradient boosting produces
+        # concepts no CURRICULUM_* dict anticipated — and a category with no
+        # label and no color renders as an unnamed grey node. Recording it here
+        # means the graph view can name and colour it like any built-in.
+        self._register_category(data, category)
+
         existing = data["concepts"].get(concept_id)
         if existing:
             # Update existing concept
@@ -564,7 +436,7 @@ class KnowledgeStore:
             if related is not None:
                 existing["related"] = related
             concept = existing
-            action = "promoted" if MASTERY_LEVELS.index(mastery) > MASTERY_LEVELS.index(old_mastery) else "reviewed"
+            action = "promoted" if _mastery_rank(mastery) > _mastery_rank(old_mastery) else "reviewed"
         else:
             # New concept
             concept = {
@@ -598,6 +470,44 @@ class KnowledgeStore:
         logger.info(f"Concept '{concept_id}' {action} at mastery={mastery}")
         return concept
 
+    @staticmethod
+    def _register_category(data: dict, category: str) -> None:
+        """Record a category that is not part of the built-in curriculum.
+
+        Mutates `data` in place; the caller saves. Built-in categories are
+        skipped, so this only ever grows with what the tutor actually invents.
+        Uses setdefault throughout: knowledge files written before this existed
+        have no custom_categories key, and re-registering must not overwrite a
+        label the learner may later have edited.
+        """
+        if not category or category in CATEGORY_LABELS or category in CATEGORY_COLORS:
+            return
+        customs = data.setdefault("custom_categories", {})
+        if category not in customs:
+            customs[category] = {
+                "label": _auto_label(category),
+                "color": _auto_color(category),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info(f"Registered new category '{category}'")
+
+    def categories(self) -> dict:
+        """Every category this learner has, built-in and invented.
+
+        Returns {id: {"label", "color"}} — what the graph legend needs, without
+        the caller having to know which categories came from the curriculum.
+        """
+        out = {
+            cat: {"label": category_label(cat), "color": color}
+            for cat, color in CATEGORY_COLORS.items()
+        }
+        for cat, meta in self.load_knowledge().get("custom_categories", {}).items():
+            out[cat] = {
+                "label": meta.get("label") or _auto_label(cat),
+                "color": meta.get("color") or _auto_color(cat),
+            }
+        return out
+
     def get_quiz_candidates(self, count: int = 5, category: str | None = None) -> list[dict]:
         """Get concepts ranked by quiz priority.
 
@@ -618,20 +528,34 @@ class KnowledgeStore:
 
         return concepts[:count]
 
-    def get_next_topic_suggestions(self, count: int = 3) -> list[dict]:
+    def get_next_topic_suggestions(
+        self, count: int = 3, track: str | None = None
+    ) -> list[dict]:
         """Suggest next topics, mixing tracks so cross-domain topics surface early.
 
         Finds concepts whose prerequisites are all met, buckets them by track
         (python/ml/dl/llm/ops), then interleaves: primary track first, then
         one candidate from each other track whose bucket is non-empty, then
         back to primary — repeating until `count` candidates are returned.
+
+        `track` restricts the walk to a single track. Without it, a learner who
+        asks about one domain gets a cross-track interleave that mostly answers
+        a question they did not ask. Note that a track filter makes an empty
+        result much more likely: the eligible set is already small, and one
+        track's slice of it is often empty even when the unfiltered call
+        returns something. That is what get_domain_map exists to explain —
+        an empty list here means "nothing startable", not "nothing to learn".
         """
         data = self.load_knowledge()
         known_concepts = set(data["concepts"].keys())
 
-        # Bucket candidates by track
+        # Bucket candidates by track, within this tutor's tracks only.
         buckets: dict[str, list[dict]] = {}
         for concept_id, info in CURRICULUM_GRAPH.items():
+            if info.get("track", "python") not in self.tracks:
+                continue
+            if track and info.get("track", "python") != track:
+                continue
             if concept_id in known_concepts:
                 continue
             prereqs = info["prereqs"]
@@ -654,26 +578,34 @@ class KnowledgeStore:
                 s["concept_id"],
             ))
 
-        # Pick the learner's primary track — whichever track has the most
-        # concepts at practiced/mastered. Ties break toward "python".
+        # Pick the learner's primary track — whichever of THIS tutor's tracks
+        # has the most concepts at practiced/mastered. Ties break toward the
+        # tutor's first track, which is the one its curriculum leads with.
+        app_track_order = [t for t in TRACK_ORDER if t in self.tracks]
+        default_track = app_track_order[0]
+
         track_scores: dict[str, int] = {}
         for cid, concept in data["concepts"].items():
             if concept.get("mastery") not in ("practiced", "mastered"):
                 continue
-            concept_track = CURRICULUM_GRAPH.get(cid, {}).get("track", "python")
+            concept_track = CURRICULUM_GRAPH.get(cid, {}).get("track")
+            if concept_track not in self.tracks:
+                continue  # another tutor's progress, or an invented concept
             track_scores[concept_track] = track_scores.get(concept_track, 0) + 1
         if track_scores:
             primary_track = max(
                 track_scores.items(),
-                key=lambda kv: (kv[1], kv[0] == "python"),
+                key=lambda kv: (kv[1], kv[0] == default_track),
             )[0]
         else:
-            primary_track = "python"
+            primary_track = default_track
 
         # Build an interleaved walk order: primary first, then the rest in a
         # stable order. Each round, take one candidate from each track in
         # walk order, until we hit `count` or exhaust all buckets.
-        track_order = [primary_track] + [t for t in TRACK_ORDER if t != primary_track]
+        track_order = [primary_track] + [
+            t for t in app_track_order if t != primary_track
+        ]
         result: list[dict] = []
         while len(result) < count:
             made_progress = False
@@ -688,12 +620,168 @@ class KnowledgeStore:
                 break
         return result
 
-    def record_quiz(self, quiz_data: dict) -> dict:
+    def get_domain_map(self, track: str) -> dict:
+        """The whole shape of one track: what is in it, in what order, how far off.
+
+        get_next_topic_suggestions answers "what can you start right now", which
+        for a track gated behind another track is nothing at all. Asking about
+        MLOps returned a single Python fundamentals concept, because all 15 ops
+        concepts sit behind ML prerequisites that are not recorded yet — the
+        tutor could not tell "this domain is empty" from "this domain is not
+        open yet", and fell back to asking the learner what MLOps contains.
+
+        So this returns every concept in the track, each marked with its status
+        and, when blocked, the specific prerequisites that are missing. Nothing
+        is filtered out; the caller gets the map and can describe the route.
+
+        `gateway_concepts` are the missing prerequisites that lie OUTSIDE this
+        track, ordered by how many of the track's concepts they unblock. That
+        is the actionable part of the answer: for a fully-gated track, the next
+        step is never in the track itself.
+        """
+        data = self.load_knowledge()
+        known = set(data["concepts"].keys())
+
+        concepts: list[dict] = []
+
+        for concept_id, info in CURRICULUM_GRAPH.items():
+            if info.get("track", "python") != track:
+                continue
+
+            prereqs = info["prereqs"]
+            missing = [p for p in prereqs if p not in known]
+
+            if concept_id in known:
+                status = data["concepts"][concept_id].get("mastery", "introduced")
+            elif missing:
+                status = "blocked"
+            else:
+                status = "available"
+
+            concepts.append({
+                "concept_id": concept_id,
+                "name": info["name"],
+                "category": info["category"],
+                "status": status,
+                "prerequisites": prereqs,
+                "missing_prerequisites": missing,
+            })
+
+        # Curriculum order within the track, so the list reads as a route
+        # rather than a set: available first, then by category priority.
+        status_rank = {"available": 0, "blocked": 1}
+        concepts.sort(key=lambda c: (
+            status_rank.get(c["status"], 2),
+            CATEGORY_PRIORITY.get(c["category"], 99),
+            c["concept_id"],
+        ))
+
+        # Gateways are counted TRANSITIVELY. Counting only direct dependents
+        # ranks every prerequisite equally — for a fully-gated track each one
+        # blocks exactly one concept, and the list says nothing about where to
+        # start. Walking the full unmet chain instead shows that
+        # sklearn_pipelines gates the entire serving line, while
+        # llm_evaluation gates one leaf.
+        def _unmet_chain(cid: str, seen: set[str]) -> set[str]:
+            """Every unmet prerequisite behind `cid`, transitively."""
+            out: set[str] = set()
+            for p in CURRICULUM_GRAPH.get(cid, {}).get("prereqs", []):
+                if p in known or p in seen:
+                    continue
+                seen.add(p)
+                out.add(p)
+                out |= _unmet_chain(p, seen)
+            return out
+
+        gateway_counts: dict[str, int] = {}
+        for c in concepts:
+            if c["status"] != "blocked":
+                continue
+            for p in _unmet_chain(c["concept_id"], set()):
+                # Only prerequisites outside this track are gateways. A missing
+                # in-track prereq resolves by learning the track in order and
+                # is already visible as that concept's own row.
+                if CURRICULUM_GRAPH.get(p, {}).get("track", "python") != track:
+                    gateway_counts[p] = gateway_counts.get(p, 0) + 1
+
+        # Entry points first: a gateway that is itself blocked cannot be
+        # started today, so a startable one outranks it at equal reach.
+        gateways = [
+            {
+                "concept_id": cid,
+                "name": CURRICULUM_GRAPH.get(cid, {}).get("name", cid),
+                "track": CURRICULUM_GRAPH.get(cid, {}).get("track", "python"),
+                "unblocks": n,
+                "startable": all(
+                    p in known
+                    for p in CURRICULUM_GRAPH.get(cid, {}).get("prereqs", [])
+                ),
+            }
+            for cid, n in gateway_counts.items()
+        ]
+        gateways.sort(key=lambda g: (not g["startable"], -g["unblocks"], g["concept_id"]))
+
+        return {
+            "track": track,
+            "track_name": TRACK_NAMES.get(track, track),
+            "total": len(concepts),
+            "available": sum(1 for c in concepts if c["status"] == "available"),
+            "blocked": sum(1 for c in concepts if c["status"] == "blocked"),
+            "known": sum(
+                1 for c in concepts
+                if c["status"] not in ("available", "blocked")
+            ),
+            "concepts": concepts,
+            "gateway_concepts": gateways,
+        }
+
+    def clear_struggle_area(self, concept_id: str, *, passed: bool) -> bool:
+        """Remove a concept from struggle_areas after a passed re-test.
+
+        struggle_areas used to be a one-way ratchet: record_quiz appended on a
+        wrong answer and nothing ever removed the entry, so a single miss was
+        reported in every system prompt forever. The live symptom was a concept
+        sitting at mastery="mastered" while the same prompt said the learner
+        struggled with it.
+
+        Clearing is deliberately not automatic. A flag is only lifted when the
+        learner asks to be re-tested and passes, so "no longer struggling" is
+        backed by evidence the learner chose to produce.
+
+        Returns True when the flag was actually removed.
+        """
+        if not passed:
+            return False
+
+        data = self.load_knowledge()
+        struggles = data["profile"].get("struggle_areas", [])
+        if concept_id not in struggles:
+            return False
+
+        struggles.remove(concept_id)
+        data["profile"]["struggle_areas"] = struggles
+        # Recorded rather than silently dropped: the learning path is the audit
+        # trail for every other mastery change, and a recovery is one too.
+        data["learning_path"].append({
+            "concept": concept_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "struggle_cleared",
+            "mastery": data["concepts"].get(concept_id, {}).get("mastery", ""),
+        })
+        self.save_knowledge(data)
+        logger.info(f"Struggle area '{concept_id}' cleared by passed re-test")
+        return True
+
+    def record_quiz(self, quiz_data: dict, retest_concept: str | None = None) -> dict:
         """Save quiz results and promote mastery for correct answers.
 
         quiz_data: {quiz_id, topics, questions: [{question, user_answer, correct, concept}], score, total}
 
-        Returns dict with mastery_changes.
+        retest_concept: set when the learner explicitly asked to be re-tested on
+        a flagged concept. Every question on that concept must be correct for
+        the struggle flag to clear; anything less leaves it in place.
+
+        Returns dict with mastery_changes and struggle_cleared.
         """
         now = datetime.now(timezone.utc).isoformat()
 
@@ -745,8 +833,10 @@ class KnowledgeStore:
                         "to": new_mastery,
                     })
             else:
-                # Note the struggle area
-                if concept_id not in data["profile"].get("struggle_areas", []):
+                # Note the struggle area. A failed re-test is exempt: the
+                # concept is already flagged, and re-appending would be a no-op
+                # that reads like a second, independent failure.
+                if concept_id != retest_concept and concept_id not in data["profile"].get("struggle_areas", []):
                     data["profile"].setdefault("struggle_areas", []).append(concept_id)
 
             concept["last_reviewed"] = now
@@ -760,7 +850,25 @@ class KnowledgeStore:
         })
 
         self.save_knowledge(data)
-        return {"mastery_changes": mastery_changes, "quiz_entry": quiz_entry}
+
+        # Evaluate the re-test after the quiz itself is saved, so clearing the
+        # flag reads the state this quiz just wrote (mastery promotions
+        # included) rather than a stale copy.
+        struggle_cleared = False
+        if retest_concept:
+            answers = [
+                q for q in quiz_data.get("questions", [])
+                if q.get("concept") == retest_concept
+            ]
+            # A re-test with no questions on the concept proves nothing.
+            passed = bool(answers) and all(q.get("correct") for q in answers)
+            struggle_cleared = self.clear_struggle_area(retest_concept, passed=passed)
+
+        return {
+            "mastery_changes": mastery_changes,
+            "quiz_entry": quiz_entry,
+            "struggle_cleared": struggle_cleared,
+        }
 
     def format_for_system_prompt(self) -> str:
         """Format the current knowledge state as a condensed string for system prompt injection."""

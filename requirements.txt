@@ -11,3 +11,53 @@ python-multipart
 # image dimensions. Imported lazily — without it the app still runs and only
 # PDF import is disabled.
 PyMuPDF
+# Checks each derivation step. sympy does the algebra; lark is the LaTeX parser
+# backend it uses. sympy also ships a parse_latex that needs the antlr4 runtime
+# instead — lark is the pure-Python one, so it is what we depend on. Without
+# lark every step verification fails closed and a derivation cannot be checked.
+sympy
+lark
+# Reads backend/curriculum/*.yaml. Already present transitively via chromadb,
+# but declared here because the curriculum will not load without it — an
+# indirect dependency that the app hard-requires is one upstream change away
+# from becoming a startup crash with a confusing traceback.
+pyyaml
+# The Sanskrit grammar engine: generates forms by Pāṇinian rule and returns the
+# sūtra chain behind them, which is what lets the Sanskrit tutor check a
+# declension instead of recalling one. Imported lazily — without it the app
+# still runs and the Sanskrit tools report "could not check" rather than
+# guessing.
+#
+# ⚠️ pip is only half the install. The wheel ships the engine but NOT the
+# linguistic data (Dhātupāṭha, kośa, segmentation model) — that is a separate
+# ~32 MB bundle, and without it √gam, √sthā, √dṛś, the dictionary and
+# segmentation are all unavailable:
+#
+#     python -m backend.sanskrit_setup
+#
+# If that fails — some corporate TLS-inspecting proxies (Netskope and the like)
+# block GitHub's release-asset host while allowing github.com, so the download
+# gets an HTML error page instead of a zip — fetch the file by hand from
+#   https://github.com/ambuda-org/vidyut/releases/tag/py-0.4.0
+# and adopt it:
+#
+#     python -m backend.sanskrit_setup --adopt ~/Downloads/data-0.4.0.zip
+#
+# The bundle lands in data/vidyut/, which is gitignored: it is 31 MB of
+# generated data with its own upstream release, not source.
+vidyut
+# Script conversion (Devanagari/IAST/SLP1). vidyut.lipi covers what we use
+# today, but this is the maintained standalone and the fallback if the bindings
+# lag the Rust crates, which they currently do by ~19 months.
+indic-transliteration
+# Fetches a book PDF the learner (or the tutor) pointed at a URL, and queries
+# the archive.org / Google Books metadata APIs to resolve a details page to a
+# real download. Already present transitively via fastapi's TestClient and
+# chromadb, but declared because backend/bookresolve.py imports it directly:
+# an indirect dependency the app hard-requires is one upstream change away
+# from a confusing import error.
+#
+# Needed for its redirect control specifically. Book URLs come from the MODEL,
+# so every hop has to be re-checked against the SSRF rules rather than followed
+# blindly — that means follow_redirects=False and walking them by hand.
+httpx

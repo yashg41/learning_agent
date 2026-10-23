@@ -3,7 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PyMentor — Memory Explorer</title>
+    <title>Memory Explorer</title>
+    <!-- First, and synchronous: defines window.APP before the theme script
+         below reads it. This page is shared by both tutors and the server is
+         what knows which one is serving it. -->
+    <script src="/api/app.js"></script>
+    <!-- /static is mounted per app, so this is already the right theme. -->
     <link rel="stylesheet" href="/static/tokens.css">
     <link rel="stylesheet" href="/api/palette.css">
     <script>
@@ -11,7 +16,7 @@
         (function () {
             var forced = new URLSearchParams(location.search).get('theme');
             var saved = null;
-            try { saved = localStorage.getItem('pymentor:theme'); } catch (e) {}
+            try { saved = localStorage.getItem((window.APP || 'pymentor') + ':theme'); } catch (e) {}
             var prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
             var t = (forced === 'light' || forced === 'dark') ? forced
                   : saved || (prefersLight ? 'light' : 'dark');
@@ -425,11 +430,11 @@
 <body>
     <!-- Same top bar as the chat and graph pages. -->
     <div class="topbar">
-        <div class="brand"><span class="brand-mark">P</span> PyMentor</div>
+        <div class="brand"><span class="brand-mark" id="brand-mark">P</span> <span id="brand-name">PyMentor</span></div>
         <nav class="topnav">
             <a href="/" class="topnav-link">Chat</a>
             <a href="/graph" class="topnav-link">Knowledge Graph</a>
-            <a href="/chroma" class="topnav-link active">Memory</a>
+            <a href="/memory" class="topnav-link active">Memory</a>
         </nav>
         <div class="topbar-right">
             <button class="btn-ghost" id="theme-btn" onclick="toggleTheme()">◐ Light</button>
@@ -476,6 +481,28 @@
 
     <script>
         const API = "";
+
+        // Which tutor's memory this is. The server tells us via /api/app.js —
+        // this process serves one app and reads one Chroma store, so there is
+        // nothing to infer. Before the apps were split this page had no notion
+        // of an app at all, which is why /sanskrit/memory used to show
+        // PyMentor's memories.
+        const APP = window.APP || "pymentor";
+
+        if (APP === "sanskrit") {
+            document.addEventListener("DOMContentLoaded", () => {
+                document.title = "संस्कृतम् — memory";
+                const mark = document.getElementById("brand-mark");
+                const name = document.getElementById("brand-name");
+                if (mark) mark.textContent = "सं";
+                if (name) name.textContent = "Sanskrit";
+            });
+        } else {
+            document.addEventListener("DOMContentLoaded", () => {
+                document.title = "PyMentor — Memory Explorer";
+            });
+        }
+
         let allDocs = [];
         let allPoints = [];
         let highlightedIdx = -1;
@@ -602,7 +629,7 @@
             const btn = document.getElementById("theme-btn");
             if (btn) btn.textContent = t === "light" ? "\u25d1 Dark" : "\u25d0 Light";
             if (persist) {
-                try { localStorage.setItem("pymentor:theme", t); } catch (e) {}
+                try { localStorage.setItem(APP + ":theme", t); } catch (e) {}
             }
             if (typeof renderScatter === "function") renderScatter();
         }
@@ -650,7 +677,7 @@
                             ${isSearch ? `<span class="doc-similarity">${(d._similarity * 100).toFixed(1)}% match</span>` : ""}
                             ${d.session_id ? `
                                 <a class="doc-open" title="Open this conversation and keep going"
-                                   href="/?session=${encodeURIComponent(d.session_id)}&email=${encodeURIComponent(d.email || "")}"
+                                   href="/?session=${encodeURIComponent(d.session_id)}&email=${encodeURIComponent((d.email || "").toLowerCase())}"
                                    onclick="event.stopPropagation()">open session →</a>` : ""}
                         </div>`;
 

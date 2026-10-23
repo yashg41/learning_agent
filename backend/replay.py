@@ -9,12 +9,19 @@ import json
 import os
 import re
 import logging
-from pathlib import Path
 
 from backend.config import settings
-from backend.memory import USERS_DIR, _safe_email, save_summary, get_summary, get_session_dir
+from backend import memory
+from backend.memory import _safe_email, save_summary, get_summary, get_session_dir
 
 logger = logging.getLogger(__name__)
+
+# Ceiling on how much prior conversation a restore replays in one prompt.
+# ~150k chars is roughly 40k tokens, which leaves ample room for the system
+# prompt, the tools and the turn itself. Unbounded, this same code path is
+# what fails when rescuing a session that outgrew the context window — the
+# rescue would hit the very limit it exists to escape.
+MAX_REPLAY_CHARS = 150_000
 
 
 def _get_claude_project_dir() -> str:
@@ -23,12 +30,17 @@ def _get_claude_project_dir() -> str:
     Must match the slug the bundled CLI derives from `options.cwd`
     (see backend.agent.PROJECT_ROOT). The CLI replaces every non-alnum
     char — including underscore — with a dash.
+
+    Rooted at agent.CLAUDE_CONFIG_DIR, which is what the CLI is given as
+    CLAUDE_CONFIG_DIR. These two must agree: if this looked in ~/.claude while
+    the CLI wrote elsewhere, session_exists_in_claude would answer False for
+    every session and each one would silently fall back to a full replay.
     """
-    from backend.agent import PROJECT_ROOT
+    from backend.agent import CLAUDE_CONFIG_DIR, PROJECT_ROOT
     project_slug = re.sub(r"[^a-zA-Z0-9\-]", "-", PROJECT_ROOT)
     if project_slug.startswith("-"):
         project_slug = project_slug[1:]
-    return os.path.join(str(Path.home()), ".claude", "projects", f"-{project_slug}")
+    return os.path.join(CLAUDE_CONFIG_DIR, "projects", f"-{project_slug}")
 
 
 def session_exists_in_claude(session_id: str) -> bool:
@@ -45,9 +57,10 @@ def session_exists_in_memory(email: str, session_id: str) -> bool:
     the directory as a side effect — asking whether a session exists should
     not bring it into existence.
     """
-    from backend.memory import USERS_DIR, _safe_email
+    from backend import memory
+    from backend.memory import _safe_email
 
-    session_dir = os.path.join(USERS_DIR, _safe_email(email), "sessions", session_id)
+    session_dir = os.path.join(memory.USERS_DIR, _safe_email(email), "sessions", session_id)
     return os.path.isfile(os.path.join(session_dir, "conversation.jsonl")) or os.path.isfile(
         os.path.join(session_dir, "conversation.json")
     )
@@ -135,7 +148,7 @@ async def replay_from_memory(email: str, session_id: str, system_prompt: str | N
     # Check if we have a compacted summary
     summary_data = get_summary(email, session_id)
 
-    user_data_dir = os.path.join(USERS_DIR, safe)
+    user_data_dir = os.path.join(memory.USERS_DIR, safe)
 
     if summary_data:
         # Strategy 1: Summary-based restore
@@ -190,12 +203,40 @@ async def replay_from_memory(email: str, session_id: str, system_prompt: str | N
             elif turn_type == "result":
                 transcript_parts.append(f"Agent: {content}")
 
+        # Keep the most recent turns, not the first ones. This restore also
+        # runs as the rescue for a session that grew PAST the context window,
+        # so replaying all of it unbounded would fail for exactly the reason it
+        # was called — and the recent end of a conversation is what the next
+        # turn actually needs. Older material is not lost: it is in episodic
+        # memory and in the knowledge graph, both of which the system prompt
+        # already carries.
         transcript = "\n\n".join(transcript_parts)
+        truncated = False
+        if len(transcript) > MAX_REPLAY_CHARS:
+            kept = []
+            total = 0
+            for part in reversed(transcript_parts):
+                total += len(part) + 2
+                if total > MAX_REPLAY_CHARS:
+                    break
+                kept.append(part)
+            transcript = "\n\n".join(reversed(kept))
+            truncated = True
+            logger.info(
+                f"Replay transcript trimmed to the last {len(kept)} turn(s) "
+                f"({len(transcript):,} chars) to fit the context window"
+            )
 
         context_prompt = (
             "This session is being restored from a saved conversation transcript. "
-            "Below is the previous conversation:\n\n"
-            f"{transcript}\n\n"
+            + (
+                "It was long, so this is the most recent part of it — earlier "
+                "material is in your memory tools and the learner's progress "
+                "record if you need it.\n\n"
+                if truncated else
+                "Below is the previous conversation:\n\n"
+            )
+            + f"{transcript}\n\n"
             "The conversation continues from here. Please acknowledge briefly that you have the context."
         )
 
