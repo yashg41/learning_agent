@@ -77,3 +77,38 @@ def _fail_if_tests_touched_live_data():
             + "\nPatch the module constant, not settings.DATA_DIR: USERS_DIR is"
             + " bound at import time. See backend/tests/conftest.py."
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests that need the Sanskrit tutor.
+#
+# main carries PyMentor only: no backend/prompt_files/sanskrit, no
+# sanskrit.yaml, and `sanskrit` is not a known app there. The full feature
+# branch has all three. These tests exercise behaviour that only exists with a
+# second app present (per-app ports, data roots, prompt overrides, tool
+# families), so on main they fail with "Unknown app 'sanskrit'" — not a
+# regression, just a missing app.
+#
+# Marking them, rather than deleting them from main's copy, keeps one set of
+# test files correct on both branches: they run wherever the Sanskrit tutor
+# exists and skip, saying why, where it does not.
+# ---------------------------------------------------------------------------
+
+_SANSKRIT_PRESENT = os.path.isdir(
+    os.path.join(_REPO_ROOT, "backend", "prompt_files", "sanskrit")
+)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "sanskrit: needs the Sanskrit tutor, which main does not ship"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if _SANSKRIT_PRESENT:
+        return
+    skip = pytest.mark.skip(reason="Sanskrit tutor not present on this branch")
+    for item in items:
+        if "sanskrit" in item.keywords:
+            item.add_marker(skip)

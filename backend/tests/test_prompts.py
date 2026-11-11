@@ -184,6 +184,7 @@ def test_common_and_app_sections_interleave_by_number():
     )
 
 
+@pytest.mark.sanskrit
 def test_an_app_file_overrides_a_common_file_of_the_same_name(tmp_path, monkeypatch):
     """The override hatch: copy the file into <app>/ and edit it there."""
     import backend.prompts as prompts
@@ -237,6 +238,7 @@ def test_builder_prompts_default_to_the_shared_copy():
     assert "interactive HTML demo" in demo_builder_prompt()
 
 
+@pytest.mark.sanskrit
 def test_reading_section_sits_between_correctness_and_web_lookup():
     """The order carries meaning: the correctness rules are established before
     reading (a printed form is not a verified one), and web lookup follows

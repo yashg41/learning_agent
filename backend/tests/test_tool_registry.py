@@ -111,6 +111,7 @@ def test_families_referenced_by_apps_all_exist():
             assert family in known, f"app '{app}' names unknown family '{family}'"
 
 
+@pytest.mark.sanskrit
 def test_allowlist_and_registered_tools_cannot_drift(tmp_path):
     """The invariant that keeps the two lists honest.
 

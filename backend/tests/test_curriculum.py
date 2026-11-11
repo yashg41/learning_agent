@@ -166,6 +166,7 @@ def test_identity_line_names_no_other_app_tracks():
             )
 
 
+@pytest.mark.sanskrit
 def test_single_track_app_reads_naturally():
     """One track should just be named, not dressed up as a lead plus a tail."""
     assert taught_domains("sanskrit") == "Sanskrit"

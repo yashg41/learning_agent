@@ -299,6 +299,7 @@ def test_no_resend_for_a_missing_book(email):
 # --- The whole lifecycle, through run_agent ---------------------------------
 
 
+@pytest.mark.sanskrit
 def test_page_images_are_sent_once_per_position_per_session(email, monkeypatch):
     """The end-to-end contract, exercised through run_agent.
 
@@ -356,6 +357,7 @@ def test_page_images_are_sent_once_per_position_per_session(email, monkeypatch):
     assert turn() == 0
 
 
+@pytest.mark.sanskrit
 def test_book_pages_are_never_written_to_uploads(email, monkeypatch):
     """saved_attachments must stay empty for a turn whose only images are
     book pages: they are server-generated, already on disk, and regenerable."""

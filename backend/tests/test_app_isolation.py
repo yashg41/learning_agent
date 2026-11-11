@@ -64,6 +64,7 @@ def test_an_unknown_app_fails_at_startup():
         _settings("sanskirt")
 
 
+@pytest.mark.sanskrit
 def test_an_explicit_data_dir_still_wins():
     """The sentinel-default must not become a hardcoded value.
 
@@ -76,6 +77,7 @@ def test_an_explicit_data_dir_still_wins():
     assert s.CHROMA_DIR == os.path.join("/tmp/elsewhere", "chroma")
 
 
+@pytest.mark.sanskrit
 def test_every_app_has_a_port_and_none_collide():
     assert set(_APP_PORTS) == set(APP_TRACKS), "an app has no port assigned"
     assert len(set(_APP_PORTS.values())) == len(_APP_PORTS)
