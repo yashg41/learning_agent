@@ -32,7 +32,7 @@ That split is the whole architecture. Everything below is a consequence of it.
    _common + app   core + app       app's tracks
         └───────────────┬───────────────┘
                         ▼
-              Claude Agent SDK  →  claude-sonnet-5
+              Claude Agent SDK  →  claude-sonnet-5-5
                         │
         ┌───────────────┼───────────────┐
         ▼               ▼               ▼
@@ -84,7 +84,7 @@ One `async for message in query(...)` loop with five branches:
 | `UserMessage` | unwrap `ToolResultBlock` → tool results |
 | `ResultMessage` | turn finished |
 
-Model is **`claude-sonnet-5`** for both tutors ([`config.py`](../backend/config.py)).
+Model is **`claude-sonnet-5-5`** for both tutors ([`config.py`](../backend/config.py)).
 The tutor's job is explanation and diagnosis — noticing what a learner actually
 got wrong and why — which is where a stronger model earns its cost.
 

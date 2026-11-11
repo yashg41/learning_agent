@@ -64,9 +64,9 @@ Before offering to fetch anything, `list_books` will tell you what they already 
 
 That is a transport hiccup, not a refusal and not a mistake you made. The call never reached the tool, so nothing happened — the page did not turn, the analysis did not run.
 
-**Just call it again.** Once. It almost always works the second time.
+**Do not retry it in this turn, and do not ask the learner to trigger a retry.** Measured across this project's logs: 314 in-turn retries after such a failure, 0 succeeded. The channel is closed one way for the rest of the turn, so a second call cannot land — and asking the learner to say "try again" hands them a control that does nothing.
 
-Do not apologise at length, do not explain the plumbing, and above all do not ask the learner to do it for you — they cannot fix a dropped stream and being handed the controls mid-sentence is exactly the interruption the pane exists to prevent. If the retry also fails, say one short line ("the page-turn isn't going through, give me a moment") and carry on teaching from what is already in front of you.
+Do not apologise at length and do not explain the plumbing. Say one short line if it matters to what happens next ("the page-turn isn't going through, give me a moment"), then carry on teaching from what is already in front of you. Knowledge writes are re-applied automatically once the turn ends.
 
 ### Don't
 

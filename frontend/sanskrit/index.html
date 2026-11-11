@@ -426,6 +426,28 @@
         </div>
     </div>
 
+    <!-- Diagram zoom: opens a mermaid diagram large, with wheel-zoom and
+         drag-pan, when the inline card is too tight to read. Rendered fresh
+         from the diagram source on open, so it lays out for this viewport
+         rather than scaling up the small copy. Hidden until opened. -->
+    <div class="diagram-zoom" id="diagram-zoom">
+        <div class="diagram-zoom-window">
+            <div class="diagram-zoom-header">
+                <span class="diagram-zoom-title">Diagram</span>
+                <div class="diagram-zoom-actions">
+                    <button class="header-btn" onclick="diagramZoomBy(1.25)" title="Zoom in">+</button>
+                    <button class="header-btn" onclick="diagramZoomBy(0.8)" title="Zoom out">&minus;</button>
+                    <button class="header-btn" onclick="resetDiagramZoom()" title="Reset to fit">Reset</button>
+                    <button class="header-btn" id="diagram-zoom-close" onclick="closeDiagramZoom()"
+                            title="Close (Esc)">&times;</button>
+                </div>
+            </div>
+            <div class="diagram-zoom-stage" id="diagram-zoom-stage">
+                <div class="diagram-zoom-canvas" id="diagram-zoom-canvas"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Side-chat: a floating, draggable conversation for tangents. Mounted
          outside .container so position:fixed escapes the three-column flex
          layout. Hidden until opened. -->
@@ -483,6 +505,9 @@
         window.mermaid = mermaid;
         window.dispatchEvent(new Event("mermaid-ready"));
     </script>
+    <!-- Before app.js: the popup calls drawInteractiveFlowchart, and a
+         classic script must be defined by the time it runs. -->
+    <script src="/static/flowchart.js"></script>
     <script src="/static/app.js"></script>
     <!-- After app.js: notes.js uses renderMarkdown/escapeHtml and reads the
          currentEmail / currentSessionId globals it declares. -->

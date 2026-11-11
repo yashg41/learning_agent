@@ -355,13 +355,18 @@ code, pre, kbd, samp,
     opacity: 1;
 }
 
-/* With both rails hidden the thread would stretch the full window and
-   strand the text on the left, so cap and centre it. */
+/* With both rails hidden the whole window IS the chat, so the column fills it
+   and takes a wider gutter rather than stopping at a fixed cap. A max-width
+   here used to strand a broad empty band down the right on a large screen —
+   the window was all chat, yet the content refused to use it.
+
+   Gutter, not cap: padding scales with the viewport and leaves no dead space,
+   and because header, thread and composer all take the SAME padding, their
+   edges stay aligned in this mode exactly as they are outside it. */
+.container.focused .chat-header,
 .container.focused .chat-messages,
 .container.focused .chat-input-area {
-    max-width: 900px;
-    width: 100%;
-    margin-inline: auto;
+    padding-inline: clamp(20px, 4vw, 64px);
 }
 
 /* Notebook pane */
@@ -592,9 +597,10 @@ code, pre, kbd, samp,
 }
 
 .message {
-    /* Capped by characters, not percent: past ~70ch the eye loses its place
-       on the return sweep, and that limit shouldn't move with window width. */
-    max-width: var(--measure);
+    /* No width cap here. The thread's single column lives on .chat-messages so
+       every kind of content lines up with every other; capping the message too
+       would be a second, competing edge. .message.user takes its own bubble
+       width below — that is bubble shape, not the text column. */
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-lg);
     font-size: var(--text-base);
@@ -603,7 +609,11 @@ code, pre, kbd, samp,
     position: relative;
 }
 
+/* The user's own turns stay a bubble: one running the full column would read
+   as a wall rather than something said. A fraction, not --measure, because
+   this is the bubble's shape and must not become a second text-column edge. */
 .message.user {
+    max-width: min(80%, var(--measure));
     align-self: flex-end;
     background: var(--accent);
     color: var(--accent-contrast);
@@ -623,6 +633,18 @@ code, pre, kbd, samp,
     font-size: var(--text-md);
     line-height: var(--leading-prose);
     white-space: normal;
+}
+
+/* One column, one edge.
+   An earlier attempt gave figures their own wider cap while prose kept 68ch.
+   That produced two right edges in the same turn — a code block ran 500px past
+   the paragraph beneath it — because two different caps were competing.
+
+   The assistant turn now simply fills its container, and .chat-messages owns
+   the single width. Everything inside — prose, code, tables, diagrams —
+   therefore shares one edge for free, and they stretch and shrink together. */
+.message.assistant {
+    width: 100%;
 }
 
 /* Thinking indicator — shown in the message flow while waiting for the
@@ -668,6 +690,13 @@ code, pre, kbd, samp,
 
 .thinking-label {
     color: var(--text-muted);
+}
+
+/* Compaction is a minutes-long wait, well past what the elapsed timer alone
+   can vouch for — at 201s it was reported as a crash. The accent colour marks
+   it as a deliberate state the app knows it is in, not a stall. */
+.thinking-indicator.is-compacting .thinking-label {
+    color: var(--accent);
 }
 
 /* Elapsed seconds — the signal that separates "working" from "hung". */
@@ -2098,9 +2127,67 @@ code, pre, kbd, samp,
     text-align: center;
 }
 
+/* Must agree with flowchart.useMaxWidth in initMermaid — the flag decides which
+   attributes mermaid writes, and this rule has to match them:
+       useMaxWidth true  -> width="100%" + style="max-width:Wpx", NO height attr
+       useMaxWidth false -> width="W" and height="H" as explicit attributes
+   We use false, so mermaid supplies both dimensions. A max-width here shrank
+   the painted width while height="H" kept reserving the unscaled height, and
+   the difference — H − (H × rendered/W) — painted as a dead band under every
+   diagram. Let the attributes govern; .mermaid-figure's overflow-x does the
+   scrolling for anything genuinely wider than the column. */
 .message.assistant .mermaid-figure svg {
-    max-width: 100%;
+    max-width: none;
     height: auto;
+}
+
+/* Flowchart labels are HTML in a <foreignObject>. Mermaid sizes that element
+   by measuring the inner div:
+       bbox = div.getBoundingClientRect()
+       fo.attr("width", bbox.width); fo.attr("height", bbox.height)
+   and a foreignObject clips to exactly those dimensions. So the measured box
+   IS the clip box, and anything that makes a glyph paint outside it is cut.
+
+   .message.assistant sets line-height: var(--leading-prose) (1.65), which the
+   div inherits. Mermaid's own font-size is 14px, so the div measures 23.1px
+   while the span's inline box is centred inside it — leaving descenders
+   sitting on the boundary, and a two-line label cut through its second row.
+
+   The fix is to make the measurement agree with the painting rather than to
+   fight it: a line-height of exactly 1 on the div means the measured height
+   is the glyph box, and the explicit padding below then adds real room for
+   descenders INSIDE the measured area, so it is part of the clip box instead
+   of overflowing it. Padding, not a larger line-height, because mermaid
+   centres the shape on the measured box — extra leading would re-centre the
+   text rather than give it headroom. */
+.message.assistant .mermaid-figure foreignObject > div,
+.diagram-zoom-canvas foreignObject > div {
+    line-height: 1.2;
+    padding: 2px 1px;
+    /* Mermaid sets both of these inline; restating them keeps the app's own
+       prose rules (white-space: normal on .message.assistant) from changing
+       how the label is measured. */
+    display: inline-block;
+    white-space: nowrap;
+}
+
+/* The span carries the text. It must not introduce a second, different line
+   box inside the div that was measured. */
+.message.assistant .mermaid-figure foreignObject .nodeLabel,
+.message.assistant .mermaid-figure foreignObject .edgeLabel,
+.diagram-zoom-canvas foreignObject .nodeLabel,
+.diagram-zoom-canvas foreignObject .edgeLabel {
+    line-height: inherit;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* A label mermaid split across lines (it turns \n into <br/>) needs the div
+   to grow to both rows. nowrap above governs wrapping, not explicit breaks,
+   so the height follows from the two line boxes. */
+.message.assistant .mermaid-figure foreignObject > div br,
+.diagram-zoom-canvas foreignObject > div br {
+    line-height: inherit;
 }
 
 /* Invalid diagram source falls back to showing the source; it is already
@@ -2114,6 +2201,187 @@ code, pre, kbd, samp,
     color: var(--text-muted);
     font-size: var(--text-sm);
 }
+
+/* Clicking a node asks the tutor about that step. Only the hit area gets
+   the affordance — the arrows and labels between nodes are not clickable. */
+/* Expand control, revealed on hover like the code-run button. position:
+   relative on the figure is what anchors it; the figure scrolls its diagram
+   horizontally, so the button is pinned to the card rather than the SVG and
+   stays reachable however far the diagram is scrolled. */
+.message.assistant .mermaid-figure { position: relative; }
+
+.diagram-expand-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease);
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 2px 7px;
+    font-size: var(--text-base);
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.message.assistant .mermaid-figure:hover .diagram-expand-btn,
+.diagram-expand-btn:focus {
+    opacity: 1;
+}
+
+.diagram-expand-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+/* --- Diagram zoom window --------------------------------------------- */
+.diagram-zoom {
+    position: fixed;
+    inset: 0;
+    display: none;          /* JS sets flex to open; the Esc handler reads this */
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+    /* Above the side-chat window (100), which is otherwise the ceiling. */
+    z-index: 200;
+}
+
+.diagram-zoom-window {
+    display: flex;
+    flex-direction: column;
+    width: min(92vw, 1400px);
+    height: min(88vh, 900px);
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+}
+
+.diagram-zoom-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-strong);
+    background: var(--bg-secondary);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.diagram-zoom-actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* The viewport. overflow: hidden because panning moves the canvas by
+   transform — a scrollbar here would fight the drag. */
+.diagram-zoom-stage {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    cursor: grab;
+    touch-action: none;     /* let pointermove pan instead of scrolling */
+}
+
+.diagram-zoom-stage.is-panning { cursor: grabbing; }
+
+/* Transformed as one unit. The origin is top-left so the zoom maths in
+   setZoomScale can treat translate and scale as a plain affine pair. */
+.diagram-zoom-canvas {
+    transform-origin: 0 0;
+    /* No padding, and not inline-block: the fit-and-centre maths in
+       drawInteractiveFlowchart positions this element from the stage's size
+       and the SVG's own width/height, so any extra box around the SVG would
+       offset the result. Breathing room comes from the viewBox padding
+       instead, which is inside the coordinate space the maths uses. */
+    display: block;
+    width: max-content;
+}
+
+/* Nothing is clipped or scaled down here — that is the whole point of the
+   window, so the figure's max-width rules must not follow the SVG in. */
+.diagram-zoom-canvas svg {
+    max-width: none;
+    height: auto;
+}
+
+/* --- Interactive flowchart (frontend/flowchart.js) -------------------
+   Drawn from a live model rather than mermaid's baked SVG, so the colours
+   come from tokens directly instead of being threaded through mermaid's
+   themeVariables. Text is real <text>, which cannot clip the way a
+   <foreignObject> does. */
+/* The SVG paints no background of its own, so the stage's colour shows
+   through and there is no visible "sheet edge" partway across the popup —
+   the surface reads as the whole window. Its width/height attributes still
+   govern the layout box (and the fit maths), so this only removes the
+   visual boundary, it does not resize anything. */
+.diagram-zoom-canvas .fc-svg {
+    display: block;
+    background: none;
+    overflow: visible;
+}
+
+.fc-shape {
+    fill: var(--bg-tertiary);
+    stroke: var(--border-strong);
+    stroke-width: 1;
+}
+
+.fc-node { cursor: move; }
+.fc-node:hover .fc-shape { stroke: var(--accent); stroke-width: 2; }
+
+.fc-label {
+    fill: var(--text-bright);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    /* Pointer events belong to the shape, so a drag started on the text does
+       not get swallowed by the text node itself. */
+    pointer-events: none;
+    user-select: none;
+}
+
+.fc-edge {
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    fill: none;
+}
+
+.fc-edge-dotted { stroke-dasharray: 4 3; }
+
+.fc-arrow-head { fill: var(--text-muted); }
+
+.fc-edge-label {
+    fill: var(--text-dim);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    pointer-events: none;
+    user-select: none;
+}
+
+/* Subgraph frames sit behind everything; the fill is barely-there so a node
+   inside one still reads against the page rather than on a slab. */
+.fc-group {
+    fill: var(--bg-secondary);
+    stroke: var(--border-strong);
+    stroke-width: 1;
+    opacity: 0.55;
+}
+
+.fc-group-title {
+    fill: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    pointer-events: none;
+    user-select: none;
+}
+
+
 
 /* Clicking a node asks the tutor about that step. Only the hit area gets
    the affordance — the arrows and labels between nodes are not clickable. */
